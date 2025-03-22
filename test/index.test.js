@@ -6,6 +6,27 @@ const path = require('path');
 // Mock fs.writeFileSync
 fs.writeFileSync = jest.fn();
 
+// Mock node-fetch
+jest.mock('node-fetch', () => jest.fn(() => 
+  Promise.resolve({
+    ok: true,
+    text: () => Promise.resolve('{}')
+  })
+));
+
+// Mock child_process.execSync for git detection
+jest.mock('child_process', () => ({
+  execSync: jest.fn((command) => {
+    if (command.includes('rev-parse --abbrev-ref HEAD')) {
+      return 'test-branch';
+    }
+    if (command.includes('remote.origin.url')) {
+      return 'https://github.com/codepress/test-repo.git';
+    }
+    return '';
+  })
+}));
+
 describe('codepress-html-babel-plugin', () => {
   beforeEach(() => {
     // Clear mocks between tests
@@ -88,5 +109,110 @@ describe('codepress-html-babel-plugin', () => {
 
     // Should not add attribute to node_modules files
     expect(code).not.toContain('codepress-data-fp');
+  });
+
+  it('enables backend sync when config options are provided', () => {
+    const fetch = require('node-fetch');
+    const example = '<div></div>';
+
+    babel.transform(example, {
+      filename: 'src/Test.js',
+      plugins: [[plugin, { 
+        syncWithBackend: true,
+        repositoryId: '123',
+        apiToken: 'test-token', 
+        backendUrl: 'https://example.com'
+      }]],
+      presets: ['@babel/preset-react']
+    });
+
+    // Get post hook to run
+    const pluginInstance = plugin(babel);
+    pluginInstance.post();
+
+    // Wait for promises to resolve
+    return new Promise(process.nextTick).then(() => {
+      // Verify fetch was called with correct URL and options
+      expect(fetch).toHaveBeenCalledWith(
+        'https://example.com/api/bulk-file-mappings',
+        expect.objectContaining({
+          method: 'POST',
+          headers: expect.objectContaining({
+            'Authorization': 'Bearer test-token'
+          })
+        })
+      );
+    });
+  });
+  
+  it('auto-detects git branch when branch option is not provided', () => {
+    const fetch = require('node-fetch');
+    const { execSync } = require('child_process');
+    const example = '<div></div>';
+
+    babel.transform(example, {
+      filename: 'src/Test.js',
+      plugins: [[plugin, { 
+        syncWithBackend: true,
+        repositoryId: '123',
+        apiToken: 'test-token',
+        backendUrl: 'https://example.com'
+      }]],
+      presets: ['@babel/preset-react']
+    });
+
+    // Get post hook to run
+    const pluginInstance = plugin(babel);
+    pluginInstance.post();
+
+    // Wait for promises to resolve
+    return new Promise(process.nextTick).then(() => {
+      // Verify execSync was called to get the branch
+      expect(execSync).toHaveBeenCalledWith('git rev-parse --abbrev-ref HEAD', expect.any(Object));
+      
+      // Verify the auto-detected branch ('test-branch' from our mock) was used
+      expect(fetch).toHaveBeenCalledWith(
+        'https://example.com/api/bulk-file-mappings',
+        expect.objectContaining({
+          method: 'POST',
+          body: expect.stringContaining('"branch":"test-branch"')
+        })
+      );
+    });
+  });
+  
+  it('auto-detects git repository ID when repositoryId option is not provided', () => {
+    const fetch = require('node-fetch');
+    const { execSync } = require('child_process');
+    const example = '<div></div>';
+
+    babel.transform(example, {
+      filename: 'src/Test.js',
+      plugins: [[plugin, { 
+        syncWithBackend: true,
+        apiToken: 'test-token',
+        backendUrl: 'https://example.com'
+      }]],
+      presets: ['@babel/preset-react']
+    });
+
+    // Get post hook to run
+    const pluginInstance = plugin(babel);
+    pluginInstance.post();
+
+    // Wait for promises to resolve
+    return new Promise(process.nextTick).then(() => {
+      // Verify execSync was called to get the remote URL
+      expect(execSync).toHaveBeenCalledWith('git config --get remote.origin.url', expect.any(Object));
+      
+      // Verify the auto-detected repository ID ('codepress/test-repo' from our mock) was used
+      expect(fetch).toHaveBeenCalledWith(
+        'https://example.com/api/bulk-file-mappings',
+        expect.objectContaining({
+          method: 'POST',
+          body: expect.stringContaining('"repository_id":"codepress/test-repo"')
+        })
+      );
+    });
   });
 });
