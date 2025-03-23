@@ -10,6 +10,11 @@ fs.writeFileSync = jest.fn();
 jest.mock('node-fetch', () => jest.fn(() => 
   Promise.resolve({
     ok: true,
+    json: () => Promise.resolve({
+      created_count: 5,
+      updated_count: 2,
+      total_mappings: 7
+    }),
     text: () => Promise.resolve('{}')
   })
 ));
@@ -78,24 +83,30 @@ describe('codepress-html-babel-plugin', () => {
     expect(code).not.toContain('codepress-data-fp');
   });
 
-  it('writes file mapping to the specified output path', () => {
-    const example = '<div></div>';
+  it('adds repository and branch info to container elements', () => {
+    const example = `
+      function App() {
+        return (
+          <div>
+            <h1>Hello World</h1>
+          </div>
+        );
+      }
+    `;
 
-    babel.transform(example, {
-      filename: 'src/Test.js',
-      plugins: [[plugin, { outputPath: 'custom-map.json' }]],
+    const { code } = babel.transform(example, {
+      filename: 'src/App.js',
+      plugins: [plugin],
       presets: ['@babel/preset-react']
     });
 
-    // Get post hook to run
-    const pluginInstance = plugin(babel);
-    pluginInstance.post();
-
-    // Verify write was called with correct path
-    expect(fs.writeFileSync).toHaveBeenCalledWith(
-      'custom-map.json',
-      expect.any(String)
-    );
+    // Verify repository and branch attributes were added to the div
+    expect(code).toContain('codepress-github-repo-name');
+    expect(code).toContain('codepress-github-branch');
+    
+    // Verify values are not hashed
+    expect(code).toContain('"codepress/test-repo"');
+    expect(code).toContain('"test-branch"');
   });
 
   it('skips files in node_modules', () => {
@@ -210,7 +221,7 @@ describe('codepress-html-babel-plugin', () => {
         'https://example.com/api/bulk-file-mappings',
         expect.objectContaining({
           method: 'POST',
-          body: expect.stringContaining('"repository_id":"codepress/test-repo"')
+          body: expect.stringContaining('"repository_name":"codepress/test-repo"')
         })
       );
     });

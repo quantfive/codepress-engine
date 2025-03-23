@@ -30,7 +30,11 @@ module.exports = {
     ['codepress-html', {  // Babel will resolve this to babel-plugin-codepress-html
       // File output options
       outputPath: 'custom-file-map.json', // default: 'file-hash-map.json'
+      
+      // HTML attribute options
       attributeName: 'data-fp', // default: 'codepress-data-fp'
+      repoAttributeName: 'codepress-github-repo-name', // default: 'codepress-github-repo-name'
+      branchAttributeName: 'codepress-github-branch', // default: 'codepress-github-branch'
       
       // Database connection options 
       backendUrl: 'https://api.codepress.example.com', // default: auto-detects based on environment
@@ -91,11 +95,77 @@ module.exports = {
 This plugin:
 
 1. Generates a unique hash for each file processed by Babel
-2. Adds a custom attribute to all JSX opening elements with the file's hash
-3. Creates a mapping file (file-hash-map.json) that connects hashes to file paths
-4. Optionally syncs the file mappings with a CodePress backend server
+2. Adds file hash attributes to all JSX opening elements:
+   - `codepress-data-fp` - Contains the file's unique hash on each element
+3. Adds repository information to container elements (html, body, or div):
+   - `codepress-github-repo-name` - Contains the repository name (owner/repo)
+   - `codepress-github-branch` - Contains the branch name
+4. Creates a mapping file (file-hash-map.json) that connects hashes to file paths
+5. Optionally syncs the file mappings with a CodePress backend server
 
-This allows tools like CodePress to identify which React component file corresponds to rendered HTML elements, enabling visual editing capabilities.
+The repository and branch information is:
+- Added to HTML, body or div elements that will actually appear in the DOM
+- Only added once per file to keep the DOM clean and efficient
+- Added in plain text format for easy access
+- Automatically detected by the browser extension without requiring manual selection
+
+**Note:** In a typical React app, the repo attributes will be added to the first div element
+encountered because the html and body elements aren't usually processed by Babel directly.
+
+This allows the CodePress extension to identify which React component file corresponds
+to rendered HTML elements, enabling visual editing capabilities with automatic
+repository detection.
+
+### Browser Extension Integration
+
+The plugin includes a utility module for extracting repository and branch information from DOM elements:
+
+```javascript
+// In your browser extension
+const { extractRepositoryInfo } = require('babel-plugin-codepress-html/dist/hash-util');
+
+// Automatically detect repository info from the DOM
+function detectRepositoryInfo() {
+  // Check root elements first (html, body, head)
+  const rootElements = [
+    document.documentElement, // html
+    document.body,
+    document.head
+  ];
+  
+  // Look for repo attributes in root elements first
+  for (const element of rootElements) {
+    if (!element) continue;
+    
+    if (element.hasAttribute('codepress-github-repo-name')) {
+      const repository = element.getAttribute('codepress-github-repo-name');
+      const branch = element.getAttribute('codepress-github-branch') || 'main';
+      
+      return { repository, branch };
+    }
+  }
+  
+  // Fallback: Look for any elements with repo attributes
+  const element = document.querySelector('[codepress-github-repo-name]');
+  if (!element) return null;
+  
+  const repository = element.getAttribute('codepress-github-repo-name');
+  const branch = element.getAttribute('codepress-github-branch') || 'main';
+  
+  return { repository, branch };
+}
+
+// Use the repository info in your extension
+const repoInfo = detectRepositoryInfo();
+if (repoInfo) {
+  console.log(`Repository: ${repoInfo.repository}, Branch: ${repoInfo.branch}`);
+  // Use this information instead of asking the user to manually select a repository
+}
+```
+
+This automatic detection enables a seamless experience where the browser extension immediately 
+knows which repository and branch the page is built from, eliminating the need for users to 
+manually select anything.
 
 ### Database Storage
 
@@ -124,6 +194,19 @@ This efficient batching approach minimizes API requests and improves build perfo
    - For development: The default is 'development' if not specified
 
 This allows your build system to automatically update file mappings with environment context whenever your code is built, keeping the CodePress database in sync with the latest file locations for both development and production environments.
+
+## Changelog
+
+### Version 0.5.0
+- Removed hashing from repository and branch attributes for simpler integration
+- Added restriction to only apply repository attributes to container elements (html, body, div)
+- Simplified repository detection in the browser extension
+- Added support for automatic organization ID generation in the browser extension
+
+### Version 0.4.3
+- Added hashing for repository and branch information
+- Improved repository and branch auto-detection
+- Added bulk API request for file mappings
 
 ## License
 

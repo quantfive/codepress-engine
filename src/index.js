@@ -78,12 +78,37 @@ function detectGitRepoId() {
 }
 
 /**
+ * Hashes and encodes a string value for use as an attribute
+ * Uses a simple two-way encryption scheme so it can be decoded by the extension
+ * @param {string} value - The value to hash
+ * @returns {string} The hashed value
+ */
+function hashValue(value) {
+  if (!value) return "";
+
+  // Use a fixed key that will be shared with the browser extension
+  // This is not high security, just to prevent casual inspection
+  const key = "codepress-identifier-key";
+
+  // Create a simple reversible encoding
+  const hashedValue = Buffer.from(
+    `${key}:${value}:${key.split("").reverse().join("")}`
+  ).toString("base64");
+
+  return hashedValue;
+}
+
+/**
  * Babel plugin that adds unique file identifiers to JSX elements
  * This enables visual editing tools to map rendered HTML back to source files
  *
  * This plugin collects all file mappings and sends them in a single batch request
  * to the database with environment support
  */
+// Export the hash function for use in the browser extension
+module.exports.hashValue = hashValue;
+
+// Main plugin function
 module.exports = function (babel, options = {}) {
   const t = babel.types;
 
@@ -98,6 +123,8 @@ module.exports = function (babel, options = {}) {
   const {
     outputPath = "codepress-file-hash-map.json", // Only used for local fallback
     attributeName = "codepress-data-fp",
+    repoAttributeName = "codepress-github-repo-name",
+    branchAttributeName = "codepress-github-branch",
     backendUrl = isProduction
       ? "https://api.codepress.dev"
       : "http://localhost:8000",
@@ -127,7 +154,11 @@ module.exports = function (babel, options = {}) {
     }
 
     // Log the number of mappings being sent
-    console.log(`\x1b[36mℹ Sending ${Object.keys(mappings).length} file mappings in bulk request\x1b[0m`);
+    console.log(
+      `\x1b[36mℹ Sending ${
+        Object.keys(mappings).length
+      } file mappings in bulk request\x1b[0m`
+    );
 
     const endpoint = `${backendUrl}/api/bulk-file-mappings`;
     const payload = {
@@ -191,29 +222,111 @@ module.exports = function (babel, options = {}) {
           .digest("hex")
           .substring(0, 8);
 
-        // Store mapping
+        // Store mapping with repository and branch info
         fileMapping[hash] = {
           filePath: relFilePath,
+          repository: repositoryId || "",
+          branch: branch || "main",
         };
 
         // Save hash in file state for other visitors to access
         state.file.fileHash = hash;
+
+        // Add repository and branch attributes to the first JSX element in the main component
+        if (repositoryId) {
+          // Find the first JSX element in the main component's return statement
+          nodePath.traverse({
+            ReturnStatement(path) {
+              // Skip if we've already added attributes
+              if (state.repoAttributesAdded) return;
+
+              // Look for JSX elements in the return statement
+              path.traverse({
+                JSXOpeningElement(jsxPath) {
+                  const { node } = jsxPath;
+                  
+                  // Only add repo attributes to container elements (html, body, div)
+                  const elementName = node.name.name;
+                  if (!["html", "body", "div"].includes(elementName)) {
+                    return;
+                  }
+
+                  // Skip if we've already added attributes
+                  if (state.repoAttributesAdded) return;
+
+                  // Check for repo attribute
+                  const hasRepoAttribute = node.attributes.some((attr) => {
+                    return (
+                      t.isJSXAttribute(attr) &&
+                      t.isJSXIdentifier(attr.name, { name: repoAttributeName })
+                    );
+                  });
+
+                  // Check for branch attribute
+                  const hasBranchAttribute = node.attributes.some((attr) => {
+                    return (
+                      t.isJSXAttribute(attr) &&
+                      t.isJSXIdentifier(attr.name, {
+                        name: branchAttributeName,
+                      })
+                    );
+                  });
+
+                  // Add repo name attribute if needed and available
+                  if (!hasRepoAttribute) {
+                    // Don't hash the repository name anymore - use plain text
+                    console.log(
+                      `\x1b[32m✓ Adding repo attribute to ${elementName} element\x1b[0m`
+                    );
+
+                    node.attributes.push(
+                      t.jsxAttribute(
+                        t.jsxIdentifier(repoAttributeName),
+                        t.stringLiteral(repositoryId)
+                      )
+                    );
+                  }
+
+                  // Add branch attribute if needed and available
+                  if (!hasBranchAttribute && branch) {
+                    // Don't hash the branch name anymore - use plain text
+                    console.log(
+                      `\x1b[32m✓ Adding branch attribute to ${elementName} element\x1b[0m`
+                    );
+
+                    node.attributes.push(
+                      t.jsxAttribute(
+                        t.jsxIdentifier(branchAttributeName),
+                        t.stringLiteral(branch)
+                      )
+                    );
+                  }
+
+                  // Mark that we've added attributes
+                  state.repoAttributesAdded = true;
+                },
+              });
+            },
+          });
+        }
       },
 
       JSXOpeningElement(nodePath, state) {
         const fileHash = state.file.fileHash;
         if (!fileHash) return;
 
-        // Insert attribute if not present
+        // Insert attributes if not present
         const { node } = nodePath;
-        const hasAttribute = node.attributes.some((attr) => {
+
+        // Add file path attribute to all JSX elements
+        const hasFileAttribute = node.attributes.some((attr) => {
           return (
             t.isJSXAttribute(attr) &&
             t.isJSXIdentifier(attr.name, { name: attributeName })
           );
         });
 
-        if (!hasAttribute) {
+        if (!hasFileAttribute) {
           node.attributes.push(
             t.jsxAttribute(
               t.jsxIdentifier(attributeName),
@@ -229,7 +342,9 @@ module.exports = function (babel, options = {}) {
       // Display the total number of files processed
       const fileCount = Object.keys(fileMapping).length;
       if (fileCount > 0) {
-        console.log(`\x1b[36mℹ Processed ${fileCount} files with CodePress\x1b[0m`);
+        console.log(
+          `\x1b[36mℹ Processed ${fileCount} files with CodePress\x1b[0m`
+        );
       } else {
         console.log("\x1b[33m⚠ No files were processed by CodePress\x1b[0m");
         return;
