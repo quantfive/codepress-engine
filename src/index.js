@@ -5,6 +5,10 @@ const fs = require("fs");
 const fetch = require("node-fetch");
 const { execSync } = require("child_process");
 
+// Keep track of the last request time to throttle requests
+let lastRequestTime = 0;
+const MIN_REQUEST_INTERVAL = 1000; // Minimum 1 second between requests
+
 /**
  * Detects the current git branch
  * @returns {string} The current branch name or 'main' if detection fails
@@ -137,8 +141,8 @@ module.exports = function (babel, options = {}) {
   // We'll keep a mapping to store ID -> real path
   let fileMapping = {};
 
-  // Function to send file mappings to the database in bulk
-  const saveFileMappingsToDatabase = async (mappings) => {
+  // Function to send file mappings to the database in bulk with retries
+  const saveFileMappingsToDatabase = async (mappings, retryCount = 3, retryDelay = 1000) => {
     // Check if required config is missing
     if (!repositoryId || !apiToken) {
       console.log(
@@ -168,39 +172,79 @@ module.exports = function (babel, options = {}) {
       environment,
     };
 
-    try {
-      const response = await fetch(endpoint, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${apiToken}`,
-        },
-        body: JSON.stringify(payload),
-      });
+    // Track the current retry attempt
+    let attempt = 0;
+    let lastError = null;
 
-      if (response.ok) {
-        const data = await response.json();
-        console.log(
-          `\x1b[32m✓ Codepress file mappings saved to ${environment} database successfully\x1b[0m`
-        );
-        console.log(
-          `\x1b[32m  Created: ${data.created_count}, Updated: ${data.updated_count}, Total: ${data.total_mappings}\x1b[0m`
-        );
-        return true;
-      } else {
-        const errorData = await response.text();
-        console.error(
-          `\x1b[31m✗ Error saving file mappings to database: ${response.status}\x1b[0m`
-        );
-        console.error(`\x1b[31m  Response: ${errorData}\x1b[0m`);
-        return false;
+    while (attempt <= retryCount) {
+      try {
+        // Add attempt number to log if it's a retry
+        if (attempt > 0) {
+          console.log(`\x1b[33mℹ Retry attempt ${attempt}/${retryCount} for saving file mappings...\x1b[0m`);
+        }
+
+        const response = await fetch(endpoint, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${apiToken}`,
+          },
+          body: JSON.stringify(payload),
+        });
+
+        if (response.ok) {
+          const data = await response.json();
+          console.log(
+            `\x1b[32m✓ Codepress file mappings saved to ${environment} database successfully\x1b[0m`
+          );
+          console.log(
+            `\x1b[32m  Created: ${data.created_count}, Updated: ${data.updated_count}, Total: ${data.total_mappings}\x1b[0m`
+          );
+          return true;
+        } else {
+          const errorData = await response.text();
+          lastError = `HTTP error: ${response.status} - ${errorData}`;
+          
+          // Only log error details on final retry attempt
+          if (attempt === retryCount) {
+            console.error(
+              `\x1b[31m✗ Error saving file mappings to database: ${response.status}\x1b[0m`
+            );
+            console.error(`\x1b[31m  Response: ${errorData}\x1b[0m`);
+          }
+          
+          // Check for errors that shouldn't trigger retries (e.g. 401, 403)
+          if (response.status === 401 || response.status === 403) {
+            console.error(`\x1b[31m✗ Authentication error - not retrying\x1b[0m`);
+            return false;
+          }
+        }
+      } catch (error) {
+        lastError = error.message;
+        
+        // Only log error details on final retry attempt
+        if (attempt === retryCount) {
+          console.error(
+            `\x1b[31m✗ Error saving file mappings to database: ${error.message}\x1b[0m`
+          );
+        }
       }
-    } catch (error) {
-      console.error(
-        `\x1b[31m✗ Error saving file mappings to database: ${error.message}\x1b[0m`
-      );
-      return false;
+
+      // Increment attempt counter
+      attempt++;
+      
+      // If this was the last attempt, break and return false
+      if (attempt > retryCount) {
+        break;
+      }
+      
+      // Wait before retrying
+      await new Promise(resolve => setTimeout(resolve, retryDelay * attempt));
     }
+
+    // If we reach here, all retries failed
+    console.error(`\x1b[31m✗ All ${retryCount} attempts to save file mappings failed\x1b[0m`);
+    return false;
   };
 
   return {
@@ -349,8 +393,37 @@ module.exports = function (babel, options = {}) {
         console.log("\x1b[33m⚠ No files were processed by CodePress\x1b[0m");
         return;
       }
+      
+      // Throttle requests to avoid overwhelming the server
+      const now = Date.now();
+      const timeSinceLastRequest = now - lastRequestTime;
+      
+      if (timeSinceLastRequest < MIN_REQUEST_INTERVAL) {
+        console.log(`\x1b[33mℹ Throttling database request (${timeSinceLastRequest}ms since last request)\x1b[0m`);
+        
+        // Write to local file instead of making another request too soon
+        if (!isProduction) {
+          try {
+            fs.writeFileSync(
+              outputPath, 
+              JSON.stringify(fileMapping, null, 2)
+            );
+            console.log(
+              `\x1b[32m✓ File mapping written to ${outputPath} due to throttling\x1b[0m`
+            );
+          } catch (error) {
+            console.error(
+              `\x1b[31m✗ Error writing file mapping: ${error.message}\x1b[0m`
+            );
+          }
+        }
+        return;
+      }
+      
+      // Update last request time
+      lastRequestTime = now;
 
-      // Send all mappings in a single batch request
+      // Send all mappings in a single batch request with retries
       saveFileMappingsToDatabase(fileMapping)
         .then((success) => {
           // In development, write to file as fallback if database save failed

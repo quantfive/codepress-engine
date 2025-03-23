@@ -1,11 +1,11 @@
-# babel-plugin-codepress-html
+# @quantfive/codepress-engine
 
 A Babel plugin that adds file identifiers to JSX elements for visual editing with Codepress.
 
 ## Installation
 
 ```bash
-npm install --save-dev babel-plugin-codepress-html
+npm install --save-dev @quantfive/codepress-engine
 ```
 
 ## Usage
@@ -16,7 +16,7 @@ Add the plugin to your Babel configuration:
 // babel.config.js
 module.exports = {
   plugins: [
-    'codepress-html'  // Babel will resolve this to babel-plugin-codepress-html
+    '@quantfive/codepress-engine'
   ]
 };
 ```
@@ -27,18 +27,18 @@ module.exports = {
 // babel.config.js
 module.exports = {
   plugins: [
-    ['codepress-html', {  // Babel will resolve this to babel-plugin-codepress-html
+    ['@quantfive/codepress-engine', {
       // File output options
-      outputPath: 'custom-file-map.json', // default: 'file-hash-map.json'
+      outputPath: 'codepress-file-hash-map.json', // default: 'codepress-file-hash-map.json'
       
       // HTML attribute options
-      attributeName: 'data-fp', // default: 'codepress-data-fp'
+      attributeName: 'codepress-data-fp', // default: 'codepress-data-fp'
       repoAttributeName: 'codepress-github-repo-name', // default: 'codepress-github-repo-name'
       branchAttributeName: 'codepress-github-branch', // default: 'codepress-github-branch'
       
       // Database connection options 
-      backendUrl: 'https://api.codepress.example.com', // default: auto-detects based on environment
-      repositoryId: '123', // optional - auto-detects from git remote URL if not specified
+      backendUrl: 'https://api.codepress.dev', // default: auto-detects based on environment
+      repositoryId: 'owner/repo', // optional - auto-detects from git remote URL if not specified
       apiToken: 'your-api-token', // required for database saving
       branch: 'main', // optional - auto-detects from git if not specified
       environment: 'production' // optional - auto-detects based on NODE_ENV
@@ -54,9 +54,9 @@ For syncing with the CodePress backend, provide the connection details in your B
 ```javascript
 module.exports = {
   plugins: [
-    ['codepress-html', {
-      backendUrl: 'https://api.codepress.example.com',
-      repositoryId: '123',
+    ['@quantfive/codepress-engine', {
+      backendUrl: 'https://api.codepress.dev',
+      repositoryId: 'owner/repo',
       apiToken: 'your-organization-api-key',
       branch: 'main',
       environment: 'production' // Explicitly set environment
@@ -82,7 +82,7 @@ These auto-detection features allow you to enable backend sync with minimal conf
 ```javascript
 module.exports = {
   plugins: [
-    ['codepress-html', {
+    ['@quantfive/codepress-engine', {
       apiToken: 'your-organization-api-key'
       // branch, repositoryId, and environment will be auto-detected
     }]
@@ -100,7 +100,7 @@ This plugin:
 3. Adds repository information to container elements (html, body, or div):
    - `codepress-github-repo-name` - Contains the repository name (owner/repo)
    - `codepress-github-branch` - Contains the branch name
-4. Creates a mapping file (file-hash-map.json) that connects hashes to file paths
+4. Creates a mapping file (codepress-file-hash-map.json) that connects hashes to file paths
 5. Optionally syncs the file mappings with a CodePress backend server
 
 The repository and branch information is:
@@ -122,7 +122,7 @@ The plugin includes a utility module for extracting repository and branch inform
 
 ```javascript
 // In your browser extension
-const { extractRepositoryInfo } = require('babel-plugin-codepress-html/dist/hash-util');
+const { extractRepositoryInfo } = require('@quantfive/codepress-engine/hash-util');
 
 // Automatically detect repository info from the DOM
 function detectRepositoryInfo() {
@@ -177,6 +177,7 @@ The plugin will:
 4. Include repository ID, branch, environment, and API key in the request
 5. In development mode only, write to a local file as fallback if database save fails
 6. Log detailed results including created and updated counts
+7. Use throttling and retries to ensure reliable performance
 
 This efficient batching approach minimizes API requests and improves build performance, especially for large projects with many files. The CodePress browser extension can then correlate DOM elements with source files when editing websites, without needing direct access to the source code.
 
@@ -195,7 +196,95 @@ This efficient batching approach minimizes API requests and improves build perfo
 
 This allows your build system to automatically update file mappings with environment context whenever your code is built, keeping the CodePress database in sync with the latest file locations for both development and production environments.
 
+## Development Server
+
+This package includes a lightweight development server that can be started using our CLI tool or programmatically.
+
+### CLI Usage (Recommended)
+
+The easiest way to use the Codepress development server is through our CLI:
+
+```bash
+# Install the package globally (optional)
+npm install -g @quantfive/codepress-engine
+
+# Just run the server
+npx codepress server
+
+# Run server alongside your app
+npx codepress start -- your-start-command
+```
+
+#### Adding to your project scripts
+
+Add Codepress to your package.json scripts:
+
+```json
+{
+  "scripts": {
+    "start": "craco start",
+    "dev": "codepress start -- craco start"
+  }
+}
+```
+
+Or use it with npm/yarn start:
+
+```json
+{
+  "scripts": {
+    "start": "react-scripts start",
+    "dev": "codepress start -- npm start"
+  }
+}
+```
+
+### Configuration
+
+The server can be configured using environment variables:
+
+- `CODEPRESS_DEV_PORT`: Port to run the server on (default: 4321)
+- `NODE_ENV`: Must be different from 'production' for the server to start
+
+### Server Features
+
+- Runs only in development environment
+- Automatically finds an available port if the default is in use (4321, 4322, 4323, etc.)
+- Guards against multiple instances using a lock mechanism
+- Provides basic endpoints:
+  - `/ping` - Returns "pong" for health checks
+  - `/meta` - Returns server metadata as JSON
+- Safe to use alongside your development tools
+
+### Programmatic Usage
+
+For advanced use cases, you can also start the server programmatically:
+
+```js
+// Only use this in Node.js environments, not in browser code
+const { startServer } = require('@quantfive/codepress-engine/server');
+
+const server = startServer({
+  port: 5678 // Optional custom port
+});
+```
+
+> **Important**: The server module uses Node.js specific libraries and should only be imported in a Node.js environment, not in browser code. Use the CLI approach for the simplest integration.
+
 ## Changelog
+
+### Version 0.7.0
+- Added CLI tool for running the development server (`codepress` command)
+- Added throttling and retry mechanisms for file mapping requests
+- Improved reliability with automatic request retries on network failures
+- Added exponential backoff to prevent overwhelming the server
+- Enhanced error handling for authentication and server errors
+- Fixed compatibility issues with webpack and browser environments
+
+### Version 0.6.0
+- Added development server accessible via import '@quantfive/codepress-engine/server'
+- Server automatically starts in development environments
+- Includes port auto-detection and singleton pattern
 
 ### Version 0.5.0
 - Removed hashing from repository and branch attributes for simpler integration
