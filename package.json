@@ -1,8 +1,17 @@
 {
-  "name": "babel-plugin-codepress-html",
-  "version": "0.2.0",
-  "description": "Babel plugin that adds file identifiers to JSX elements for visual editing with efficient batch processing",
+  "name": "@quantfive/codepress-engine",
+  "version": "0.8.0",
+  "description": "Babel plugin that adds file identifiers to all JSX elements and repository/branch info to container elements like div, html or body",
   "main": "dist/index.js",
+  "exports": {
+    ".": "./dist/index.js",
+    "./hash-util": "./dist/hash-util.js",
+    "./server": "./dist/server.js",
+    "./cli": "./dist/cli.js"
+  },
+  "bin": {
+    "codepress": "./dist/cli.js"
+  },
   "files": [
     "dist"
   ],
@@ -27,9 +36,11 @@
     "@babel/cli": "^7.26.0",
     "@babel/core": "^7.26.0",
     "@babel/preset-env": "^7.26.0",
+    "@babel/preset-react": "^7.26.3",
     "jest": "^29.7.0"
   },
   "dependencies": {
-    "node-fetch": "^2.6.7"
+    "node-fetch": "^2.6.7",
+    "prettier": "^3.1.0"
   }
 }

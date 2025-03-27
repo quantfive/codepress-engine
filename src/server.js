@@ -1,0 +1,390 @@
+// Codepress Dev Server
+const http = require("http");
+const os = require("os");
+const fs = require("fs");
+const path = require("path");
+const prettier = require("prettier");
+const fetch = require("node-fetch");
+
+/**
+ * Gets the port to use for the server
+ * @returns {number} The configured port
+ */
+function getServerPort() {
+  // Use environment variable or default to 4321
+  return parseInt(process.env.CODEPRESS_DEV_PORT || "4321", 10);
+}
+
+/**
+ * Create a lock file to ensure only one instance runs
+ * @returns {boolean} True if lock was acquired, false otherwise
+ */
+function acquireLock() {
+  try {
+    const lockPath = path.join(os.tmpdir(), "codepress-dev-server.lock");
+
+    // Try to read the lock file to check if the server is already running
+    const lockData = fs.existsSync(lockPath)
+      ? JSON.parse(fs.readFileSync(lockPath, "utf8"))
+      : null;
+
+    if (lockData) {
+      // Check if the process in the lock file is still running
+      try {
+        // On Unix-like systems, sending signal 0 checks if process exists
+        process.kill(lockData.pid, 0);
+        // Process exists, lock is valid
+        return false;
+      } catch (e) {
+        // Process doesn't exist, lock is stale
+        // Continue to create a new lock
+      }
+    }
+
+    // Create a new lock file
+    fs.writeFileSync(
+      lockPath,
+      JSON.stringify({
+        pid: process.pid,
+        timestamp: Date.now(),
+      })
+    );
+
+    return true;
+  } catch (err) {
+    // If anything fails, assume we couldn't get the lock
+    return false;
+  }
+}
+
+// Track server instance (singleton pattern)
+let serverInstance = null;
+
+/**
+ * Apply text-based changes to the file content directly
+ * @param {string} fileContent The original file content
+ * @param {Array<{line: number, codeChange: string, type: string}>} changes The changes to apply
+ * @returns {string} The modified file content
+ */
+function applyTextChanges(fileContent, changes) {
+  // Convert file content to array of lines for easier manipulation
+  const lines = fileContent.split("\n");
+
+  // Sort changes in reverse order (from bottom to top) to avoid line number shifts
+  const sortedChanges = [...changes].sort((a, b) => b.line - a.line);
+
+  for (const change of sortedChanges) {
+    const { line, codeChange, type } = change;
+
+    // Convert to 0-indexed for array access
+    const lineIdx = line - 1;
+
+    switch (type) {
+      case "replace":
+        // Replace the specified line with the new code
+        lines[lineIdx] = codeChange;
+        break;
+
+      case "delete":
+        // Remove the specified line
+        lines.splice(lineIdx, 1);
+        break;
+
+      case "insert":
+        // Insert the new code at the specified line
+        lines.splice(lineIdx, 0, codeChange);
+        break;
+    }
+  }
+
+  return lines.join("\n");
+}
+
+/**
+ * Make an HTTP request to the FastAPI backend using fetch
+ * @param {string} method The HTTP method
+ * @param {string} endpoint The API endpoint
+ * @param {Object} data The request payload
+ * @param {string} incomingAuthHeader The incoming Authorization header
+ * @returns {Promise<Object>} The response data
+ */
+async function callBackendApi(method, endpoint, data, incomingAuthHeader) {
+  // Backend API settings
+  const apiHost = process.env.CODEPRESS_BACKEND_HOST || "localhost";
+  const apiPort = parseInt(process.env.CODEPRESS_BACKEND_PORT || "8000", 10);
+  const apiPath = endpoint.startsWith("/") ? endpoint.replace("/", "") : endpoint;
+  
+  // Build the complete URL - detect if using localhost for HTTP, otherwise use HTTPS
+  const protocol = apiHost === 'localhost' || apiHost === '127.0.0.1' ? 'http' : 'https';
+  console.log(`\x1b[36mℹ API Path: ${apiPath} \x1b[0m`);
+  const url = `${protocol}://${apiHost}${apiPort ? `:${apiPort}` : ''}/api/${apiPath}`;
+  console.log(`\x1b[36mℹ Sending request to ${url} \x1b[0m`);
+
+  try {
+    // First try to use API token from environment variable
+    let authToken = process.env.CODEPRESS_API_TOKEN;
+    
+    // If no API token, try to use the incoming Authorization header
+    if (!authToken && incomingAuthHeader) {
+      authToken = incomingAuthHeader.split(' ')[1]; // Extract token part
+      console.log(`\x1b[36mℹ Using incoming Authorization header for authentication\x1b[0m`);
+    }
+
+    // Prepare headers with authentication if token exists
+    const headers = {
+      "Content-Type": "application/json",
+    };
+    
+    if (authToken) {
+      headers["Authorization"] = `Bearer ${authToken}`;
+      // Log which auth method we're using (but don't expose the actual token)
+      console.log(`\x1b[36mℹ Using ${process.env.CODEPRESS_API_TOKEN ? 'API Token' : 'GitHub OAuth Token'} for authentication\x1b[0m`);
+    } else {
+      console.log('\x1b[33m⚠ No authentication token available\x1b[0m');
+    }
+
+    const response = await fetch(url, {
+      method,
+      headers,
+      body: data ? JSON.stringify(data) : undefined,
+    });
+    
+    // Get the response text
+    const responseText = await response.text();
+    
+    // Check if response is successful
+    if (!response.ok) {
+      throw new Error(`API request failed with status ${response.status}: ${responseText}`);
+    }
+    
+    // Try to parse the response as JSON
+    try {
+      return JSON.parse(responseText);
+    } catch (err) {
+      throw new Error(`Invalid JSON response: ${err.message}`);
+    }
+  } catch (err) {
+    // Handle network errors and other issues
+    if (err.name === 'FetchError') {
+      throw new Error(`Network error: ${err.message}`);
+    }
+    
+    // Re-throw the original error
+    throw err;
+  }
+}
+
+/**
+ * Starts the Codepress development server if not already running
+ * @param {Object} options Server configuration options
+ * @param {number} [options.port=4321] Port to run the server on
+ * @returns {http.Server|null} The server instance or null if already running
+ */
+function startServer(options = {}) {
+  // Only run in development environment
+  if (process.env.NODE_ENV === "production") {
+    return null;
+  }
+
+  // Return existing instance if already running
+  if (serverInstance) {
+    return serverInstance;
+  }
+
+  // Try to acquire lock to ensure only one server instance runs system-wide
+  if (!acquireLock()) {
+    return null;
+  }
+
+  // Get the fixed port
+  const port = options.port || getServerPort();
+
+  // Create server
+  let server;
+  try {
+    server = http.createServer((req, res) => {
+      // Add CORS headers for all responses
+      res.setHeader('Access-Control-Allow-Origin', '*');
+      res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS, PUT, PATCH, DELETE');
+      res.setHeader('Access-Control-Allow-Headers', 'X-Requested-With,content-type,Authorization');
+      res.setHeader('Access-Control-Allow-Credentials', 'true');
+      
+      // Handle preflight OPTIONS request
+      if (req.method === 'OPTIONS') {
+        res.statusCode = 204; // No content
+        res.end();
+        return;
+      }
+      // Simple request handling
+      if (req.url === "/ping") {
+        res.statusCode = 200;
+        res.setHeader("Content-Type", "text/plain");
+        res.end("pong");
+      } else if (req.url === "/meta") {
+        res.statusCode = 200;
+        res.setHeader("Content-Type", "application/json");
+        // Try to get package version but don't fail if not available
+        let version = "0.0.0";
+        try {
+          // In production builds, use a relative path that works with the installed package structure
+          version = require("../package.json").version;
+        } catch (e) {
+          // Ignore error, use default version
+        }
+
+        res.end(
+          JSON.stringify({
+            name: "Codepress Dev Server",
+            version: version,
+            environment: process.env.NODE_ENV || "development",
+            uptime: process.uptime(),
+          })
+        );
+      } else if (req.url === "/visual-editor-api" && req.method === 'POST') {
+        // Handle API requests for getting changes from the backend and applying them
+        let body = '';
+        req.on('data', chunk => {
+          body += chunk.toString();
+        });
+        
+        req.on('end', async () => {
+          try {
+            const data = JSON.parse(body);
+            const { id, old_html, new_html } = data;
+            
+            // Validate required fields
+            if (!id || !old_html || !new_html) {
+              res.statusCode = 400;
+              res.setHeader('Content-Type', 'application/json');
+              res.end(JSON.stringify({ error: "Missing required fields", id, old_html, new_html }));
+              return;
+            }
+
+            try {
+              // Extract Authorization header from incoming request
+              const incomingAuthHeader = req.headers['authorization'];
+
+              // First get file mapping information
+              console.log(`\x1b[36mℹ Getting file mapping info for hash ID: ${id}\x1b[0m`);
+              const fileMappingResponse = await callBackendApi('GET', `file-mappings/${id}`, null, incomingAuthHeader);
+              
+              if (!fileMappingResponse || !fileMappingResponse.file_path) {
+                throw new Error('Failed to get file mapping information');
+              }
+              
+              // Read the entire file
+              const fileInfo = fileMappingResponse;
+              const targetFile = path.join(process.cwd(), fileInfo.file_path);
+              console.log(`\x1b[36mℹ Reading file: ${targetFile}\x1b[0m`);
+              const fileContent = fs.readFileSync(targetFile, "utf8");
+              
+              // Call backend API to get changes
+              console.log(`\x1b[36mℹ Getting changes from backend for file ID: ${id}\x1b[0m`);
+              
+              const backendResponse = await callBackendApi('POST', 'get-changes', {
+                old_html,
+                new_html,
+                hash_id: id,
+                file_content: fileContent,
+              }, incomingAuthHeader);
+              
+              console.log(`\x1b[36mℹ Received response from backend\x1b[0m`);
+              
+              if (!backendResponse.changes || !Array.isArray(backendResponse.changes)) {
+                console.error(`\x1b[31m✗ Invalid response format: ${JSON.stringify(backendResponse)}\x1b[0m`);
+                throw new Error('Invalid response format from backend');
+              }
+              
+              const changes = backendResponse.changes;
+              console.log(`\x1b[36mℹ Received ${changes.length} changes from backend\x1b[0m`);
+              
+              // File content already loaded from above
+              
+              // Apply the changes
+              const modifiedContent = applyTextChanges(fileContent, changes);
+
+              // Format with Prettier
+              let formattedCode;
+              try {
+                formattedCode = await prettier.format(modifiedContent, {
+                  parser: "typescript",
+                  semi: true,
+                  singleQuote: false,
+                });
+              } catch (prettierError) {
+                console.error("Prettier formatting failed:", prettierError);
+                // If formatting fails, use the unformatted code
+                formattedCode = modifiedContent;
+              }
+              
+              // Write back to file
+              fs.writeFileSync(targetFile, formattedCode, "utf8");
+              
+              console.log(`\x1b[32m✓ Updated file ${targetFile} with ${changes.length} changes\x1b[0m`);
+              
+              res.statusCode = 200;
+              res.setHeader('Content-Type', 'application/json');
+              res.end(JSON.stringify({ 
+                success: true, 
+                message: `Applied ${changes.length} changes to ${fileInfo.file_path}` 
+              }));
+            } catch (apiError) {
+              console.error("Error applying changes:", apiError);
+              res.statusCode = 500;
+              res.setHeader('Content-Type', 'application/json');
+              res.end(JSON.stringify({ error: apiError.message }));
+            }
+          } catch (parseError) {
+            console.error("Error parsing request data:", parseError);
+            res.statusCode = 400;
+            res.setHeader('Content-Type', 'application/json');
+            res.end(JSON.stringify({ error: "Invalid JSON" }));
+          }
+        });
+      } else {
+        res.statusCode = 404;
+        res.setHeader("Content-Type", "text/plain");
+        res.end("Not found");
+      }
+    });
+
+    // Handle errors to prevent crashes
+    server.on("error", (err) => {
+      if (err.code === "EADDRINUSE") {
+        console.log(
+          `\x1b[33mℹ Codepress Dev Server: Port ${port} is already in use, server is likely already running\x1b[0m`
+        );
+      } else {
+        console.error("Codepress Dev Server error:", err);
+      }
+    });
+  } catch (err) {
+    console.error("Failed to create server:", err);
+    return null;
+  }
+
+  // Start server on the fixed port
+  server.listen(port, () => {
+    console.log(
+      `\x1b[32m✅ Codepress Dev Server running at http://localhost:${port}\x1b[0m`
+    );
+  });
+
+  // Save instance
+  serverInstance = server;
+
+  return server;
+}
+
+// Create module exports
+const serverModule = {
+  startServer,
+};
+
+// Start server automatically if in development mode
+if (process.env.NODE_ENV !== "production") {
+  serverModule.server = startServer();
+}
+
+// Export module
+module.exports = serverModule;
