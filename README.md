@@ -211,8 +211,10 @@ npm install -g @quantfive/codepress-engine
 # Just run the server
 npx codepress server
 
-# Run server alongside your app
-npx codepress start -- your-start-command
+# Run server alongside your app (pass through any command)
+npx codepress npm start
+npx codepress yarn dev
+npx codepress craco start
 ```
 
 #### Adding to your project scripts
@@ -223,7 +225,7 @@ Add Codepress to your package.json scripts:
 {
   "scripts": {
     "start": "craco start",
-    "dev": "codepress start -- craco start"
+    "dev": "codepress craco start"
   }
 }
 ```
@@ -234,7 +236,7 @@ Or use it with npm/yarn start:
 {
   "scripts": {
     "start": "react-scripts start",
-    "dev": "codepress start -- npm start"
+    "dev": "codepress npm start"
   }
 }
 ```
@@ -249,12 +251,79 @@ The server can be configured using environment variables:
 ### Server Features
 
 - Runs only in development environment
-- Automatically finds an available port if the default is in use (4321, 4322, 4323, etc.)
+- Uses a fixed port (4321 by default) for predictable addressing
 - Guards against multiple instances using a lock mechanism
-- Provides basic endpoints:
+- Provides useful endpoints:
   - `/ping` - Returns "pong" for health checks
-  - `/meta` - Returns server metadata as JSON
+  - `/meta` - Returns server metadata as JSON (includes version info)
+  - `/visual-editor-api` - API endpoint for updating files from the visual editor
 - Safe to use alongside your development tools
+
+#### Visual Editor API
+
+The server offers two key endpoints for visual editing:
+
+##### 1. Register Files - `/visual-editor-api`
+
+Allows the browser extension to register files and save images:
+
+```
+POST /visual-editor-api
+Content-Type: application/json
+
+{
+  "id": "file-hash-identifier",
+  "filePath": "src/components/Header.jsx",
+  "newHtml": "<div>Updated HTML content</div>",
+  "oldHtml": "<div>Original HTML content</div>",
+  "imageData": "data:image/png;base64,iVBORw0KGgo...#filename=image.png"
+}
+```
+
+Parameters:
+- `id` (required): The file identifier hash
+- `filePath` (optional): The relative path to the source file
+- `newHtml` (required): The updated HTML content
+- `oldHtml` (optional): The original HTML for verification
+- `imageData` (optional): Base64-encoded image data with optional filename
+
+The server will:
+1. Store the file mapping if a path is provided
+2. Process any included image data and save it to the project's public directory
+3. Log information about the received update
+4. Return a success response
+
+##### 2. Apply Changes - `/get-changes`
+
+Gets file changes from the backend API and applies them to the source file:
+
+```
+POST /get-changes
+Content-Type: application/json
+
+{
+  "id": "file-hash-identifier",
+  "oldHtml": "<div>Original HTML content</div>",
+  "newHtml": "<div>Updated HTML content</div>"
+}
+```
+
+Parameters:
+- `id` (required): The file identifier hash
+- `oldHtml` (required): The original HTML content
+- `newHtml` (required): The updated HTML content
+
+The server will:
+1. Look up the file path from the stored mappings
+2. Call the FastAPI backend's `/get-changes` endpoint to calculate text-based changes
+3. Apply the changes to the source file
+4. Format the code with Prettier
+5. Return a success response with details about the applied changes
+
+This endpoint provides a reliable way to update source files based on visual edits by:
+- Using line-by-line text changes instead of AST transformations
+- Handling edge cases like partial JSX fragments
+- Preserving code formatting and style
 
 ### Programmatic Usage
 
@@ -273,8 +342,20 @@ const server = startServer({
 
 ## Changelog
 
+### Version 0.8.0
+- Added new `/get-changes` API endpoint for applying text-based changes to source files
+- Implemented file mapping storage for tracking file identifiers
+- Added integration with FastAPI backend for determining code changes
+- Added Prettier formatting for updated files
+- Enhanced CLI with new `setup` command for installing dependencies
+- Added TypeScript type definitions for better developer experience
+- Improved error handling for file operations and API requests
+- Added comprehensive documentation for the visual editor API
+
 ### Version 0.7.0
 - Added CLI tool for running the development server (`codepress` command)
+- Added Visual Editor API endpoint (`/visual-editor-api`) for file updates from the browser extension
+- Simplified server port configuration to use a fixed port (4321 by default) for reliability
 - Added throttling and retry mechanisms for file mapping requests
 - Improved reliability with automatic request retries on network failures
 - Added exponential backoff to prevent overwhelming the server
