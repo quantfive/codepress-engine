@@ -61,39 +61,72 @@ function acquireLock() {
 let serverInstance = null;
 
 /**
- * Apply text-based changes to the file content directly
+ * Apply text-based changes to the file content directly based on the new format.
  * @param {string} fileContent The original file content
- * @param {Array<{line: number, codeChange: string, type: string}>} changes The changes to apply
+ * @param {Array<Object>} changes The changes to apply in the new format.
+ *        Each change object can have:
+ *        - { type: "insert", line: number, codeChange: string }
+ *        - { type: "delete", startLine: number, endLine: number }
+ *        - { type: "replace", startLine: number, endLine: number, codeChange: string }
  * @returns {string} The modified file content
  */
 function applyTextChanges(fileContent, changes) {
-  // Convert file content to array of lines for easier manipulation
   const lines = fileContent.split("\n");
 
-  // Sort changes in reverse order (from bottom to top) to avoid line number shifts
-  const sortedChanges = [...changes].sort((a, b) => b.line - a.line);
+  // Sort changes by the highest line number involved (endLine or line) in reverse order
+  // to avoid index shifts during modification.
+  const sortedChanges = [...changes].sort((a, b) => {
+    const lineA = a.type === "insert" ? a.line : a.endLine;
+    const lineB = b.type === "insert" ? b.line : b.endLine;
+    return lineB - lineA;
+  });
 
   for (const change of sortedChanges) {
-    const { line, codeChange, type } = change;
+    const { type } = change;
 
-    // Convert to 0-indexed for array access
-    const lineIdx = line - 1;
+    // Convert line numbers to 0-based indices for array operations
+    const startIdx = change.startLine ? change.startLine - 1 : undefined;
+    const endIdx = change.endLine ? change.endLine - 1 : undefined;
+    const lineIdx = change.line ? change.line - 1 : undefined; // For insert
 
     switch (type) {
       case "replace":
-        // Replace the specified line with the new code
-        lines[lineIdx] = codeChange;
+        if (
+          startIdx !== undefined &&
+          endIdx !== undefined &&
+          change.codeChange !== undefined
+        ) {
+          // Decode newline characters within the codeChange string
+          const decodedCodeChange = change.codeChange.replace(/\\n/g, "\n");
+          const replacementLines = decodedCodeChange.split("\n");
+          lines.splice(startIdx, endIdx - startIdx + 1, ...replacementLines);
+        } else {
+          console.warn("Invalid 'replace' change object:", change);
+        }
         break;
 
       case "delete":
-        // Remove the specified line
-        lines.splice(lineIdx, 1);
+        if (startIdx !== undefined && endIdx !== undefined) {
+          lines.splice(startIdx, endIdx - startIdx + 1);
+        } else {
+          console.warn("Invalid 'delete' change object:", change);
+        }
         break;
 
       case "insert":
-        // Insert the new code at the specified line
-        lines.splice(lineIdx, 0, codeChange);
+        if (lineIdx !== undefined && change.codeChange !== undefined) {
+          // Decode newline characters within the codeChange string
+          const decodedCodeChange = change.codeChange.replace(/\\n/g, "\n");
+          // Insert *after* the specified line index
+          const insertionLines = decodedCodeChange.split("\n");
+          lines.splice(lineIdx + 1, 0, ...insertionLines);
+        } else {
+          console.warn("Invalid 'insert' change object:", change);
+        }
         break;
+
+      default:
+        console.warn(`Unknown change type: ${type}`);
     }
   }
 
