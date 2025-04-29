@@ -112,35 +112,42 @@ async function callBackendApi(method, endpoint, data, incomingAuthHeader) {
   // Backend API settings
   const apiHost = process.env.CODEPRESS_BACKEND_HOST || "localhost";
   const apiPort = parseInt(process.env.CODEPRESS_BACKEND_PORT || "8000", 10);
-  const apiPath = endpoint.startsWith("/") ? endpoint.replace("/", "") : endpoint;
-  
+  const apiPath = endpoint.startsWith("/")
+    ? endpoint.replace("/", "")
+    : endpoint;
+
   // Build the complete URL - detect if using localhost for HTTP, otherwise use HTTPS
-  const protocol = apiHost === 'localhost' || apiHost === '127.0.0.1' ? 'http' : 'https';
+  const protocol =
+    apiHost === "localhost" || apiHost === "127.0.0.1" ? "http" : "https";
   console.log(`\x1b[36mℹ API Path: ${apiPath} \x1b[0m`);
-  const url = `${protocol}://${apiHost}${apiPort ? `:${apiPort}` : ''}/api/${apiPath}`;
+  const url = `${protocol}://${apiHost}${apiPort ? `:${apiPort}` : ""}/api/${apiPath}`;
   console.log(`\x1b[36mℹ Sending request to ${url} \x1b[0m`);
 
   try {
     // First try to use API token from environment variable
     let authToken = process.env.CODEPRESS_API_TOKEN;
-    
+
     // If no API token, try to use the incoming Authorization header
     if (!authToken && incomingAuthHeader) {
-      authToken = incomingAuthHeader.split(' ')[1]; // Extract token part
-      console.log(`\x1b[36mℹ Using incoming Authorization header for authentication\x1b[0m`);
+      authToken = incomingAuthHeader.split(" ")[1]; // Extract token part
+      console.log(
+        `\x1b[36mℹ Using incoming Authorization header for authentication\x1b[0m`
+      );
     }
 
     // Prepare headers with authentication if token exists
     const headers = {
       "Content-Type": "application/json",
     };
-    
+
     if (authToken) {
       headers["Authorization"] = `Bearer ${authToken}`;
       // Log which auth method we're using (but don't expose the actual token)
-      console.log(`\x1b[36mℹ Using ${process.env.CODEPRESS_API_TOKEN ? 'API Token' : 'GitHub OAuth Token'} for authentication\x1b[0m`);
+      console.log(
+        `\x1b[36mℹ Using ${process.env.CODEPRESS_API_TOKEN ? "API Token" : "GitHub OAuth Token"} for authentication\x1b[0m`
+      );
     } else {
-      console.log('\x1b[33m⚠ No authentication token available\x1b[0m');
+      console.log("\x1b[33m⚠ No authentication token available\x1b[0m");
     }
 
     const response = await fetch(url, {
@@ -148,15 +155,17 @@ async function callBackendApi(method, endpoint, data, incomingAuthHeader) {
       headers,
       body: data ? JSON.stringify(data) : undefined,
     });
-    
+
     // Get the response text
     const responseText = await response.text();
-    
+
     // Check if response is successful
     if (!response.ok) {
-      throw new Error(`API request failed with status ${response.status}: ${responseText}`);
+      throw new Error(
+        `API request failed with status ${response.status}: ${responseText}`
+      );
     }
-    
+
     // Try to parse the response as JSON
     try {
       return JSON.parse(responseText);
@@ -165,10 +174,10 @@ async function callBackendApi(method, endpoint, data, incomingAuthHeader) {
     }
   } catch (err) {
     // Handle network errors and other issues
-    if (err.name === 'FetchError') {
+    if (err.name === "FetchError") {
       throw new Error(`Network error: ${err.message}`);
     }
-    
+
     // Re-throw the original error
     throw err;
   }
@@ -204,13 +213,19 @@ function startServer(options = {}) {
   try {
     server = http.createServer((req, res) => {
       // Add CORS headers for all responses
-      res.setHeader('Access-Control-Allow-Origin', '*');
-      res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS, PUT, PATCH, DELETE');
-      res.setHeader('Access-Control-Allow-Headers', 'X-Requested-With,content-type,Authorization');
-      res.setHeader('Access-Control-Allow-Credentials', 'true');
-      
+      res.setHeader("Access-Control-Allow-Origin", "*");
+      res.setHeader(
+        "Access-Control-Allow-Methods",
+        "GET, POST, OPTIONS, PUT, PATCH, DELETE"
+      );
+      res.setHeader(
+        "Access-Control-Allow-Headers",
+        "X-Requested-With,content-type,Authorization"
+      );
+      res.setHeader("Access-Control-Allow-Credentials", "true");
+
       // Handle preflight OPTIONS request
-      if (req.method === 'OPTIONS') {
+      if (req.method === "OPTIONS") {
         res.statusCode = 204; // No content
         res.end();
         return;
@@ -240,66 +255,175 @@ function startServer(options = {}) {
             uptime: process.uptime(),
           })
         );
-      } else if (req.url === "/visual-editor-api" && req.method === 'POST') {
+      } else if (req.url === "/visual-editor-api" && req.method === "POST") {
         // Handle API requests for getting changes from the backend and applying them
-        let body = '';
-        req.on('data', chunk => {
+        let body = "";
+        req.on("data", (chunk) => {
           body += chunk.toString();
         });
-        
-        req.on('end', async () => {
+
+        req.on("end", async () => {
           try {
             const data = JSON.parse(body);
-            const { id, old_html, new_html } = data;
-            
-            // Validate required fields
-            if (!id || !old_html || !new_html) {
+            // Use snake_case consistently - the frontend might send camelCase or snake_case
+            const {
+              id,
+              old_html,
+              new_html,
+              mode,
+              aiInstruction,
+              ai_instruction,
+            } = data;
+            // Use ai_instruction if provided, otherwise use aiInstruction
+            const actualAiInstruction = ai_instruction || aiInstruction;
+
+            // Debug logging to see what's being received
+            console.log(
+              `\x1b[36mℹ Request data: ${JSON.stringify({
+                id,
+                old_html: old_html ? "[present]" : undefined,
+                new_html: new_html ? "[present]" : undefined,
+                mode,
+                aiInstruction: actualAiInstruction ? "[present]" : undefined,
+              })}\x1b[0m`
+            );
+
+            // Validate required fields based on the mode
+            const isAiMode = mode === "max";
+
+            if (!id) {
               res.statusCode = 400;
-              res.setHeader('Content-Type', 'application/json');
-              res.end(JSON.stringify({ error: "Missing required fields", id, old_html, new_html }));
+              res.setHeader("Content-Type", "application/json");
+              res.end(
+                JSON.stringify({
+                  error: "Missing id field",
+                  id: id || undefined,
+                })
+              );
               return;
+            }
+
+            if (isAiMode) {
+              // AI mode validation
+              if (!actualAiInstruction) {
+                res.statusCode = 400;
+                res.setHeader("Content-Type", "application/json");
+                res.end(
+                  JSON.stringify({
+                    error: "Missing aiInstruction field in AI mode",
+                    id,
+                    mode,
+                  })
+                );
+                return;
+              }
+            } else {
+              // Regular mode validation
+              const missingFields = [];
+              if (!old_html) missingFields.push("old_html");
+              if (!new_html) missingFields.push("new_html");
+
+              if (missingFields.length > 0) {
+                res.statusCode = 400;
+                res.setHeader("Content-Type", "application/json");
+                res.end(
+                  JSON.stringify({
+                    error: `Missing required fields: ${missingFields.join(", ")}`,
+                    id,
+                    missingFields,
+                  })
+                );
+                return;
+              }
             }
 
             try {
               // Extract Authorization header from incoming request
-              const incomingAuthHeader = req.headers['authorization'];
+              const incomingAuthHeader = req.headers["authorization"];
 
               // First get file mapping information
-              console.log(`\x1b[36mℹ Getting file mapping info for hash ID: ${id}\x1b[0m`);
-              const fileMappingResponse = await callBackendApi('GET', `file-mappings/${id}`, null, incomingAuthHeader);
-              
+              console.log(
+                `\x1b[36mℹ Getting file mapping info for hash ID: ${id}\x1b[0m`
+              );
+              const fileMappingResponse = await callBackendApi(
+                "GET",
+                `code-sync/file-mappings/${id}`,
+                null,
+                incomingAuthHeader
+              );
+
               if (!fileMappingResponse || !fileMappingResponse.file_path) {
-                throw new Error('Failed to get file mapping information');
+                throw new Error("Failed to get file mapping information");
               }
-              
+
               // Read the entire file
               const fileInfo = fileMappingResponse;
               const targetFile = path.join(process.cwd(), fileInfo.file_path);
               console.log(`\x1b[36mℹ Reading file: ${targetFile}\x1b[0m`);
               const fileContent = fs.readFileSync(targetFile, "utf8");
-              
-              // Call backend API to get changes
-              console.log(`\x1b[36mℹ Getting changes from backend for file ID: ${id}\x1b[0m`);
-              
-              const backendResponse = await callBackendApi('POST', 'get-changes', {
-                old_html,
-                new_html,
-                hash_id: id,
-                file_content: fileContent,
-              }, incomingAuthHeader);
-              
-              console.log(`\x1b[36mℹ Received response from backend\x1b[0m`);
-              
-              if (!backendResponse.changes || !Array.isArray(backendResponse.changes)) {
-                console.error(`\x1b[31m✗ Invalid response format: ${JSON.stringify(backendResponse)}\x1b[0m`);
-                throw new Error('Invalid response format from backend');
+
+              // Determine if this is an AI-based request (CodePress Max mode)
+              const isAiMode = data.mode === "max";
+
+              let backendResponse;
+
+              if (isAiMode) {
+                // Call backend API for AI-based changes
+                console.log(
+                  `\x1b[36mℹ Getting AI changes from backend for file ID: ${id}\x1b[0m`
+                );
+                console.log(
+                  `\x1b[36mℹ AI Instruction: ${actualAiInstruction}\x1b[0m`
+                );
+
+                backendResponse = await callBackendApi(
+                  "POST",
+                  "code-sync/get-ai-changes",
+                  {
+                    hash_id: id,
+                    ai_instruction: actualAiInstruction,
+                    file_content: fileContent,
+                  },
+                  incomingAuthHeader
+                );
+              } else {
+                // Call regular backend API to get HTML-based changes
+                console.log(
+                  `\x1b[36mℹ Getting HTML changes from backend for file ID: ${id}\x1b[0m`
+                );
+
+                backendResponse = await callBackendApi(
+                  "POST",
+                  "code-sync/get-changes",
+                  {
+                    old_html,
+                    new_html,
+                    hash_id: id,
+                    file_content: fileContent,
+                  },
+                  incomingAuthHeader
+                );
               }
-              
+
+              console.log(`\x1b[36mℹ Received response from backend\x1b[0m`);
+
+              if (
+                !backendResponse.changes ||
+                !Array.isArray(backendResponse.changes)
+              ) {
+                console.error(
+                  `\x1b[31m✗ Invalid response format: ${JSON.stringify(backendResponse)}\x1b[0m`
+                );
+                throw new Error("Invalid response format from backend");
+              }
+
               const changes = backendResponse.changes;
-              console.log(`\x1b[36mℹ Received ${changes.length} changes from backend\x1b[0m`);
-              
+              console.log(
+                `\x1b[36mℹ Received ${changes.length} changes from backend\x1b[0m`
+              );
+
               // File content already loaded from above
-              
+
               // Apply the changes
               const modifiedContent = applyTextChanges(fileContent, changes);
 
@@ -316,28 +440,44 @@ function startServer(options = {}) {
                 // If formatting fails, use the unformatted code
                 formattedCode = modifiedContent;
               }
-              
+
               // Write back to file
               fs.writeFileSync(targetFile, formattedCode, "utf8");
-              
-              console.log(`\x1b[32m✓ Updated file ${targetFile} with ${changes.length} changes\x1b[0m`);
-              
+
+              console.log(
+                `\x1b[32m✓ Updated file ${targetFile} with ${changes.length} changes\x1b[0m`
+              );
+
               res.statusCode = 200;
-              res.setHeader('Content-Type', 'application/json');
-              res.end(JSON.stringify({ 
-                success: true, 
-                message: `Applied ${changes.length} changes to ${fileInfo.file_path}` 
-              }));
+              res.setHeader("Content-Type", "application/json");
+
+              // Include the modified content in the response for AI mode
+              if (isAiMode) {
+                res.end(
+                  JSON.stringify({
+                    success: true,
+                    message: `Applied ${changes.length} AI-suggested changes to ${fileInfo.file_path}`,
+                    modified_content: formattedCode,
+                  })
+                );
+              } else {
+                res.end(
+                  JSON.stringify({
+                    success: true,
+                    message: `Applied ${changes.length} changes to ${fileInfo.file_path}`,
+                  })
+                );
+              }
             } catch (apiError) {
               console.error("Error applying changes:", apiError);
               res.statusCode = 500;
-              res.setHeader('Content-Type', 'application/json');
+              res.setHeader("Content-Type", "application/json");
               res.end(JSON.stringify({ error: apiError.message }));
             }
           } catch (parseError) {
             console.error("Error parsing request data:", parseError);
             res.statusCode = 400;
-            res.setHeader('Content-Type', 'application/json');
+            res.setHeader("Content-Type", "application/json");
             res.end(JSON.stringify({ error: "Invalid JSON" }));
           }
         });

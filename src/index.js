@@ -7,7 +7,7 @@ const { execSync } = require("child_process");
 
 // Keep track of the last request time to throttle requests
 let lastRequestTime = 0;
-const MIN_REQUEST_INTERVAL = 1000; // Minimum 1 second between requests
+const MIN_REQUEST_INTERVAL = 0; // Minimum 50ms between requests
 
 /**
  * Detects the current git branch
@@ -123,6 +123,9 @@ module.exports = function (babel, options = {}) {
   // Determine environment
   const isProduction = process.env.NODE_ENV === "production";
 
+  // Flag to ensure repo/branch attributes are added only once globally
+  let globalAttributesAdded = false;
+
   // Default options
   const {
     outputPath = "codepress-file-hash-map.json", // Only used for local fallback
@@ -142,7 +145,11 @@ module.exports = function (babel, options = {}) {
   let fileMapping = {};
 
   // Function to send file mappings to the database in bulk with retries
-  const saveFileMappingsToDatabase = async (mappings, retryCount = 3, retryDelay = 1000) => {
+  const saveFileMappingsToDatabase = async (
+    mappings,
+    retryCount = 3,
+    retryDelay = 1000
+  ) => {
     // Check if required config is missing
     if (!repositoryId || !apiToken) {
       console.log(
@@ -164,7 +171,7 @@ module.exports = function (babel, options = {}) {
       } file mappings in bulk request\x1b[0m`
     );
 
-    const endpoint = `${backendUrl}/api/bulk-file-mappings`;
+    const endpoint = `${backendUrl}/api/code-sync/bulk-file-mappings`;
     const payload = {
       repository_name: repositoryId,
       branch,
@@ -180,7 +187,9 @@ module.exports = function (babel, options = {}) {
       try {
         // Add attempt number to log if it's a retry
         if (attempt > 0) {
-          console.log(`\x1b[33mℹ Retry attempt ${attempt}/${retryCount} for saving file mappings...\x1b[0m`);
+          console.log(
+            `\x1b[33mℹ Retry attempt ${attempt}/${retryCount} for saving file mappings...\x1b[0m`
+          );
         }
 
         const response = await fetch(endpoint, {
@@ -204,7 +213,7 @@ module.exports = function (babel, options = {}) {
         } else {
           const errorData = await response.text();
           lastError = `HTTP error: ${response.status} - ${errorData}`;
-          
+
           // Only log error details on final retry attempt
           if (attempt === retryCount) {
             console.error(
@@ -212,16 +221,18 @@ module.exports = function (babel, options = {}) {
             );
             console.error(`\x1b[31m  Response: ${errorData}\x1b[0m`);
           }
-          
+
           // Check for errors that shouldn't trigger retries (e.g. 401, 403)
           if (response.status === 401 || response.status === 403) {
-            console.error(`\x1b[31m✗ Authentication error - not retrying\x1b[0m`);
+            console.error(
+              `\x1b[31m✗ Authentication error - not retrying\x1b[0m`
+            );
             return false;
           }
         }
       } catch (error) {
         lastError = error.message;
-        
+
         // Only log error details on final retry attempt
         if (attempt === retryCount) {
           console.error(
@@ -232,18 +243,20 @@ module.exports = function (babel, options = {}) {
 
       // Increment attempt counter
       attempt++;
-      
+
       // If this was the last attempt, break and return false
       if (attempt > retryCount) {
         break;
       }
-      
+
       // Wait before retrying
-      await new Promise(resolve => setTimeout(resolve, retryDelay * attempt));
+      await new Promise((resolve) => setTimeout(resolve, retryDelay * attempt));
     }
 
     // If we reach here, all retries failed
-    console.error(`\x1b[31m✗ All ${retryCount} attempts to save file mappings failed\x1b[0m`);
+    console.error(
+      `\x1b[31m✗ All ${retryCount} attempts to save file mappings failed\x1b[0m`
+    );
     return false;
   };
 
@@ -275,101 +288,21 @@ module.exports = function (babel, options = {}) {
 
         // Save hash in file state for other visitors to access
         state.file.fileHash = hash;
-
-        // Add repository and branch attributes to the first JSX element in the main component
-        if (repositoryId) {
-          // Find the first JSX element in the main component's return statement
-          nodePath.traverse({
-            ReturnStatement(path) {
-              // Skip if we've already added attributes
-              if (state.repoAttributesAdded) return;
-
-              // Look for JSX elements in the return statement
-              path.traverse({
-                JSXOpeningElement(jsxPath) {
-                  const { node } = jsxPath;
-                  
-                  // Only add repo attributes to container elements (html, body, div)
-                  const elementName = node.name.name;
-                  if (!["html", "body", "div"].includes(elementName)) {
-                    return;
-                  }
-
-                  // Skip if we've already added attributes
-                  if (state.repoAttributesAdded) return;
-
-                  // Check for repo attribute
-                  const hasRepoAttribute = node.attributes.some((attr) => {
-                    return (
-                      t.isJSXAttribute(attr) &&
-                      t.isJSXIdentifier(attr.name, { name: repoAttributeName })
-                    );
-                  });
-
-                  // Check for branch attribute
-                  const hasBranchAttribute = node.attributes.some((attr) => {
-                    return (
-                      t.isJSXAttribute(attr) &&
-                      t.isJSXIdentifier(attr.name, {
-                        name: branchAttributeName,
-                      })
-                    );
-                  });
-
-                  // Add repo name attribute if needed and available
-                  if (!hasRepoAttribute) {
-                    // Don't hash the repository name anymore - use plain text
-                    console.log(
-                      `\x1b[32m✓ Adding repo attribute to ${elementName} element\x1b[0m`
-                    );
-
-                    node.attributes.push(
-                      t.jsxAttribute(
-                        t.jsxIdentifier(repoAttributeName),
-                        t.stringLiteral(repositoryId)
-                      )
-                    );
-                  }
-
-                  // Add branch attribute if needed and available
-                  if (!hasBranchAttribute && branch) {
-                    // Don't hash the branch name anymore - use plain text
-                    console.log(
-                      `\x1b[32m✓ Adding branch attribute to ${elementName} element\x1b[0m`
-                    );
-
-                    node.attributes.push(
-                      t.jsxAttribute(
-                        t.jsxIdentifier(branchAttributeName),
-                        t.stringLiteral(branch)
-                      )
-                    );
-                  }
-
-                  // Mark that we've added attributes
-                  state.repoAttributesAdded = true;
-                },
-              });
-            },
-          });
-        }
       },
 
       JSXOpeningElement(nodePath, state) {
         const fileHash = state.file.fileHash;
-        if (!fileHash) return;
+        if (!fileHash) return; // Skip if no hash (e.g., node_modules)
 
-        // Insert attributes if not present
         const { node } = nodePath;
+        const t = babel.types; // Ensure babel types are available
 
-        // Add file path attribute to all JSX elements
-        const hasFileAttribute = node.attributes.some((attr) => {
-          return (
+        // --- Add file path attribute (codepress-data-fp) ---
+        const hasFileAttribute = node.attributes.some(
+          (attr) =>
             t.isJSXAttribute(attr) &&
             t.isJSXIdentifier(attr.name, { name: attributeName })
-          );
-        });
-
+        );
         if (!hasFileAttribute) {
           node.attributes.push(
             t.jsxAttribute(
@@ -377,6 +310,64 @@ module.exports = function (babel, options = {}) {
               t.stringLiteral(fileHash)
             )
           );
+        }
+
+        // --- Add repo and branch attributes (once globally to a root-like element) ---
+        // Check if repo/branch info is available and attributes haven't been added globally yet
+        if (repositoryId && !globalAttributesAdded) {
+          // Check if the current element is a suitable root element (html, body, or a top-level div)
+          let isSuitableElement = false;
+          let elementName = "";
+          if (t.isJSXIdentifier(node.name)) {
+            elementName = node.name.name;
+            // Target html, body, or div as potential root elements
+            isSuitableElement = ["html", "body", "div"].includes(elementName);
+          }
+
+          // If it's a suitable element, add the attributes and set the global flag
+          if (isSuitableElement) {
+            // Check if repo attribute already exists (e.g., added manually)
+            const hasRepoAttribute = node.attributes.some(
+              (attr) =>
+                t.isJSXAttribute(attr) &&
+                t.isJSXIdentifier(attr.name, { name: repoAttributeName })
+            );
+            if (!hasRepoAttribute) {
+              console.log(
+                `\x1b[32m✓ Adding repo attribute globally to <${elementName}> in ${path.basename(state.file.opts.filename)}\x1b[0m`
+              );
+              node.attributes.push(
+                t.jsxAttribute(
+                  t.jsxIdentifier(repoAttributeName),
+                  t.stringLiteral(repositoryId)
+                )
+              );
+            }
+
+            // Check if branch attribute already exists
+            const hasBranchAttribute = node.attributes.some(
+              (attr) =>
+                t.isJSXAttribute(attr) &&
+                t.isJSXIdentifier(attr.name, { name: branchAttributeName })
+            );
+            if (!hasBranchAttribute && branch) {
+              console.log(
+                `\x1b[32m✓ Adding branch attribute globally to <${elementName}> in ${path.basename(state.file.opts.filename)}\x1b[0m`
+              );
+              node.attributes.push(
+                t.jsxAttribute(
+                  t.jsxIdentifier(branchAttributeName),
+                  t.stringLiteral(branch)
+                )
+              );
+            }
+
+            // Mark that we've added attributes globally
+            globalAttributesAdded = true;
+            console.log(
+              `\x1b[36mℹ Repo/branch attributes added globally. Won't add again.\x1b[0m`
+            );
+          }
         }
       },
     },
@@ -393,77 +384,30 @@ module.exports = function (babel, options = {}) {
         console.log("\x1b[33m⚠ No files were processed by CodePress\x1b[0m");
         return;
       }
-      
+
       // Throttle requests to avoid overwhelming the server
       const now = Date.now();
       const timeSinceLastRequest = now - lastRequestTime;
-      
+
       if (timeSinceLastRequest < MIN_REQUEST_INTERVAL) {
-        console.log(`\x1b[33mℹ Throttling database request (${timeSinceLastRequest}ms since last request)\x1b[0m`);
-        
-        // Write to local file instead of making another request too soon
-        if (!isProduction) {
-          try {
-            fs.writeFileSync(
-              outputPath, 
-              JSON.stringify(fileMapping, null, 2)
-            );
-            console.log(
-              `\x1b[32m✓ File mapping written to ${outputPath} due to throttling\x1b[0m`
-            );
-          } catch (error) {
-            console.error(
-              `\x1b[31m✗ Error writing file mapping: ${error.message}\x1b[0m`
-            );
-          }
-        }
+        console.log(
+          `\x1b[33mℹ Throttling database request (${timeSinceLastRequest}ms since last request)\x1b[0m`
+        );
         return;
       }
-      
+
       // Update last request time
       lastRequestTime = now;
 
       // Send all mappings in a single batch request with retries
       saveFileMappingsToDatabase(fileMapping)
         .then((success) => {
-          // In development, write to file as fallback if database save failed
-          if (!isProduction && !success) {
-            try {
-              fs.writeFileSync(
-                outputPath,
-                JSON.stringify(fileMapping, null, 2)
-              );
-              console.log(
-                `\x1b[32m✓ Codepress file mapping written to ${outputPath} as fallback\x1b[0m`
-              );
-            } catch (error) {
-              console.error(
-                `\x1b[31m✗ Error writing Codepress file mapping: ${error.message}\x1b[0m`
-              );
-            }
-          }
+          // No file fallback
         })
         .catch((error) => {
           console.error(
             `\x1b[31m✗ Database save error: ${error.message}\x1b[0m`
           );
-
-          // Write to file as fallback in development
-          if (!isProduction) {
-            try {
-              fs.writeFileSync(
-                outputPath,
-                JSON.stringify(fileMapping, null, 2)
-              );
-              console.log(
-                `\x1b[32m✓ Codepress file mapping written to ${outputPath} as fallback\x1b[0m`
-              );
-            } catch (fileError) {
-              console.error(
-                `\x1b[31m✗ Error writing Codepress file mapping: ${fileError.message}\x1b[0m`
-              );
-            }
-          }
         });
     },
   };
