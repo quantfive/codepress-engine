@@ -8,7 +8,7 @@ let lastRequestTime = 0;
 const MIN_REQUEST_INTERVAL = 0; // Minimum 50ms between requests
 
 // encoder (build time)
-const SECRET = Buffer.from("codepress-secret-key"); // Use a slightly more descriptive key
+const SECRET = Buffer.from("codepress-file-obfuscation"); // Use a slightly more descriptive key
 function encode(relPath) {
   if (!relPath) return "";
   const xored = Buffer.from(relPath).map(
@@ -131,8 +131,6 @@ function hashValue(value) {
  */
 // Export the hash function for use in the browser extension
 module.exports.hashValue = hashValue;
-module.exports.encode = encode; // Export encode/decode if needed externally
-module.exports.decode = decode;
 
 // Main plugin function
 module.exports = function (babel, options = {}) {
@@ -191,17 +189,23 @@ module.exports = function (babel, options = {}) {
         const { node } = nodePath;
         const t = babel.types; // Ensure babel types are available
 
-        // --- Add encoded file path attribute (codepress-data-fp) ---
-        const hasFileAttribute = node.attributes.some(
+        // --- Add/Update encoded file path attribute (codepress-data-fp) ---
+        const currentAttributeValue = `${encodedPath}:${nodePath.node.loc.start.line}`;
+        let existingAttribute = node.attributes.find(
           (attr) =>
             t.isJSXAttribute(attr) &&
             t.isJSXIdentifier(attr.name, { name: attributeName })
         );
-        if (!hasFileAttribute) {
+
+        if (existingAttribute) {
+          // Update existing attribute's value
+          existingAttribute.value = t.stringLiteral(currentAttributeValue);
+        } else {
+          // Add new attribute
           node.attributes.push(
             t.jsxAttribute(
               t.jsxIdentifier(attributeName),
-              t.stringLiteral(`${encodedPath}:${nodePath.node.loc.start.line}`)
+              t.stringLiteral(currentAttributeValue)
             )
           );
         }
