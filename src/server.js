@@ -456,26 +456,36 @@ function startServer(options = {}) {
               );
 
               // File content already loaded from above
-
+              backendResponse = await callBackendApi(
+                "POST",
+                "code-sync/update-file",
+                {
+                  id,
+                  new_html,
+                  old_html,
+                  file_content: fileContent,
+                },
+                incomingAuthHeader
+              );
               // Apply the changes
-              const modifiedContent = applyTextChanges(fileContent, changes);
-
-              // Format with Prettier
-              let formattedCode;
-              try {
-                formattedCode = await prettier.format(modifiedContent, {
-                  parser: "typescript",
-                  semi: true,
-                  singleQuote: false,
-                });
-              } catch (prettierError) {
-                console.error("Prettier formatting failed:", prettierError);
-                // If formatting fails, use the unformatted code
-                formattedCode = modifiedContent;
-              }
-
-              // Write back to file
-              fs.writeFileSync(targetFile, formattedCode, "utf8");
+              //const modifiedContent = applyTextChanges(fileContent, changes);
+              //
+              //// Format with Prettier
+              //let formattedCode;
+              //try {
+              //  formattedCode = await prettier.format(modifiedContent, {
+              //    parser: "typescript",
+              //    semi: true,
+              //    singleQuote: false,
+              //  });
+              //} catch (prettierError) {
+              //  console.error("Prettier formatting failed:", prettierError);
+              //  // If formatting fails, use the unformatted code
+              //  formattedCode = modifiedContent;
+              //}
+              //
+              //// Write back to file
+              //fs.writeFileSync(targetFile, formattedCode, "utf8");
 
               console.log(
                 `\x1b[32m✓ Updated file ${targetFile} with ${changes.length} changes\x1b[0m`
