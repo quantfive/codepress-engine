@@ -5,6 +5,7 @@ const fs = require("fs");
 const path = require("path");
 const prettier = require("prettier");
 const fetch = require("node-fetch");
+const { decode } = require("./index");
 
 /**
  * Gets the port to use for the server
@@ -300,9 +301,10 @@ function startServer(options = {}) {
             const data = JSON.parse(body);
             // Use snake_case consistently - the frontend might send camelCase or snake_case
             const {
-              id,
+              encoded_location,
               old_html,
               new_html,
+              github_repo_name,
               mode,
               aiInstruction,
               ai_instruction,
@@ -313,7 +315,7 @@ function startServer(options = {}) {
             // Debug logging to see what's being received
             console.log(
               `\x1b[36mℹ Request data: ${JSON.stringify({
-                id,
+                encoded_location,
                 old_html: old_html ? "[present]" : undefined,
                 new_html: new_html ? "[present]" : undefined,
                 mode,
@@ -324,13 +326,13 @@ function startServer(options = {}) {
             // Validate required fields based on the mode
             const isAiMode = mode === "max";
 
-            if (!id) {
+            if (!encoded_location) {
               res.statusCode = 400;
               res.setHeader("Content-Type", "application/json");
               res.end(
                 JSON.stringify({
-                  error: "Missing id field",
-                  id: id || undefined,
+                  error: "Missing encoded_location field",
+                  encoded_location: encoded_location || undefined,
                 })
               );
               return;
@@ -344,7 +346,7 @@ function startServer(options = {}) {
                 res.end(
                   JSON.stringify({
                     error: "Missing aiInstruction field in AI mode",
-                    id,
+                    encoded_location,
                     mode,
                   })
                 );
@@ -362,7 +364,7 @@ function startServer(options = {}) {
                 res.end(
                   JSON.stringify({
                     error: `Missing required fields: ${missingFields.join(", ")}`,
-                    id,
+                    encoded_location,
                     missingFields,
                   })
                 );
@@ -371,27 +373,12 @@ function startServer(options = {}) {
             }
 
             try {
-              // Extract Authorization header from incoming request
               const incomingAuthHeader = req.headers["authorization"];
 
-              // First get file mapping information
-              console.log(
-                `\x1b[36mℹ Getting file mapping info for hash ID: ${id}\x1b[0m`
-              );
-              const fileMappingResponse = await callBackendApi(
-                "GET",
-                `code-sync/file-mappings/${id}`,
-                null,
-                incomingAuthHeader
-              );
-
-              if (!fileMappingResponse || !fileMappingResponse.file_path) {
-                throw new Error("Failed to get file mapping information");
-              }
-
-              // Read the entire file
-              const fileInfo = fileMappingResponse;
-              const targetFile = path.join(process.cwd(), fileInfo.file_path);
+              const encodedFilePath = encoded_location.split(":")[0];
+              const filePath = decode(encodedFilePath);
+              console.log(`\x1b[36mℹ Decoded file path: ${filePath}\x1b[0m`);
+              const targetFile = path.join(process.cwd(), filePath);
               console.log(`\x1b[36mℹ Reading file: ${targetFile}\x1b[0m`);
               const fileContent = fs.readFileSync(targetFile, "utf8");
 
@@ -403,7 +390,7 @@ function startServer(options = {}) {
               if (isAiMode) {
                 // Call backend API for AI-based changes
                 console.log(
-                  `\x1b[36mℹ Getting AI changes from backend for file ID: ${id}\x1b[0m`
+                  `\x1b[36mℹ Getting AI changes from backend for file encoded_location: ${encoded_location}\x1b[0m`
                 );
                 console.log(
                   `\x1b[36mℹ AI Instruction: ${actualAiInstruction}\x1b[0m`
@@ -413,16 +400,17 @@ function startServer(options = {}) {
                   "POST",
                   "code-sync/get-ai-changes",
                   {
-                    hash_id: id,
+                    encoded_location,
                     ai_instruction: actualAiInstruction,
                     file_content: fileContent,
+                    github_repo_name,
                   },
                   incomingAuthHeader
                 );
               } else {
                 // Call regular backend API to get HTML-based changes
                 console.log(
-                  `\x1b[36mℹ Getting HTML changes from backend for file ID: ${id}\x1b[0m`
+                  `\x1b[36mℹ Getting HTML changes from backend for file encoded_location: ${encoded_location}\x1b[0m`
                 );
 
                 backendResponse = await callBackendApi(
@@ -431,7 +419,8 @@ function startServer(options = {}) {
                   {
                     old_html,
                     new_html,
-                    hash_id: id,
+                    github_repo_name,
+                    encoded_location,
                     file_content: fileContent,
                   },
                   incomingAuthHeader
@@ -489,7 +478,7 @@ function startServer(options = {}) {
                 res.end(
                   JSON.stringify({
                     success: true,
-                    message: `Applied ${changes.length} AI-suggested changes to ${fileInfo.file_path}`,
+                    message: `Applied ${changes.length} AI-suggested changes to ${filePath}`,
                     modified_content: formattedCode,
                   })
                 );
@@ -497,7 +486,7 @@ function startServer(options = {}) {
                 res.end(
                   JSON.stringify({
                     success: true,
-                    message: `Applied ${changes.length} changes to ${fileInfo.file_path}`,
+                    message: `Applied ${changes.length} changes to ${filePath}`,
                   })
                 );
               }
