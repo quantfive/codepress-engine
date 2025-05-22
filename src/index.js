@@ -55,7 +55,7 @@ function detectGitBranch() {
  * - git@github.com:owner/repo.git
  * @returns {string|null} Repository ID if detected, null otherwise
  */
-function detectGitRepoId() {
+function detectGitRepoName() {
   try {
     // Get the remote URL for the 'origin' remote
     const remoteUrl = execSync("git config --get remote.origin.url", {
@@ -102,43 +102,20 @@ function detectGitRepoId() {
 }
 
 /**
- * Hashes and encodes a string value for use as an attribute
- * Uses a simple two-way encryption scheme so it can be decoded by the extension
- * @param {string} value - The value to hash
- * @returns {string} The hashed value
- */
-function hashValue(value) {
-  if (!value) return "";
-
-  // Use a fixed key that will be shared with the browser extension
-  // This is not high security, just to prevent casual inspection
-  const key = "codepress-identifier-key";
-
-  // Create a simple reversible encoding
-  const hashedValue = Buffer.from(
-    `${key}:${value}:${key.split("").reverse().join("")}`
-  ).toString("base64");
-
-  return hashedValue;
-}
-
-/**
  * Babel plugin that adds unique file identifiers to JSX elements
  * This enables visual editing tools to map rendered HTML back to source files
  *
  * This plugin collects all file mappings and sends them in a single batch request
  * to the database with environment support
  */
-// Export the hash function for use in the browser extension
-module.exports.hashValue = hashValue;
 
 // Main plugin function
-module.exports = function (babel, options = {}) {
+const plugin = function (babel, options = {}) {
   const t = babel.types;
 
   // Auto-detect git branch and repository if in a git repository
   const currentBranch = detectGitBranch();
-  const currentRepoId = detectGitRepoId();
+  const currentRepoName = detectGitRepoName(); // Renamed from currentRepoId
 
   // Determine environment
   const isProduction = process.env.NODE_ENV === "production";
@@ -154,7 +131,7 @@ module.exports = function (babel, options = {}) {
     attributeName = "codepress-data-fp",
     repoAttributeName = "codepress-github-repo-name",
     branchAttributeName = "codepress-github-branch",
-    repositoryId = currentRepoId,
+    repoName = currentRepoName, // Use the repo name for this attribute
     branch = currentBranch,
   } = options;
 
@@ -212,7 +189,7 @@ module.exports = function (babel, options = {}) {
 
         // --- Add repo and branch attributes (once globally to a root-like element) ---
         // Check if repo/branch info is available and attributes haven't been added globally yet
-        if (repositoryId && !globalAttributesAdded) {
+        if (repoName && !globalAttributesAdded) {
           // Check if the current element is a suitable root element (html, body, or a top-level div)
           let isSuitableElement = false;
           let elementName = "";
@@ -237,7 +214,7 @@ module.exports = function (babel, options = {}) {
               node.attributes.push(
                 t.jsxAttribute(
                   t.jsxIdentifier(repoAttributeName),
-                  t.stringLiteral(repositoryId)
+                  t.stringLiteral(repoName)
                 )
               );
             }
@@ -283,3 +260,6 @@ module.exports = function (babel, options = {}) {
     },
   };
 };
+
+module.exports = plugin;
+module.exports.decode = decode;
