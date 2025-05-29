@@ -167,7 +167,12 @@ const plugin = function (babel, options = {}) {
         const t = babel.types; // Ensure babel types are available
 
         // --- Add/Update encoded file path attribute (codepress-data-fp) ---
-        const currentAttributeValue = `${encodedPath}:${nodePath.node.loc.start.line}`;
+        const startLine = nodePath.node.loc.start.line;
+        // Get the end line from the parent JSXElement (which includes closing tag)
+        const endLine = nodePath.parent.loc
+          ? nodePath.parent.loc.end.line
+          : startLine;
+        const currentAttributeValue = `${encodedPath}:${startLine}-${endLine}`;
         let existingAttribute = node.attributes.find(
           (attr) =>
             t.isJSXAttribute(attr) &&
