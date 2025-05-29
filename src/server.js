@@ -305,6 +305,8 @@ function startServer(options = {}) {
               old_html,
               new_html,
               github_repo_name,
+              image_data,
+              filename,
               mode,
               aiInstruction,
               ai_instruction,
@@ -320,6 +322,7 @@ function startServer(options = {}) {
                 new_html: new_html ? "[present]" : undefined,
                 mode,
                 aiInstruction: actualAiInstruction ? "[present]" : undefined,
+                image_data: image_data ? "[present]" : undefined,
               })}\x1b[0m`
             );
 
@@ -382,6 +385,70 @@ function startServer(options = {}) {
               console.log(`\x1b[36mℹ Reading file: ${targetFile}\x1b[0m`);
               const fileContent = fs.readFileSync(targetFile, "utf8");
 
+              // Save image_data if present
+              if (image_data) {
+                try {
+                  const imageDir = path.join(process.cwd(), "public");
+                  if (!fs.existsSync(imageDir)) {
+                    fs.mkdirSync(imageDir, { recursive: true });
+                    console.log(
+                      `\x1b[36mℹ Created directory: ${imageDir}\x1b[0m`
+                    );
+                  }
+
+                  let imagePath;
+                  let base64Data;
+
+                  if (filename) {
+                    imagePath = path.join(imageDir, filename);
+                    // When filename is provided, assume image_data is just the base64 string
+                    const match = image_data.match(
+                      /^data:image\/[\w+]+\;base64,(.+)$/
+                    );
+                    if (match && match[1]) {
+                      base64Data = match[1]; // Extract if full data URI is sent
+                    } else {
+                      base64Data = image_data; // Assume raw base64
+                    }
+                    console.log(
+                      `\x1b[36mℹ Using provided filename: ${filename}\x1b[0m`
+                    );
+                  } else {
+                    // Fallback to existing logic if filename is not provided
+                    const match = image_data.match(
+                      /^data:image\/([\w+]+);base64,(.+)$/
+                    );
+                    let imageExtension;
+
+                    if (match && match[1] && match[2]) {
+                      imageExtension = match[1];
+                      base64Data = match[2];
+                    } else {
+                      base64Data = image_data;
+                      imageExtension = "png";
+                      console.log(
+                        "\x1b[33m⚠ Image data URI prefix not found and no filename provided, defaulting to .png extension.\x1b[0m"
+                      );
+                    }
+
+                    if (imageExtension === "jpeg") imageExtension = "jpg";
+                    if (imageExtension === "svg+xml") imageExtension = "svg";
+
+                    const imageName = `image_${Date.now()}.${imageExtension}`;
+                    imagePath = path.join(imageDir, imageName);
+                  }
+
+                  const imageBuffer = Buffer.from(base64Data, "base64");
+                  fs.writeFileSync(imagePath, imageBuffer);
+                  console.log(`\x1b[32m✓ Image saved to ${imagePath}\x1b[0m`);
+                } catch (imgError) {
+                  console.error(
+                    `\x1b[31m✗ Error saving image: ${imgError.message}\x1b[0m`
+                  );
+                  // Do not block the main operation if image saving fails
+                }
+              }
+
               // Determine if this is an AI-based request (CodePress Max mode)
               const isAiMode = data.mode === "max";
 
@@ -415,7 +482,7 @@ function startServer(options = {}) {
 
                 backendResponse = await callBackendApi(
                   "POST",
-                  "code-sync/get-changes",
+                  "code-sync/get-agent-changes",
                   {
                     old_html,
                     new_html,
