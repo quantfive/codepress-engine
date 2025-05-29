@@ -1,6 +1,6 @@
 {
   "name": "@quantfive/codepress-engine",
-  "version": "0.9.0",
+  "version": "0.10.0",
   "description": "Babel plugin that adds file identifiers to all JSX elements and repository/branch info to container elements like div, html or body",
   "main": "dist/index.js",
   "exports": {
