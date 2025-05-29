@@ -1,5 +1,5 @@
 // Codepress Dev Server
-const http = require("http");
+const fastify = require("fastify");
 const os = require("os");
 const fs = require("fs");
 const path = require("path");
@@ -218,12 +218,304 @@ async function callBackendApi(method, endpoint, data, incomingAuthHeader) {
 }
 
 /**
+ * Create and configure the Fastify app
+ * @returns {Object} The configured Fastify instance
+ */
+function createApp() {
+  const app = fastify({
+    logger: false, // Disable built-in logging since we have custom logging
+  });
+
+  // Register CORS plugin
+  app.register(require("@fastify/cors"), {
+    origin: "*",
+    methods: ["GET", "POST", "OPTIONS", "PUT", "PATCH", "DELETE"],
+    allowedHeaders: ["X-Requested-With", "content-type", "Authorization"],
+    credentials: true,
+  });
+
+  // Ping route
+  app.get("/ping", async (request, reply) => {
+    return reply.code(200).type("text/plain").send("pong");
+  });
+
+  // Meta route
+  app.get("/meta", async (request, reply) => {
+    // Try to get package version but don't fail if not available
+    let version = "0.0.0";
+    try {
+      // In production builds, use a relative path that works with the installed package structure
+      version = require("../package.json").version;
+    } catch (e) {
+      // Ignore error, use default version
+    }
+
+    return reply.code(200).send({
+      name: "Codepress Dev Server",
+      version: version,
+      environment: process.env.NODE_ENV || "development",
+      uptime: process.uptime(),
+    });
+  });
+
+  // Visual editor API route
+  app.post("/visual-editor-api", async (request, reply) => {
+    try {
+      const data = request.body;
+      // Use snake_case consistently - the frontend might send camelCase or snake_case
+      const {
+        encoded_location,
+        old_html,
+        new_html,
+        github_repo_name,
+        image_data,
+        filename,
+        mode,
+        aiInstruction,
+        ai_instruction,
+        style_changes,
+      } = data;
+      // Use ai_instruction if provided, otherwise use aiInstruction
+      const actualAiInstruction = ai_instruction || aiInstruction;
+
+      // Debug logging to see what's being received
+      console.log(
+        `\x1b[36mℹ Request data: ${JSON.stringify({
+          encoded_location,
+          old_html: old_html ? "[present]" : undefined,
+          new_html: new_html ? "[present]" : undefined,
+          mode,
+          aiInstruction: actualAiInstruction ? "[present]" : undefined,
+          image_data: image_data ? "[present]" : undefined,
+        })}\x1b[0m`
+      );
+
+      // Validate required fields based on the mode
+      const isAiMode = mode === "max";
+
+      if (!encoded_location) {
+        return reply.code(400).send({
+          error: "Missing encoded_location field",
+          encoded_location: encoded_location || undefined,
+        });
+      }
+
+      if (isAiMode) {
+        // AI mode validation
+        if (!actualAiInstruction) {
+          return reply.code(400).send({
+            error: "Missing aiInstruction field in AI mode",
+            encoded_location,
+            mode,
+          });
+        }
+      } else {
+        // Regular mode validation
+        const missingFields = [];
+        if (!old_html) missingFields.push("old_html");
+        if (!new_html) missingFields.push("new_html");
+
+        if (missingFields.length > 0) {
+          return reply.code(400).send({
+            error: `Missing required fields: ${missingFields.join(", ")}`,
+            encoded_location,
+            missingFields,
+          });
+        }
+      }
+
+      try {
+        const incomingAuthHeader = request.headers["authorization"];
+
+        const encodedFilePath = encoded_location.split(":")[0];
+        const filePath = decode(encodedFilePath);
+        console.log(`\x1b[36mℹ Decoded file path: ${filePath}\x1b[0m`);
+        const targetFile = path.join(process.cwd(), filePath);
+        console.log(`\x1b[36mℹ Reading file: ${targetFile}\x1b[0m`);
+        const fileContent = fs.readFileSync(targetFile, "utf8");
+
+        // Save image_data if present
+        if (image_data) {
+          try {
+            const imageDir = path.join(process.cwd(), "public");
+            if (!fs.existsSync(imageDir)) {
+              fs.mkdirSync(imageDir, { recursive: true });
+              console.log(`\x1b[36mℹ Created directory: ${imageDir}\x1b[0m`);
+            }
+
+            let imagePath;
+            let base64Data;
+
+            if (filename) {
+              imagePath = path.join(imageDir, filename);
+              // When filename is provided, assume image_data is just the base64 string
+              const match = image_data.match(
+                /^data:image\/[\w+]+\;base64,(.+)$/
+              );
+              if (match && match[1]) {
+                base64Data = match[1]; // Extract if full data URI is sent
+              } else {
+                base64Data = image_data; // Assume raw base64
+              }
+              console.log(
+                `\x1b[36mℹ Using provided filename: ${filename}\x1b[0m`
+              );
+            } else {
+              // Fallback to existing logic if filename is not provided
+              const match = image_data.match(
+                /^data:image\/([\w+]+);base64,(.+)$/
+              );
+              let imageExtension;
+
+              if (match && match[1] && match[2]) {
+                imageExtension = match[1];
+                base64Data = match[2];
+              } else {
+                base64Data = image_data;
+                imageExtension = "png";
+                console.log(
+                  "\x1b[33m⚠ Image data URI prefix not found and no filename provided, defaulting to .png extension.\x1b[0m"
+                );
+              }
+
+              if (imageExtension === "jpeg") imageExtension = "jpg";
+              if (imageExtension === "svg+xml") imageExtension = "svg";
+
+              const imageName = `image_${Date.now()}.${imageExtension}`;
+              imagePath = path.join(imageDir, imageName);
+            }
+
+            const imageBuffer = Buffer.from(base64Data, "base64");
+            fs.writeFileSync(imagePath, imageBuffer);
+            console.log(`\x1b[32m✓ Image saved to ${imagePath}\x1b[0m`);
+          } catch (imgError) {
+            console.error(
+              `\x1b[31m✗ Error saving image: ${imgError.message}\x1b[0m`
+            );
+            // Do not block the main operation if image saving fails
+          }
+        }
+
+        // Determine if this is an AI-based request (CodePress Max mode)
+        const isAiMode = data.mode === "max";
+
+        let backendResponse;
+
+        if (isAiMode) {
+          // Call backend API for AI-based changes
+          console.log(
+            `\x1b[36mℹ Getting AI changes from backend for file encoded_location: ${encoded_location}\x1b[0m`
+          );
+          console.log(
+            `\x1b[36mℹ AI Instruction: ${actualAiInstruction}\x1b[0m`
+          );
+
+          backendResponse = await callBackendApi(
+            "POST",
+            "code-sync/get-ai-changes",
+            {
+              encoded_location,
+              ai_instruction: actualAiInstruction,
+              file_content: fileContent,
+              github_repo_name,
+            },
+            incomingAuthHeader
+          );
+        } else {
+          // Call regular backend API to get HTML-based changes
+          console.log(
+            `\x1b[36mℹ Getting HTML changes from backend for file encoded_location: ${encoded_location}\x1b[0m`
+          );
+
+          backendResponse = await callBackendApi(
+            "POST",
+            "code-sync/get-changes",
+            {
+              old_html,
+              new_html,
+              github_repo_name,
+              encoded_location,
+              style_changes,
+              file_content: fileContent,
+            },
+            incomingAuthHeader
+          );
+        }
+
+        console.log(`\x1b[36mℹ Received response from backend\x1b[0m`);
+
+        if (
+          !backendResponse.changes ||
+          !Array.isArray(backendResponse.changes)
+        ) {
+          console.error(
+            `\x1b[31m✗ Invalid response format: ${JSON.stringify(backendResponse)}\x1b[0m`
+          );
+          throw new Error("Invalid response format from backend");
+        }
+
+        const changes = backendResponse.changes;
+        console.log(
+          `\x1b[36mℹ Received ${changes.length} changes from backend\x1b[0m`
+        );
+
+        // Apply the changes
+        const modifiedContent = applyTextChanges(fileContent, changes);
+
+        // Format with Prettier
+        let formattedCode;
+        try {
+          formattedCode = await prettier.format(modifiedContent, {
+            parser: "typescript",
+            semi: true,
+            singleQuote: false,
+          });
+        } catch (prettierError) {
+          console.error("Prettier formatting failed:", prettierError);
+          // If formatting fails, use the unformatted code
+          formattedCode = modifiedContent;
+        }
+
+        // Write back to file
+        fs.writeFileSync(targetFile, formattedCode, "utf8");
+
+        console.log(
+          `\x1b[32m✓ Updated file ${targetFile} with ${changes.length} changes\x1b[0m`
+        );
+
+        // Include the modified content in the response for AI mode
+        if (isAiMode) {
+          return reply.code(200).send({
+            success: true,
+            message: `Applied ${changes.length} AI-suggested changes to ${filePath}`,
+            modified_content: formattedCode,
+          });
+        } else {
+          return reply.code(200).send({
+            success: true,
+            message: `Applied ${changes.length} changes to ${filePath}`,
+          });
+        }
+      } catch (apiError) {
+        console.error("Error applying changes:", apiError);
+        return reply.code(500).send({ error: apiError.message });
+      }
+    } catch (parseError) {
+      console.error("Error parsing request data:", parseError);
+      return reply.code(400).send({ error: "Invalid JSON" });
+    }
+  });
+
+  return app;
+}
+
+/**
  * Starts the Codepress development server if not already running
  * @param {Object} options Server configuration options
  * @param {number} [options.port=4321] Port to run the server on
- * @returns {http.Server|null} The server instance or null if already running
+ * @returns {Object|null} The Fastify instance or null if already running
  */
-function startServer(options = {}) {
+async function startServer(options = {}) {
   // Only run in development environment
   if (process.env.NODE_ENV === "production") {
     return null;
@@ -242,367 +534,31 @@ function startServer(options = {}) {
   // Get the fixed port
   const port = options.port || getServerPort();
 
-  // Create server
-  let server;
   try {
-    server = http.createServer((req, res) => {
-      // Add CORS headers for all responses
-      res.setHeader("Access-Control-Allow-Origin", "*");
-      res.setHeader(
-        "Access-Control-Allow-Methods",
-        "GET, POST, OPTIONS, PUT, PATCH, DELETE"
-      );
-      res.setHeader(
-        "Access-Control-Allow-Headers",
-        "X-Requested-With,content-type,Authorization"
-      );
-      res.setHeader("Access-Control-Allow-Credentials", "true");
+    // Create the Fastify app
+    const app = createApp();
 
-      // Handle preflight OPTIONS request
-      if (req.method === "OPTIONS") {
-        res.statusCode = 204; // No content
-        res.end();
-        return;
-      }
-      // Simple request handling
-      if (req.url === "/ping") {
-        res.statusCode = 200;
-        res.setHeader("Content-Type", "text/plain");
-        res.end("pong");
-      } else if (req.url === "/meta") {
-        res.statusCode = 200;
-        res.setHeader("Content-Type", "application/json");
-        // Try to get package version but don't fail if not available
-        let version = "0.0.0";
-        try {
-          // In production builds, use a relative path that works with the installed package structure
-          version = require("../package.json").version;
-        } catch (e) {
-          // Ignore error, use default version
-        }
+    // Start the server
+    await app.listen({ port, host: "0.0.0.0" });
 
-        res.end(
-          JSON.stringify({
-            name: "Codepress Dev Server",
-            version: version,
-            environment: process.env.NODE_ENV || "development",
-            uptime: process.uptime(),
-          })
-        );
-      } else if (req.url === "/visual-editor-api" && req.method === "POST") {
-        // Handle API requests for getting changes from the backend and applying them
-        let body = "";
-        req.on("data", (chunk) => {
-          body += chunk.toString();
-        });
-
-        req.on("end", async () => {
-          try {
-            const data = JSON.parse(body);
-            // Use snake_case consistently - the frontend might send camelCase or snake_case
-            const {
-              encoded_location,
-              old_html,
-              new_html,
-              github_repo_name,
-              image_data,
-              filename,
-              mode,
-              aiInstruction,
-              ai_instruction,
-            } = data;
-            // Use ai_instruction if provided, otherwise use aiInstruction
-            const actualAiInstruction = ai_instruction || aiInstruction;
-
-            // Debug logging to see what's being received
-            console.log(
-              `\x1b[36mℹ Request data: ${JSON.stringify({
-                encoded_location,
-                old_html: old_html ? "[present]" : undefined,
-                new_html: new_html ? "[present]" : undefined,
-                mode,
-                aiInstruction: actualAiInstruction ? "[present]" : undefined,
-                image_data: image_data ? "[present]" : undefined,
-              })}\x1b[0m`
-            );
-
-            // Validate required fields based on the mode
-            const isAiMode = mode === "max";
-
-            if (!encoded_location) {
-              res.statusCode = 400;
-              res.setHeader("Content-Type", "application/json");
-              res.end(
-                JSON.stringify({
-                  error: "Missing encoded_location field",
-                  encoded_location: encoded_location || undefined,
-                })
-              );
-              return;
-            }
-
-            if (isAiMode) {
-              // AI mode validation
-              if (!actualAiInstruction) {
-                res.statusCode = 400;
-                res.setHeader("Content-Type", "application/json");
-                res.end(
-                  JSON.stringify({
-                    error: "Missing aiInstruction field in AI mode",
-                    encoded_location,
-                    mode,
-                  })
-                );
-                return;
-              }
-            } else {
-              // Regular mode validation
-              const missingFields = [];
-              if (!old_html) missingFields.push("old_html");
-              if (!new_html) missingFields.push("new_html");
-
-              if (missingFields.length > 0) {
-                res.statusCode = 400;
-                res.setHeader("Content-Type", "application/json");
-                res.end(
-                  JSON.stringify({
-                    error: `Missing required fields: ${missingFields.join(", ")}`,
-                    encoded_location,
-                    missingFields,
-                  })
-                );
-                return;
-              }
-            }
-
-            try {
-              const incomingAuthHeader = req.headers["authorization"];
-
-              const encodedFilePath = encoded_location.split(":")[0];
-              const filePath = decode(encodedFilePath);
-              console.log(`\x1b[36mℹ Decoded file path: ${filePath}\x1b[0m`);
-              const targetFile = path.join(process.cwd(), filePath);
-              console.log(`\x1b[36mℹ Reading file: ${targetFile}\x1b[0m`);
-              const fileContent = fs.readFileSync(targetFile, "utf8");
-
-              // Save image_data if present
-              if (image_data) {
-                try {
-                  const imageDir = path.join(process.cwd(), "public");
-                  if (!fs.existsSync(imageDir)) {
-                    fs.mkdirSync(imageDir, { recursive: true });
-                    console.log(
-                      `\x1b[36mℹ Created directory: ${imageDir}\x1b[0m`
-                    );
-                  }
-
-                  let imagePath;
-                  let base64Data;
-
-                  if (filename) {
-                    imagePath = path.join(imageDir, filename);
-                    // When filename is provided, assume image_data is just the base64 string
-                    const match = image_data.match(
-                      /^data:image\/[\w+]+\;base64,(.+)$/
-                    );
-                    if (match && match[1]) {
-                      base64Data = match[1]; // Extract if full data URI is sent
-                    } else {
-                      base64Data = image_data; // Assume raw base64
-                    }
-                    console.log(
-                      `\x1b[36mℹ Using provided filename: ${filename}\x1b[0m`
-                    );
-                  } else {
-                    // Fallback to existing logic if filename is not provided
-                    const match = image_data.match(
-                      /^data:image\/([\w+]+);base64,(.+)$/
-                    );
-                    let imageExtension;
-
-                    if (match && match[1] && match[2]) {
-                      imageExtension = match[1];
-                      base64Data = match[2];
-                    } else {
-                      base64Data = image_data;
-                      imageExtension = "png";
-                      console.log(
-                        "\x1b[33m⚠ Image data URI prefix not found and no filename provided, defaulting to .png extension.\x1b[0m"
-                      );
-                    }
-
-                    if (imageExtension === "jpeg") imageExtension = "jpg";
-                    if (imageExtension === "svg+xml") imageExtension = "svg";
-
-                    const imageName = `image_${Date.now()}.${imageExtension}`;
-                    imagePath = path.join(imageDir, imageName);
-                  }
-
-                  const imageBuffer = Buffer.from(base64Data, "base64");
-                  fs.writeFileSync(imagePath, imageBuffer);
-                  console.log(`\x1b[32m✓ Image saved to ${imagePath}\x1b[0m`);
-                } catch (imgError) {
-                  console.error(
-                    `\x1b[31m✗ Error saving image: ${imgError.message}\x1b[0m`
-                  );
-                  // Do not block the main operation if image saving fails
-                }
-              }
-
-              // Determine if this is an AI-based request (CodePress Max mode)
-              const isAiMode = data.mode === "max";
-
-              let backendResponse;
-
-              if (isAiMode) {
-                // Call backend API for AI-based changes
-                console.log(
-                  `\x1b[36mℹ Getting AI changes from backend for file encoded_location: ${encoded_location}\x1b[0m`
-                );
-                console.log(
-                  `\x1b[36mℹ AI Instruction: ${actualAiInstruction}\x1b[0m`
-                );
-
-                backendResponse = await callBackendApi(
-                  "POST",
-                  "code-sync/get-ai-changes",
-                  {
-                    encoded_location,
-                    ai_instruction: actualAiInstruction,
-                    file_content: fileContent,
-                    github_repo_name,
-                  },
-                  incomingAuthHeader
-                );
-              } else {
-                // Call regular backend API to get HTML-based changes
-                console.log(
-                  `\x1b[36mℹ Getting HTML changes from backend for file encoded_location: ${encoded_location}\x1b[0m`
-                );
-
-                backendResponse = await callBackendApi(
-                  "POST",
-                  "code-sync/get-agent-changes",
-                  {
-                    old_html,
-                    new_html,
-                    github_repo_name,
-                    encoded_location,
-                    file_content: fileContent,
-                  },
-                  incomingAuthHeader
-                );
-              }
-
-              console.log(`\x1b[36mℹ Received response from backend\x1b[0m`);
-
-              if (
-                !backendResponse.changes ||
-                !Array.isArray(backendResponse.changes)
-              ) {
-                console.error(
-                  `\x1b[31m✗ Invalid response format: ${JSON.stringify(backendResponse)}\x1b[0m`
-                );
-                throw new Error("Invalid response format from backend");
-              }
-
-              const changes = backendResponse.changes;
-              console.log(
-                `\x1b[36mℹ Received ${changes.length} changes from backend\x1b[0m`
-              );
-
-              // File content already loaded from above
-
-              // Apply the changes
-              const modifiedContent = applyTextChanges(fileContent, changes);
-
-              // Format with Prettier
-              let formattedCode;
-              try {
-                formattedCode = await prettier.format(modifiedContent, {
-                  parser: "typescript",
-                  semi: true,
-                  singleQuote: false,
-                });
-              } catch (prettierError) {
-                console.error("Prettier formatting failed:", prettierError);
-                // If formatting fails, use the unformatted code
-                formattedCode = modifiedContent;
-              }
-
-              // Write back to file
-              fs.writeFileSync(targetFile, formattedCode, "utf8");
-
-              console.log(
-                `\x1b[32m✓ Updated file ${targetFile} with ${changes.length} changes\x1b[0m`
-              );
-
-              res.statusCode = 200;
-              res.setHeader("Content-Type", "application/json");
-
-              // Include the modified content in the response for AI mode
-              if (isAiMode) {
-                res.end(
-                  JSON.stringify({
-                    success: true,
-                    message: `Applied ${changes.length} AI-suggested changes to ${filePath}`,
-                    modified_content: formattedCode,
-                  })
-                );
-              } else {
-                res.end(
-                  JSON.stringify({
-                    success: true,
-                    message: `Applied ${changes.length} changes to ${filePath}`,
-                  })
-                );
-              }
-            } catch (apiError) {
-              console.error("Error applying changes:", apiError);
-              res.statusCode = 500;
-              res.setHeader("Content-Type", "application/json");
-              res.end(JSON.stringify({ error: apiError.message }));
-            }
-          } catch (parseError) {
-            console.error("Error parsing request data:", parseError);
-            res.statusCode = 400;
-            res.setHeader("Content-Type", "application/json");
-            res.end(JSON.stringify({ error: "Invalid JSON" }));
-          }
-        });
-      } else {
-        res.statusCode = 404;
-        res.setHeader("Content-Type", "text/plain");
-        res.end("Not found");
-      }
-    });
-
-    // Handle errors to prevent crashes
-    server.on("error", (err) => {
-      if (err.code === "EADDRINUSE") {
-        console.log(
-          `\x1b[33mℹ Codepress Dev Server: Port ${port} is already in use, server is likely already running\x1b[0m`
-        );
-      } else {
-        console.error("Codepress Dev Server error:", err);
-      }
-    });
-  } catch (err) {
-    console.error("Failed to create server:", err);
-    return null;
-  }
-
-  // Start server on the fixed port
-  server.listen(port, () => {
     console.log(
       `\x1b[32m✅ Codepress Dev Server running at http://localhost:${port}\x1b[0m`
     );
-  });
 
-  // Save instance
-  serverInstance = server;
+    // Save instance
+    serverInstance = app;
 
-  return server;
+    return app;
+  } catch (err) {
+    if (err.code === "EADDRINUSE") {
+      console.log(
+        `\x1b[33mℹ Codepress Dev Server: Port ${port} is already in use, server is likely already running\x1b[0m`
+      );
+    } else {
+      console.error("Codepress Dev Server error:", err);
+    }
+    return null;
+  }
 }
 
 // Create module exports
@@ -612,7 +568,14 @@ const serverModule = {
 
 // Start server automatically if in development mode
 if (process.env.NODE_ENV !== "production") {
-  serverModule.server = startServer();
+  // Make the auto-start async
+  (async () => {
+    try {
+      serverModule.server = await startServer();
+    } catch (err) {
+      console.error("Failed to auto-start server:", err);
+    }
+  })();
 }
 
 // Export module
