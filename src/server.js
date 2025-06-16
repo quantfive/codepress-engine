@@ -427,6 +427,7 @@ async function getChanges({
   githubRepoName,
   encodedLocation,
   styleChanges,
+  textChanges,
   fileContent,
   authHeader,
 }) {
@@ -443,6 +444,7 @@ async function getChanges({
       github_repo_name: githubRepoName,
       encoded_location: encodedLocation,
       style_changes: styleChanges,
+      text_changes: textChanges,
       file_content: fileContent,
     },
     authHeader
@@ -460,6 +462,7 @@ async function getAgentChanges({
   githubRepoName,
   encodedLocation,
   styleChanges,
+  textChanges,
   fileContent,
   authHeader,
 }) {
@@ -476,6 +479,7 @@ async function getAgentChanges({
       github_repo_name: githubRepoName,
       encoded_location: encodedLocation,
       style_changes: styleChanges,
+      text_changes: textChanges,
       file_content: fileContent,
     },
     authHeader
@@ -568,16 +572,14 @@ function createApp() {
         image_data,
         filename,
         style_changes,
+        text_changes,
         agent_mode,
       } = data;
 
       // Debug logging to see what's being received
       console.log(
         `\x1b[36mℹ Visual Editor API Request data: ${JSON.stringify({
-          encoded_location,
-          old_html: old_html ? "[present]" : undefined,
-          new_html: new_html ? "[present]" : undefined,
-          image_data: image_data ? "[present]" : undefined,
+          data,
         })}\x1b[0m`
       );
 
@@ -609,6 +611,7 @@ function createApp() {
           githubRepoName: github_repo_name,
           encodedLocation: encoded_location,
           styleChanges: style_changes,
+          textChanges: text_changes,
           fileContent,
           authHeader,
         });
