@@ -1,0 +1,28 @@
+name: CodePress Review
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize]
+
+permissions:
+  pull-requests: write
+  contents: read
+
+jobs:
+  ai-review:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: CodePress Review
+        uses: quantfive/codepress-review@v2
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          model_provider: "gemini"
+          model_name: "gemini-2.5-flash-preview-05-20"
+          openai_api_key: ${{ secrets.OPENAI_API_KEY }}
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          gemini_api_key: ${{ secrets.GEMINI_API_KEY }}
