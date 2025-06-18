@@ -520,4 +520,111 @@ mod tests {
         
         assert_eq!(line_a, line_b, "Different positions on same line should return same line number");
     }
+    
+    #[test]
+    fn test_get_line_number_comprehensive() {
+        let source_map = std::sync::Arc::new(SourceMap::new(FilePathMapping::empty()));
+        let config = Config::default();
+        let transform = CodePressTransform::new(config, "comprehensive.jsx", source_map.clone());
+        
+        // Create a comprehensive test file with various scenarios
+        let test_content = concat!(
+            "// Line 1: Comment\n",           // Line 1 (17 chars + \n)
+            "\n",                             // Line 2: Empty line (1 char)
+            "import React from 'react';\n",   // Line 3 (26 chars + \n)  
+            "\n",                             // Line 4: Empty line (1 char)
+            "function Component() {\n",       // Line 5 (22 chars + \n)
+            "  const x = 'hello';\n",         // Line 6 (19 chars + \n)
+            "  return (\n",                   // Line 7 (11 chars + \n)
+            "    <div>\n",                    // Line 8 (10 chars + \n)
+            "      Hello World\n",            // Line 9 (16 chars + \n)
+            "    </div>\n",                   // Line 10 (11 chars + \n)
+            "  );\n",                         // Line 11 (5 chars + \n)
+            "}\n",                            // Line 12 (2 chars + \n)
+            "\n",                             // Line 13: Empty line (1 char)
+            "export default Component;",      // Line 14 (26 chars, no \n at end)
+        );
+        
+        let file = source_map.new_source_file(
+            std::sync::Arc::new(swc_core::common::FileName::Real("comprehensive.jsx".into())),
+            test_content.to_string()
+        );
+        
+        // Test start of file
+        let line_1_start = transform.get_line_number(file.start_pos);
+        assert_eq!(line_1_start, 1, "Start of file should be line 1");
+        
+        // Test different positions throughout the file
+        let mut pos = file.start_pos;
+        let mut expected_line = 1;
+        let mut actual_positions = Vec::new();
+        
+        // Go through each character and track line numbers
+        for (i, ch) in test_content.chars().enumerate() {
+            let current_line = transform.get_line_number(pos + BytePos(i as u32));
+            actual_positions.push((i, ch, current_line));
+            
+            if ch == '\n' {
+                expected_line += 1;
+            }
+        }
+        
+        // Debug output for analysis
+        eprintln!("Content analysis:");
+        for (i, ch, line) in &actual_positions[..50.min(actual_positions.len())] {
+            let ch_display = if *ch == '\n' { "\\n" } else { &ch.to_string() };
+            eprintln!("  pos {}: '{}' -> line {}", i, ch_display, line);
+        }
+        
+        // Test specific positions
+        let positions_to_test = vec![
+            (0, 1, "Start of file"),
+            (19, 2, "Empty line 2 (newline char)"), 
+            (20, 3, "Start of import line"),
+            (47, 4, "Empty line 4 (newline char)"),
+            (48, 5, "Start of function"),
+        ];
+        
+        for (offset, expected_line, description) in positions_to_test {
+            let pos = file.start_pos + BytePos(offset);
+            let actual_line = transform.get_line_number(pos);
+            assert_eq!(actual_line, expected_line, "{} (pos {}) should be line {}", description, offset, expected_line);
+        }
+        
+        // Test line boundary behavior
+        // Position right before and after newlines
+        let newline_positions: Vec<usize> = test_content
+            .chars()
+            .enumerate()
+            .filter(|(_, ch)| *ch == '\n')
+            .map(|(i, _)| i)
+            .collect();
+            
+        for &newline_pos in &newline_positions[..3.min(newline_positions.len())] {
+            let before_newline = file.start_pos + BytePos(newline_pos as u32);
+            let after_newline = file.start_pos + BytePos((newline_pos + 1) as u32);
+            
+            let line_before = transform.get_line_number(before_newline);
+            let line_after = transform.get_line_number(after_newline);
+            
+            eprintln!("Newline at pos {}: line {} -> line {}", newline_pos, line_before, line_after);
+            assert_eq!(line_after, line_before + 1, "Line should increment after newline at position {}", newline_pos);
+        }
+        
+        // Test end of file
+        let end_pos = file.start_pos + BytePos(test_content.len() as u32);
+        let end_line = transform.get_line_number(end_pos);
+        let expected_end_line = test_content.lines().count() as u32;
+        assert_eq!(end_line, expected_end_line, "End of file should be on line {}", expected_end_line);
+        
+        // Test consistency - same position multiple times
+        let test_pos = file.start_pos + BytePos(50);
+        let line_1 = transform.get_line_number(test_pos);
+        let line_2 = transform.get_line_number(test_pos);
+        let line_3 = transform.get_line_number(test_pos);
+        assert_eq!(line_1, line_2, "Multiple calls should return same result");
+        assert_eq!(line_2, line_3, "Multiple calls should return same result");
+        
+        eprintln!("✅ Comprehensive line number test passed!");
+    }
 } 
