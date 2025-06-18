@@ -126,14 +126,16 @@ const plugin = function (babel, options = {}) {
   // Counter for processed files
   let processedFileCount = 0;
 
-  // Default options
+  // Configuration options (only attribute names are configurable)
   const {
     attributeName = "codepress-data-fp",
     repoAttributeName = "codepress-github-repo-name",
     branchAttributeName = "codepress-github-branch",
-    repoName = currentRepoName, // Use the repo name for this attribute
-    branch = currentBranch,
   } = options;
+
+  // Always use auto-detected values
+  const repoName = currentRepoName;
+  const branch = currentBranch;
 
   return {
     name: "babel-plugin-codepress-html",

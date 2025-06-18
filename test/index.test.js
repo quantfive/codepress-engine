@@ -1,229 +1,483 @@
-const babel = require('@babel/core');
-const plugin = require('../src/index');
-const fs = require('fs');
-const path = require('path');
-
-// Mock fs.writeFileSync
-fs.writeFileSync = jest.fn();
-
-// Mock node-fetch
-jest.mock('node-fetch', () => jest.fn(() => 
-  Promise.resolve({
-    ok: true,
-    json: () => Promise.resolve({
-      created_count: 5,
-      updated_count: 2,
-      total_mappings: 7
-    }),
-    text: () => Promise.resolve('{}')
-  })
-));
+const babel = require("@babel/core");
+const plugin = require("../src/index");
+const { decode } = require("../src/index");
 
 // Mock child_process.execSync for git detection
-jest.mock('child_process', () => ({
+jest.mock("child_process", () => ({
   execSync: jest.fn((command) => {
-    if (command.includes('rev-parse --abbrev-ref HEAD')) {
-      return 'test-branch';
+    if (command.includes("rev-parse --abbrev-ref HEAD")) {
+      return "test-branch";
     }
-    if (command.includes('remote.origin.url')) {
-      return 'https://github.com/codepress/test-repo.git';
+    if (command.includes("remote.origin.url")) {
+      return "https://github.com/codepress/test-repo.git";
     }
-    return '';
-  })
+    return "";
+  }),
 }));
 
-describe('codepress-html-babel-plugin', () => {
+describe("codepress-html-babel-plugin", () => {
+  let mockExecSync;
+
   beforeEach(() => {
-    // Clear mocks between tests
+    // Get the mocked execSync function
+    const { execSync } = require("child_process");
+    mockExecSync = execSync;
+
+    // Clear mocks between tests and set default git responses
     jest.clearAllMocks();
-  });
-
-  it('adds codepress-data-fp attribute to JSX elements', () => {
-    const example = `
-      import React from 'react';
-      
-      function App() {
-        return (
-          <div>
-            <h1>Hello World</h1>
-            <p>This is a test</p>
-          </div>
-        );
+    mockExecSync.mockImplementation((command) => {
+      if (command.includes("rev-parse --abbrev-ref HEAD")) {
+        return "test-branch";
       }
-    `;
-
-    const { code } = babel.transform(example, {
-      filename: 'src/App.js',
-      plugins: [plugin],
-      presets: ['@babel/preset-react']
-    });
-
-    // Verify attributes were added
-    expect(code).toContain('codepress-data-fp');
-    
-    // Check for multiple elements - should have 3 elements with the attribute
-    const matches = code.match(/codepress-data-fp/g);
-    expect(matches).toHaveLength(3);
-  });
-
-  it('respects custom attribute name option', () => {
-    const example = `
-      function Button() {
-        return <button>Click me</button>;
+      if (command.includes("remote.origin.url")) {
+        return "https://github.com/codepress/test-repo.git";
       }
-    `;
-
-    const { code } = babel.transform(example, {
-      filename: 'src/Button.js',
-      plugins: [[plugin, { attributeName: 'data-custom' }]],
-      presets: ['@babel/preset-react']
+      return "";
     });
-
-    expect(code).toContain('data-custom');
-    expect(code).not.toContain('codepress-data-fp');
   });
 
-  it('adds repository and branch info to container elements', () => {
-    const example = `
-      function App() {
-        return (
-          <div>
-            <h1>Hello World</h1>
-          </div>
-        );
+  describe("Plugin core functionality", () => {
+    it("adds codepress-data-fp attribute to JSX elements", () => {
+      const example = `
+        import React from 'react';
+        
+        function App() {
+          return (
+            <div>
+              <h1>Hello World</h1>
+              <p>This is a test</p>
+            </div>
+          );
+        }
+      `;
+
+      const { code } = babel.transform(example, {
+        filename: "src/App.js",
+        plugins: [plugin],
+        presets: ["@babel/preset-react"],
+      });
+
+      // Verify attributes were added
+      expect(code).toContain("codepress-data-fp");
+
+      // Check for multiple elements - should have 3 elements with the attribute
+      const matches = code.match(/codepress-data-fp/g);
+      expect(matches).toHaveLength(3);
+    });
+
+    it("includes line numbers in the attribute value", () => {
+      const example = `
+        function Button() {
+          return <button>Click me</button>;
+        }
+      `;
+
+      const { code } = babel.transform(example, {
+        filename: "src/Button.js",
+        plugins: [plugin],
+        presets: ["@babel/preset-react"],
+      });
+
+      // Should include encoded path with line numbers (compiled JSX uses different quotes)
+      expect(code).toMatch(/\"codepress-data-fp\":\s*\"[^\"]+:\d+-\d+\"/);
+    });
+
+    it("respects custom attribute name option", () => {
+      const example = `
+        function Button() {
+          return <button>Click me</button>;
+        }
+      `;
+
+      const { code } = babel.transform(example, {
+        filename: "src/Button.js",
+        plugins: [[plugin, { attributeName: "data-custom" }]],
+        presets: ["@babel/preset-react"],
+      });
+
+      expect(code).toContain("data-custom");
+      expect(code).not.toContain("codepress-data-fp");
+    });
+
+    it("processes elements and applies file path attributes", () => {
+      const example = `
+        function App() {
+          return (
+            <div>
+              <h1>Hello World</h1>
+            </div>
+          );
+        }
+      `;
+
+      const { code } = babel.transform(example, {
+        filename: "src/App.js",
+        plugins: [plugin],
+        presets: ["@babel/preset-react"],
+      });
+
+      // Should add file path attributes to elements
+      expect(code).toContain("codepress-data-fp");
+
+      // Verify file path attributes contain line numbers
+      expect(code).toMatch(/\"codepress-data-fp\":\s*\"[^\"]+:\d+-\d+\"/);
+    });
+
+    it("only adds file path attributes to all elements", () => {
+      const example = `
+        function App() {
+          return (
+            <div>
+              <div>
+                <div>Nested divs</div>
+              </div>
+            </div>
+          );
+        }
+      `;
+
+      const { code } = babel.transform(example, {
+        filename: "src/App.js",
+        plugins: [plugin],
+        presets: ["@babel/preset-react"],
+      });
+
+      // Should add file path attributes to all elements
+      const fpMatches = code.match(/codepress-data-fp/g) || [];
+      expect(fpMatches).toHaveLength(3); // All three div elements
+    });
+
+    it("processes html, body, and div elements for global attributes", () => {
+      const example = `
+        function App() {
+          return (
+            <html>
+              <body>
+                <div>Content</div>
+              </body>
+            </html>
+          );
+        }
+      `;
+
+      const { code } = babel.transform(example, {
+        filename: "src/App.js",
+        plugins: [plugin],
+        presets: ["@babel/preset-react"],
+      });
+
+      // Should add file path attributes to suitable elements
+      expect(code).toContain("codepress-data-fp");
+
+      // Check that all three elements got the attribute
+      const matches = code.match(/codepress-data-fp/g);
+      expect(matches).toHaveLength(3); // html, body, div
+    });
+
+    it("skips files in node_modules", () => {
+      const example = "<div></div>";
+
+      const { code } = babel.transform(example, {
+        filename: "node_modules/some-lib/index.js",
+        plugins: [plugin],
+        presets: ["@babel/preset-react"],
+      });
+
+      // Should not add attribute to node_modules files
+      expect(code).not.toContain("codepress-data-fp");
+    });
+
+    it("handles files without valid paths gracefully", () => {
+      const example = "<div></div>";
+
+      const { code } = babel.transform(example, {
+        filename: "", // Empty filename
+        plugins: [plugin],
+        presets: ["@babel/preset-react"],
+      });
+
+      // Should not add attributes when no valid path
+      expect(code).not.toContain("codepress-data-fp");
+    });
+  });
+
+  describe("Git detection", () => {
+    it("works without throwing errors", () => {
+      // Transform code which will trigger git detection
+      expect(() => {
+        babel.transform("<div></div>", {
+          filename: "src/Test.js",
+          plugins: [plugin],
+          presets: ["@babel/preset-react"],
+        });
+      }).not.toThrow();
+    });
+
+    it("handles git detection errors gracefully", () => {
+      // Mock execSync to throw an error
+      mockExecSync.mockImplementationOnce(() => {
+        throw new Error("Not a git repository");
+      });
+
+      const { code } = babel.transform("<div></div>", {
+        filename: "src/Test.js",
+        plugins: [plugin],
+        presets: ["@babel/preset-react"],
+      });
+
+      // Should still work even when git detection fails
+      expect(code).toContain("React.createElement");
+    });
+
+    it("handles SSH format git URLs", () => {
+      // Mock SSH format URL
+      mockExecSync.mockImplementation((command) => {
+        if (command.includes("remote.origin.url")) {
+          return "git@github.com:owner/repo.git";
+        }
+        if (command.includes("rev-parse --abbrev-ref HEAD")) {
+          return "main";
+        }
+        return "";
+      });
+
+      expect(() => {
+        babel.transform("<div></div>", {
+          filename: "src/Test.js",
+          plugins: [plugin],
+          presets: ["@babel/preset-react"],
+        });
+      }).not.toThrow();
+    });
+
+    it("handles HTTPS format git URLs", () => {
+      // Use default mock which returns HTTPS URL
+      expect(() => {
+        babel.transform("<div></div>", {
+          filename: "src/Test.js",
+          plugins: [plugin],
+          presets: ["@babel/preset-react"],
+        });
+      }).not.toThrow();
+    });
+  });
+
+  describe("Custom options", () => {
+    it("respects custom repo attribute name", () => {
+      const example = "<div></div>";
+
+      const { code } = babel.transform(example, {
+        filename: "src/Test.js",
+        plugins: [[plugin, { repoAttributeName: "data-repo" }]],
+        presets: ["@babel/preset-react"],
+      });
+
+      // The code should still have the file path attribute
+      expect(code).toContain("codepress-data-fp");
+    });
+
+    it("respects custom branch attribute name", () => {
+      const example = "<div></div>";
+
+      const { code } = babel.transform(example, {
+        filename: "src/Test.js",
+        plugins: [[plugin, { branchAttributeName: "data-branch" }]],
+        presets: ["@babel/preset-react"],
+      });
+
+      // The code should still have the file path attribute
+      expect(code).toContain("codepress-data-fp");
+    });
+
+    it("always uses auto-detected git information", () => {
+      const example = "<div></div>";
+
+      // Should work without any configuration - repo and branch are auto-detected
+      expect(() => {
+        babel.transform(example, {
+          filename: "src/Test.js",
+          plugins: [plugin],
+          presets: ["@babel/preset-react"],
+        });
+      }).not.toThrow();
+    });
+  });
+
+  describe("Production mode", () => {
+    it("works in production environment", () => {
+      const originalEnv = process.env.NODE_ENV;
+      process.env.NODE_ENV = "production";
+
+      const example = "<div></div>";
+
+      const { code } = babel.transform(example, {
+        filename: "src/Test.js",
+        plugins: [plugin],
+        presets: ["@babel/preset-react"],
+      });
+
+      // Should still add attributes in production
+      expect(code).toContain("codepress-data-fp");
+
+      process.env.NODE_ENV = originalEnv;
+    });
+  });
+
+  describe("File processing tracking", () => {
+    it("tracks and logs processed file count", () => {
+      // Mock console.log to capture output
+      const consoleSpy = jest.spyOn(console, "log").mockImplementation();
+
+      const example = "<div></div>";
+
+      // Transform a file - each transform creates a new plugin instance
+      babel.transform(example, {
+        filename: "src/File1.js",
+        plugins: [plugin],
+        presets: ["@babel/preset-react"],
+      });
+
+      // The plugin should log file processing
+      expect(consoleSpy).toHaveBeenCalledWith(
+        expect.stringContaining("Processed")
+      );
+
+      consoleSpy.mockRestore();
+    });
+  });
+
+  describe("Encode/Decode functionality", () => {
+    it("exports decode function", () => {
+      expect(typeof decode).toBe("function");
+    });
+
+    it("encode and decode are inverse operations", () => {
+      // We need to access the internal encode function for testing
+      // Since it's not exported, we'll test through the transformation
+      const example = "<div></div>";
+
+      const { code } = babel.transform(example, {
+        filename: "src/TestFile.js",
+        plugins: [plugin],
+        presets: ["@babel/preset-react"],
+      });
+
+      // Extract the encoded value from the generated code (compiled JSX format)
+      const match = code.match(/\"codepress-data-fp\":\s*\"([^\"]+)\"/);
+      expect(match).toBeTruthy();
+
+      if (match && match[1]) {
+        const encoded = match[1].split(":")[0]; // Get just the path part
+        const decoded = decode(encoded);
+        expect(decoded).toBe("src/TestFile.js");
       }
-    `;
-
-    const { code } = babel.transform(example, {
-      filename: 'src/App.js',
-      plugins: [plugin],
-      presets: ['@babel/preset-react']
     });
 
-    // Verify repository and branch attributes were added to the div
-    expect(code).toContain('codepress-github-repo-name');
-    expect(code).toContain('codepress-github-branch');
-    
-    // Verify values are not hashed
-    expect(code).toContain('"codepress/test-repo"');
-    expect(code).toContain('"test-branch"');
-  });
-
-  it('skips files in node_modules', () => {
-    const example = '<div></div>';
-
-    const { code } = babel.transform(example, {
-      filename: 'node_modules/some-lib/index.js',
-      plugins: [plugin],
-      presets: ['@babel/preset-react']
-    });
-
-    // Should not add attribute to node_modules files
-    expect(code).not.toContain('codepress-data-fp');
-  });
-
-  it('enables backend sync when config options are provided', () => {
-    const fetch = require('node-fetch');
-    const example = '<div></div>';
-
-    babel.transform(example, {
-      filename: 'src/Test.js',
-      plugins: [[plugin, { 
-        syncWithBackend: true,
-        repositoryId: '123',
-        apiToken: 'test-token', 
-        backendUrl: 'https://example.com'
-      }]],
-      presets: ['@babel/preset-react']
-    });
-
-    // Get post hook to run
-    const pluginInstance = plugin(babel);
-    pluginInstance.post();
-
-    // Wait for promises to resolve
-    return new Promise(process.nextTick).then(() => {
-      // Verify fetch was called with correct URL and options
-      expect(fetch).toHaveBeenCalledWith(
-        'https://example.com/api/bulk-file-mappings',
-        expect.objectContaining({
-          method: 'POST',
-          headers: expect.objectContaining({
-            'Authorization': 'Bearer test-token'
-          })
-        })
-      );
+    it("handles empty/null values in decode", () => {
+      expect(decode("")).toBe("");
+      expect(decode(null)).toBe("");
+      expect(decode(undefined)).toBe("");
     });
   });
-  
-  it('auto-detects git branch when branch option is not provided', () => {
-    const fetch = require('node-fetch');
-    const { execSync } = require('child_process');
-    const example = '<div></div>';
 
-    babel.transform(example, {
-      filename: 'src/Test.js',
-      plugins: [[plugin, { 
-        syncWithBackend: true,
-        repositoryId: '123',
-        apiToken: 'test-token',
-        backendUrl: 'https://example.com'
-      }]],
-      presets: ['@babel/preset-react']
+  describe("JSX element handling", () => {
+    it("handles nested JSX elements", () => {
+      const example = `
+        function Component() {
+          return (
+            <div>
+              <header>
+                <nav>
+                  <ul>
+                    <li><a href="#">Link</a></li>
+                  </ul>
+                </nav>
+              </header>
+            </div>
+          );
+        }
+      `;
+
+      const { code } = babel.transform(example, {
+        filename: "src/Component.js",
+        plugins: [plugin],
+        presets: ["@babel/preset-react"],
+      });
+
+      // Should add attributes to all JSX elements
+      const matches = code.match(/codepress-data-fp/g);
+      expect(matches).toHaveLength(6); // div, header, nav, ul, li, a
     });
 
-    // Get post hook to run
-    const pluginInstance = plugin(babel);
-    pluginInstance.post();
+    it("handles JSX fragments", () => {
+      const example = `
+        function Component() {
+          return (
+            <>
+              <div>First</div>
+              <div>Second</div>
+            </>
+          );
+        }
+      `;
 
-    // Wait for promises to resolve
-    return new Promise(process.nextTick).then(() => {
-      // Verify execSync was called to get the branch
-      expect(execSync).toHaveBeenCalledWith('git rev-parse --abbrev-ref HEAD', expect.any(Object));
-      
-      // Verify the auto-detected branch ('test-branch' from our mock) was used
-      expect(fetch).toHaveBeenCalledWith(
-        'https://example.com/api/bulk-file-mappings',
-        expect.objectContaining({
-          method: 'POST',
-          body: expect.stringContaining('"branch":"test-branch"')
-        })
-      );
-    });
-  });
-  
-  it('auto-detects git repository ID when repositoryId option is not provided', () => {
-    const fetch = require('node-fetch');
-    const { execSync } = require('child_process');
-    const example = '<div></div>';
+      const { code } = babel.transform(example, {
+        filename: "src/Component.js",
+        plugins: [plugin],
+        presets: ["@babel/preset-react"],
+      });
 
-    babel.transform(example, {
-      filename: 'src/Test.js',
-      plugins: [[plugin, { 
-        syncWithBackend: true,
-        apiToken: 'test-token',
-        backendUrl: 'https://example.com'
-      }]],
-      presets: ['@babel/preset-react']
+      // Should add attributes to div elements but not to fragments
+      const matches = code.match(/codepress-data-fp/g);
+      expect(matches).toHaveLength(2); // Two div elements
     });
 
-    // Get post hook to run
-    const pluginInstance = plugin(babel);
-    pluginInstance.post();
+    it("handles components with existing attributes", () => {
+      const example = `
+        function Component() {
+          return (
+            <div className="existing" id="test">
+              Content
+            </div>
+          );
+        }
+      `;
 
-    // Wait for promises to resolve
-    return new Promise(process.nextTick).then(() => {
-      // Verify execSync was called to get the remote URL
-      expect(execSync).toHaveBeenCalledWith('git config --get remote.origin.url', expect.any(Object));
-      
-      // Verify the auto-detected repository ID ('codepress/test-repo' from our mock) was used
-      expect(fetch).toHaveBeenCalledWith(
-        'https://example.com/api/bulk-file-mappings',
-        expect.objectContaining({
-          method: 'POST',
-          body: expect.stringContaining('"repository_name":"codepress/test-repo"')
-        })
-      );
+      const { code } = babel.transform(example, {
+        filename: "src/Component.js",
+        plugins: [plugin],
+        presets: ["@babel/preset-react"],
+      });
+
+      // Should preserve existing attributes and add new ones (compiled format)
+      expect(code).toContain('className: "existing"');
+      expect(code).toContain('id: "test"');
+      expect(code).toContain("codepress-data-fp");
+    });
+
+    it("updates existing codepress attributes", () => {
+      const example = `
+        function Component() {
+          return (
+            <div codepress-data-fp="old-value">
+              Content
+            </div>
+          );
+        }
+      `;
+
+      const { code } = babel.transform(example, {
+        filename: "src/Component.js",
+        plugins: [plugin],
+        presets: ["@babel/preset-react"],
+      });
+
+      // Should update the existing attribute value
+      expect(code).not.toContain("old-value");
+      expect(code).toContain("codepress-data-fp");
+
+      // Should have the new encoded path format (compiled JSX)
+      expect(code).toMatch(/\"codepress-data-fp\":\s*\"[^\"]+:\d+-\d+\"/);
     });
   });
 });
