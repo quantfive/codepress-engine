@@ -7,6 +7,5 @@ coverage
 # Rust build artifacts
 codepress-swc-plugin/target/
 
-# Build artifacts - these get built and deployed to 'build' branch
 # Keep main branch clean with source code only
 swc/codepress_engine.wasm
