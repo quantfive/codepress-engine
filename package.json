@@ -1,13 +1,8 @@
 {
   "name": "@quantfive/codepress-engine",
-  "version": "0.10.0",
-<<<<<<< HEAD
-  "description": "Babel plugin that adds file identifiers to all JSX elements and repository/branch info to container elements like div, html or body",
-  "main": "dist/index.js",
-=======
+  "version": "0.2.0",
   "description": "CodePress engine – Babel and SWC plug-ins",
   "main": "./babel/index.js",
->>>>>>> 4316e21 (adding in swc plugin)
   "exports": {
     ".": "./babel/index.js",
     "./babel": "./babel/index.js",
