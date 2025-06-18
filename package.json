@@ -27,10 +27,9 @@
   ],
   "scripts": {
     "build": "babel src --out-dir dist --copy-files",
-    "build:rust": "cargo build --release --target wasm32-wasip1 --manifest-path codepress-swc-plugin/Cargo.toml && cp codepress-swc-plugin/target/wasm32-wasip1/release/codepress_swc_plugin.wasm swc/codepress_engine.wasm",
-    "prepack": "npm run build && npm run build:rust",
-    "prepublishOnly": "npm run build && npm run build:rust",
-    "test": "jest"
+    "build:rust": "mkdir -p swc && cargo build --release --target wasm32-wasip1 --manifest-path codepress-swc-plugin/Cargo.toml && cp codepress-swc-plugin/target/wasm32-wasip1/release/codepress_swc_plugin.wasm swc/codepress_engine.wasm",
+    "test": "jest",
+    "dev:link": "npm run build && npm run build:rust && npm link"
   },
   "keywords": [
     "babel",
