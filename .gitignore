@@ -3,3 +3,9 @@ dist
 coverage
 .DS_Store
 *.log
+
+# Rust build artifacts
+codepress-swc-plugin/target/
+
+# But keep the final WASM output
+# swc/ folder should be committed for npm package

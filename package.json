@@ -1,10 +1,17 @@
 {
   "name": "@quantfive/codepress-engine",
   "version": "0.10.0",
+<<<<<<< HEAD
   "description": "Babel plugin that adds file identifiers to all JSX elements and repository/branch info to container elements like div, html or body",
   "main": "dist/index.js",
+=======
+  "description": "CodePress engine – Babel and SWC plug-ins",
+  "main": "./babel/index.js",
+>>>>>>> 4316e21 (adding in swc plugin)
   "exports": {
-    ".": "./dist/index.js",
+    ".": "./babel/index.js",
+    "./babel": "./babel/index.js",
+    "./swc": "./swc/codepress_engine.wasm",
     "./hash-util": "./dist/hash-util.js",
     "./server": "./dist/server.js",
     "./cli": "./dist/cli.js"
@@ -13,11 +20,16 @@
     "codepress": "./dist/cli.js"
   },
   "files": [
-    "dist"
+    "babel/",
+    "swc/",
+    "dist/",
+    "README.md"
   ],
   "scripts": {
     "build": "babel src --out-dir dist --copy-files",
-    "prepublishOnly": "npm run build",
+    "build:rust": "cargo build --release --target wasm32-wasip1 --manifest-path codepress-swc-plugin/Cargo.toml && cp codepress-swc-plugin/target/wasm32-wasip1/release/codepress_swc_plugin.wasm swc/codepress_engine.wasm",
+    "prepack": "npm run build && npm run build:rust",
+    "prepublishOnly": "npm run build && npm run build:rust",
     "test": "jest"
   },
   "keywords": [
@@ -35,8 +47,11 @@
   "devDependencies": {
     "@babel/cli": "^7.26.0",
     "@babel/core": "^7.26.0",
+    "@babel/plugin-syntax-jsx": "^7.27.1",
     "@babel/preset-env": "^7.26.0",
     "@babel/preset-react": "^7.26.3",
+    "@swc/core": "^1.12.1",
+    "@swc/wasm": "^1",
     "jest": "^29.7.0"
   },
   "dependencies": {
