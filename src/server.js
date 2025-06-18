@@ -154,7 +154,9 @@ async function callBackendApi(method, endpoint, data, incomingAuthHeader) {
   const protocol =
     apiHost === "localhost" || apiHost === "127.0.0.1" ? "http" : "https";
   console.log(`\x1b[36mℹ API Path: ${apiPath} \x1b[0m`);
-  const url = `${protocol}://${apiHost}${apiPort ? `:${apiPort}` : ""}/api/${apiPath}`;
+  const url = `${protocol}://${apiHost}${
+    apiPort ? `:${apiPort}` : ""
+  }/api/${apiPath}`;
   console.log(`\x1b[36mℹ Sending request to ${url} \x1b[0m`);
 
   try {
@@ -178,7 +180,9 @@ async function callBackendApi(method, endpoint, data, incomingAuthHeader) {
       headers["Authorization"] = `Bearer ${authToken}`;
       // Log which auth method we're using (but don't expose the actual token)
       console.log(
-        `\x1b[36mℹ Using ${process.env.CODEPRESS_API_TOKEN ? "API Token" : "GitHub OAuth Token"} for authentication\x1b[0m`
+        `\x1b[36mℹ Using ${
+          process.env.CODEPRESS_API_TOKEN ? "API Token" : "GitHub OAuth Token"
+        } for authentication\x1b[0m`
       );
     } else {
       console.log("\x1b[33m⚠ No authentication token available\x1b[0m");
@@ -650,7 +654,9 @@ function createApp() {
           });
         } else {
           console.error(
-            `\x1b[31m✗ Invalid response format: ${JSON.stringify(backendResponse)}\x1b[0m`
+            `\x1b[31m✗ Invalid response format: ${JSON.stringify(
+              backendResponse
+            )}\x1b[0m`
           );
           throw new Error("Invalid response format from backend");
         }
@@ -724,7 +730,9 @@ function createApp() {
           !Array.isArray(backendResponse.changes)
         ) {
           console.error(
-            `\x1b[31m✗ Invalid response format: ${JSON.stringify(backendResponse)}\x1b[0m`
+            `\x1b[31m✗ Invalid response format: ${JSON.stringify(
+              backendResponse
+            )}\x1b[0m`
           );
           throw new Error("Invalid response format from backend");
         }

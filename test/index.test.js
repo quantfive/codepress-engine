@@ -289,25 +289,14 @@ describe("codepress-html-babel-plugin", () => {
       expect(code).toContain("codepress-data-fp");
     });
 
-    it("respects explicit repo name option", () => {
+    it("always uses auto-detected git information", () => {
       const example = "<div></div>";
 
+      // Should work without any configuration - repo and branch are auto-detected
       expect(() => {
         babel.transform(example, {
           filename: "src/Test.js",
-          plugins: [[plugin, { repoName: "custom/repo" }]],
-          presets: ["@babel/preset-react"],
-        });
-      }).not.toThrow();
-    });
-
-    it("respects explicit branch option", () => {
-      const example = "<div></div>";
-
-      expect(() => {
-        babel.transform(example, {
-          filename: "src/Test.js",
-          plugins: [[plugin, { branch: "custom-branch" }]],
+          plugins: [plugin],
           presets: ["@babel/preset-react"],
         });
       }).not.toThrow();
