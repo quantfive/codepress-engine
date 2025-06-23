@@ -17,14 +17,26 @@ jest.mock("child_process", () => ({
 
 describe("codepress-html-babel-plugin", () => {
   let mockExecSync;
+  let originalNodeEnv;
+  let consoleSpy;
+
+  beforeAll(() => {
+    // Store original NODE_ENV
+    originalNodeEnv = process.env.NODE_ENV;
+  });
 
   beforeEach(() => {
     // Get the mocked execSync function
     const { execSync } = require("child_process");
     mockExecSync = execSync;
 
-    // Clear mocks between tests and set default git responses
+    // Clear all mocks between tests
     jest.clearAllMocks();
+
+    // Clear all timers
+    jest.clearAllTimers();
+
+    // Set default git responses
     mockExecSync.mockImplementation((command) => {
       if (command.includes("rev-parse --abbrev-ref HEAD")) {
         return "test-branch";
@@ -34,6 +46,35 @@ describe("codepress-html-babel-plugin", () => {
       }
       return "";
     });
+
+    // Mock console.log to prevent noise in tests
+    consoleSpy = jest.spyOn(console, "log").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    // Restore all mocks
+    jest.restoreAllMocks();
+
+    // Clear all timers
+    jest.clearAllTimers();
+
+    // Restore NODE_ENV
+    process.env.NODE_ENV = originalNodeEnv;
+
+    // Clean up console spy
+    if (consoleSpy) {
+      consoleSpy.mockRestore();
+    }
+  });
+
+  afterAll(() => {
+    // Final cleanup
+    jest.clearAllMocks();
+    jest.restoreAllMocks();
+    jest.clearAllTimers();
+
+    // Restore NODE_ENV
+    process.env.NODE_ENV = originalNodeEnv;
   });
 
   describe("Plugin core functionality", () => {
@@ -305,7 +346,6 @@ describe("codepress-html-babel-plugin", () => {
 
   describe("Production mode", () => {
     it("works in production environment", () => {
-      const originalEnv = process.env.NODE_ENV;
       process.env.NODE_ENV = "production";
 
       const example = "<div></div>";
@@ -318,15 +358,14 @@ describe("codepress-html-babel-plugin", () => {
 
       // Should still add attributes in production
       expect(code).toContain("codepress-data-fp");
-
-      process.env.NODE_ENV = originalEnv;
     });
   });
 
   describe("File processing tracking", () => {
     it("tracks and logs processed file count", () => {
-      // Mock console.log to capture output
-      const consoleSpy = jest.spyOn(console, "log").mockImplementation();
+      // Use the global console spy and restore its implementation for this test
+      consoleSpy.mockRestore();
+      consoleSpy = jest.spyOn(console, "log").mockImplementation(() => {});
 
       const example = "<div></div>";
 
@@ -341,8 +380,6 @@ describe("codepress-html-babel-plugin", () => {
       expect(consoleSpy).toHaveBeenCalledWith(
         expect.stringContaining("Processed")
       );
-
-      consoleSpy.mockRestore();
     });
   });
 

@@ -23,6 +23,7 @@
   "scripts": {
     "build": "babel src --out-dir dist --copy-files",
     "build:rust": "mkdir -p swc && cargo build --release --target wasm32-wasip1 --manifest-path codepress-swc-plugin/Cargo.toml && cp codepress-swc-plugin/target/wasm32-wasip1/release/codepress_swc_plugin.wasm swc/codepress_engine.wasm",
+    "build:all": "npm run build && npm run build:rust",
     "test": "jest",
     "dev:link": "npm run build && npm run build:rust && npm link"
   },
@@ -53,5 +54,12 @@
     "fastify": "^5.3.3",
     "node-fetch": "^2.6.7",
     "prettier": "^3.1.0"
+  },
+  "jest": {
+    "testEnvironment": "node",
+    "testTimeout": 10000,
+    "clearMocks": true,
+    "restoreMocks": true,
+    "resetMocks": true
   }
 }

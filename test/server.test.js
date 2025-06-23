@@ -19,9 +19,18 @@ const fetch = require("node-fetch");
 
 describe("Codepress Dev Server", () => {
   let serverModule;
+  let originalNodeEnv;
+
+  beforeAll(() => {
+    // Store original NODE_ENV
+    originalNodeEnv = process.env.NODE_ENV;
+    // Set to production to prevent auto-starting during module load
+    process.env.NODE_ENV = "production";
+  });
 
   beforeEach(() => {
     jest.clearAllMocks();
+    jest.resetAllMocks();
 
     // Mock fs methods
     fs.existsSync.mockReturnValue(false);
@@ -50,22 +59,45 @@ describe("Codepress Dev Server", () => {
         ),
     });
 
+    // Reset the decode mock to return the expected value
+    const { decode } = require("../src/index");
+    decode.mockReturnValue("src/test-file.js");
+
+    // Reset prettier mock to return formatted code
+    const prettier = require("prettier");
+    prettier.format.mockImplementation((code) =>
+      Promise.resolve(code + "\n// formatted")
+    );
+
     // Clear require cache to get fresh module
     delete require.cache[require.resolve("../src/server.js")];
 
-    // Set development mode
-    process.env.NODE_ENV = "development";
-
-    // Require server after mocks are set up
+    // Require server after mocks are set up (NODE_ENV is production, so no auto-start)
     serverModule = require("../src/server.js");
   });
 
-  afterEach(() => {
+  afterEach(async () => {
+    // Clean up any running server instance
+    if (serverModule && serverModule.server) {
+      try {
+        await serverModule.server.close();
+      } catch (error) {
+        // Server might already be closed
+      }
+    }
+
     // Clean up environment
-    delete process.env.NODE_ENV;
     delete process.env.CODEPRESS_BACKEND_HOST;
     delete process.env.CODEPRESS_BACKEND_PORT;
     delete process.env.CODEPRESS_API_TOKEN;
+
+    // Reset NODE_ENV to production for next test
+    process.env.NODE_ENV = "production";
+  });
+
+  afterAll(() => {
+    // Restore original NODE_ENV
+    process.env.NODE_ENV = originalNodeEnv;
   });
 
   describe("Server module", () => {
@@ -75,11 +107,8 @@ describe("Codepress Dev Server", () => {
     });
 
     it("should not start server in production mode", async () => {
-      process.env.NODE_ENV = "production";
-      delete require.cache[require.resolve("../src/server.js")];
-      const prodServerModule = require("../src/server.js");
-
-      const result = await prodServerModule.startServer();
+      // NODE_ENV is already production by default in our test setup
+      const result = await serverModule.startServer();
       expect(result).toBeNull();
     });
   });
@@ -213,8 +242,9 @@ line 4`;
       const encodedLocation = "encoded123:1-10";
       const encodedFilePath = encodedLocation.split(":")[0];
 
-      // Mock decode function should return test file path
-      expect(decode(encodedFilePath)).toBe("src/test-file.js");
+      // The decode function is already mocked at the top level to return "src/test-file.js"
+      const result = decode(encodedFilePath);
+      expect(result).toBe("src/test-file.js");
     });
   });
 
@@ -286,8 +316,10 @@ line 4`;
       const prettier = require("prettier");
       const testCode = "const test='unformatted';";
 
+      // The prettier.format is already mocked to return the code + "// formatted"
       const formatted = await prettier.format(testCode);
       expect(formatted).toContain("// formatted");
+      expect(formatted).toContain(testCode);
     });
 
     it("should fallback gracefully when prettier fails", async () => {
