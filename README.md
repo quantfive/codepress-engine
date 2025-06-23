@@ -2,6 +2,13 @@
 
 A Babel and SWC plugin with development server for visual editing with Codepress. The plugin adds file identifiers to JSX elements, while the development server provides API endpoints for applying code changes from the visual editor.
 
+## 🆕 Dual Plugin Support
+
+CodePress Engine now supports both **Babel** and **SWC** compilers in a single package:
+
+- **Babel Plugin**: `@quantfive/codepress-engine/babel` - For traditional Babel-based builds
+- **SWC Plugin**: `@quantfive/codepress-engine/swc` - For Next.js 15+ and other SWC-based tools
+
 ## Installation
 
 ```bash

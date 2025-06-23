@@ -1,0 +1,76 @@
+name: Build and Deploy to Build Branch
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: # Allow manual triggering
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # Required by peaceiris/actions-gh-pages
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: "npm"
+
+      - name: Set up Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          target: wasm32-wasip1
+          override: true
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build JavaScript artifacts
+        run: npm run build
+
+      - name: Build Rust WASM plugin
+        run: npm run build:rust
+
+      - name: Run tests
+        run: npm test
+
+      - name: Prepare publish directory
+        run: |
+          mkdir publish
+
+          # Copy built artifacts
+          cp -r dist/ publish/
+          cp -r babel/ publish/
+          cp -r swc/ publish/
+
+          # Copy package files
+          cp package.json publish/
+          cp package-lock.json publish/
+          cp README.md publish/
+          cp LICENSE publish/
+
+          # Copy examples for documentation
+          cp -r examples/ publish/
+
+          # Verify critical files exist
+          ls -la publish/swc/
+          ls -la publish/babel/
+          ls -la publish/dist/
+
+      - name: Deploy to build branch
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          # The branch to deploy the build artifacts to
+          publish_branch: build
+          # The directory to deploy
+          publish_dir: ./publish
+          # This creates a branch with a clean history containing only the build artifacts
+          force_orphan: true
+          # The commit message for the build branch
+          commit_message: "Build: Update artifacts from ${{ github.ref_name }}@${{ github.sha }}"
