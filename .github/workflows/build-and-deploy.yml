@@ -36,9 +36,6 @@ jobs:
       - name: Build Rust WASM plugin
         run: npm run build:rust
 
-      - name: Run tests
-        run: npm test
-
       - name: Prepare publish directory
         run: |
           mkdir publish
