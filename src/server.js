@@ -725,10 +725,37 @@ function createApp() {
 
         console.log(`\x1b[36mℹ Received response from backend\x1b[0m`);
 
-        if (
-          !backendResponse.changes ||
-          !Array.isArray(backendResponse.changes)
+        // Check if this is the new format with modified_content (full file replacement)
+        if (backendResponse.modified_content) {
+          // Handle full file replacement
+          const formattedCode = await applyFullFileReplacement(
+            backendResponse.modified_content,
+            targetFile
+          );
+
+          return reply.code(200).send({
+            success: true,
+            message:
+              backendResponse.message || `Applied AI changes to ${filePath}`,
+            modified_content: formattedCode,
+          });
+        } else if (
+          backendResponse.changes &&
+          Array.isArray(backendResponse.changes)
         ) {
+          // Handle incremental changes (fallback)
+          const formattedCode = await applyChangesAndFormat(
+            fileContent,
+            backendResponse.changes,
+            targetFile
+          );
+
+          return reply.code(200).send({
+            success: true,
+            message: `Applied ${backendResponse.changes.length} AI-suggested changes to ${filePath}`,
+            modified_content: formattedCode,
+          });
+        } else {
           console.error(
             `\x1b[31m✗ Invalid response format: ${JSON.stringify(
               backendResponse
@@ -736,19 +763,6 @@ function createApp() {
           );
           throw new Error("Invalid response format from backend");
         }
-
-        // Apply changes and format
-        const formattedCode = await applyChangesAndFormat(
-          fileContent,
-          backendResponse.changes,
-          targetFile
-        );
-
-        return reply.code(200).send({
-          success: true,
-          message: `Applied ${backendResponse.changes.length} AI-suggested changes to ${filePath}`,
-          modified_content: formattedCode,
-        });
       } catch (apiError) {
         console.error("Error applying AI changes:", apiError);
         return reply.code(500).send({ error: apiError.message });
