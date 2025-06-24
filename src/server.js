@@ -873,26 +873,65 @@ function getProjectStructure() {
         .map(line => line.trim())
         .filter(line => line && !line.startsWith('#')) // Remove empty lines and comments
         .map(pattern => {
-          // Convert gitignore patterns to regex patterns
-          let regexPattern = pattern
-            .replace(/\./g, '\\.')  // Escape dots
-            .replace(/\*/g, '.*')   // Convert * to .*
-            .replace(/\?/g, '.');   // Convert ? to .
+          // Convert gitignore patterns to regex patterns that work with tree-node-cli
+          let regexPattern = pattern;
           
-          // Handle directory patterns (ending with /)
-          if (pattern.endsWith('/')) {
-            regexPattern = regexPattern.slice(0, -1); // Remove trailing /
+          // Handle negation patterns (starting with !)
+          if (pattern.startsWith('!')) {
+            // Skip negation patterns for now as tree-node-cli doesn't support them directly
+            return null;
           }
           
-          // Handle patterns starting with /
-          if (pattern.startsWith('/')) {
-            regexPattern = '^' + regexPattern.substring(1);
+          // Remove leading slash if present (gitignore treats /pattern as root-relative)
+          if (regexPattern.startsWith('/')) {
+            regexPattern = regexPattern.substring(1);
           }
           
-          return new RegExp(regexPattern);
-        });
+          // Remove trailing slash for directories
+          if (regexPattern.endsWith('/')) {
+            regexPattern = regexPattern.substring(0, regexPattern.length - 1);
+          }
+          
+          // Escape special regex characters except * and ?
+          regexPattern = regexPattern
+            .replace(/\./g, '\\.')     // Escape dots
+            .replace(/\+/g, '\\+')     // Escape plus
+            .replace(/\^/g, '\\^')     // Escape caret
+            .replace(/\$/g, '\\$')     // Escape dollar
+            .replace(/\(/g, '\\(')     // Escape parentheses
+            .replace(/\)/g, '\\)')
+            .replace(/\[/g, '\\[')     // Escape brackets
+            .replace(/\]/g, '\\]')
+            .replace(/\{/g, '\\{')     // Escape braces
+            .replace(/\}/g, '\\}')
+            .replace(/\|/g, '\\|');    // Escape pipe
+          
+          // Convert gitignore wildcards to regex
+          regexPattern = regexPattern
+            .replace(/\*\*/g, '.*')    // ** matches any number of directories
+            .replace(/\*/g, '[^/]*')   // * matches anything except path separator
+            .replace(/\?/g, '[^/]');   // ? matches single character except path separator
+          
+          // For tree-node-cli, we need to match the full path
+          // Add anchors to match the pattern properly
+          if (!regexPattern.includes('/')) {
+            // If no slash, match files/directories at any level
+            regexPattern = `(^|/)${regexPattern}(/|$)`;
+          } else {
+            // If contains slash, match from start
+            regexPattern = `^${regexPattern}(/|$)`;
+          }
+          
+          try {
+            return new RegExp(regexPattern);
+          } catch (error) {
+            console.warn(`\x1b[33m⚠ Invalid regex pattern for "${pattern}": ${error.message}\x1b[0m`);
+            return null;
+          }
+        })
+        .filter(regex => regex !== null); // Remove null entries
       
-      console.log(`\x1b[36mℹ Found ${excludePatterns.length} gitignore patterns\x1b[0m`);
+      console.log(`\x1b[36mℹ Found ${excludePatterns.length} valid gitignore patterns\x1b[0m`);
     } else {
       console.log(`\x1b[33m⚠ No .gitignore file found, no exclusions applied\x1b[0m`);
     }
