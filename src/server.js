@@ -5,6 +5,7 @@ const fs = require("fs");
 const path = require("path");
 const prettier = require("prettier");
 const fetch = require("node-fetch");
+const tree = require('tree-node-cli');
 const { decode } = require("./index");
 
 /**
@@ -409,7 +410,7 @@ async function getAiChanges({
   console.log(`\x1b[36mℹ AI Instruction: ${aiInstruction}\x1b[0m`);
 
   // Get project structure
-  const projectStructure = getProjectDirectoryStructure();
+  const projectStructure = getProjectStructure();
   console.log(`\x1b[36mℹ Including project structure in AI request\x1b[0m`);
 
   return await callBackendApi(
@@ -574,7 +575,7 @@ function createApp() {
   // Project structure route
   app.get("/project-structure", async (request, reply) => {
     try {
-      const structure = getProjectDirectoryStructure();
+      const structure = getProjectStructure();
       return reply.code(200).send({
         success: true,
         structure: structure,
@@ -856,163 +857,55 @@ async function startServer(options = {}) {
 }
 
 /**
- * Parse .gitignore file and return patterns
- * @param {string} gitignorePath Path to .gitignore file
- * @returns {Array<string>} Array of gitignore patterns
+ * Get the directory structure of the current project using tree package
+ * @returns {string} Tree structure as a string
  */
-function parseGitignore(gitignorePath) {
+function getProjectStructure() {
   try {
-    if (!fs.existsSync(gitignorePath)) {
-      return [];
-    }
+    // Read .gitignore patterns
+    const gitignorePath = path.join(process.cwd(), '.gitignore');
+    let excludePatterns = [];
     
-    const content = fs.readFileSync(gitignorePath, 'utf8');
-    return content
-      .split('\n')
-      .map(line => line.trim())
-      .filter(line => line && !line.startsWith('#')) // Remove empty lines and comments
-      .map(pattern => {
-        // Remove leading slash if present
-        if (pattern.startsWith('/')) {
-          pattern = pattern.substring(1);
-        }
-        // Remove trailing slash for directories
-        if (pattern.endsWith('/')) {
-          pattern = pattern.substring(0, pattern.length - 1);
-        }
-        return pattern;
-      });
-  } catch (error) {
-    console.error(`Error reading .gitignore: ${error.message}`);
-    return [];
-  }
-}
+    if (fs.existsSync(gitignorePath)) {
+      const gitignoreContent = fs.readFileSync(gitignorePath, 'utf8');
+      excludePatterns = gitignoreContent
+        .split('\n')
+        .map(line => line.trim())
+        .filter(line => line && !line.startsWith('#')) // Remove empty lines and comments
+        .map(pattern => {
+          // Convert gitignore patterns to regex patterns
+          let regexPattern = pattern
+            .replace(/\./g, '\\.')  // Escape dots
+            .replace(/\*/g, '.*')   // Convert * to .*
+            .replace(/\?/g, '.');   // Convert ? to .
+          
+          // Handle directory patterns (ending with /)
+          if (pattern.endsWith('/')) {
+            regexPattern = regexPattern.slice(0, -1); // Remove trailing /
+          }
+          
+          // Handle patterns starting with /
+          if (pattern.startsWith('/')) {
+            regexPattern = '^' + regexPattern.substring(1);
+          }
+          
+          return new RegExp(regexPattern);
+        });
+      
+      console.log(`\x1b[36mℹ Found ${excludePatterns.length} gitignore patterns\x1b[0m`);
+    } else {
+      console.log(`\x1b[33m⚠ No .gitignore file found, no exclusions applied\x1b[0m`);
+    }
 
-/**
- * Check if a path matches any gitignore pattern
- * @param {string} itemPath The path to check
- * @param {Array<string>} patterns Gitignore patterns
- * @param {string} basePath Base project path
- * @returns {boolean} True if path should be ignored
- */
-function shouldIgnoreItem(itemPath, patterns, basePath) {
-  const relativePath = path.relative(basePath, itemPath);
-  const itemName = path.basename(itemPath);
-  
-  for (const pattern of patterns) {
-    // Handle exact matches
-    if (relativePath === pattern || itemName === pattern) {
-      return true;
-    }
-    
-    // Handle wildcard patterns (basic implementation)
-    if (pattern.includes('*')) {
-      const regexPattern = pattern
-        .replace(/\./g, '\\.')
-        .replace(/\*/g, '.*');
-      const regex = new RegExp(`^${regexPattern}$`);
-      
-      if (regex.test(relativePath) || regex.test(itemName)) {
-        return true;
-      }
-    }
-    
-    // Handle directory patterns (check if current path starts with pattern)
-    if (relativePath.startsWith(pattern + '/') || relativePath.startsWith(pattern + path.sep)) {
-      return true;
-    }
-  }
-  
-  return false;
-}
-
-/**
- * Get the directory structure of the current project
- * @param {string} dirPath The directory path to scan (defaults to current working directory)
- * @param {Array<string>} excludeDirs Directories to exclude from scanning
- * @param {string} basePath Base project path (used for gitignore pattern matching)
- * @param {Array<string>} gitignorePatterns Gitignore patterns to exclude
- * @returns {Object} Nested object representing the directory structure
- */
-function getProjectDirectoryStructure(
-  dirPath = process.cwd(), 
-  excludeDirs = [],
-  basePath = null,
-  gitignorePatterns = null
-) {
-  // Initialize base path and gitignore patterns on first call
-  if (basePath === null) {
-    basePath = dirPath;
-  }
-  
-  if (gitignorePatterns === null) {
-    const gitignorePath = path.join(basePath, '.gitignore');
-    gitignorePatterns = parseGitignore(gitignorePath);
-    console.log(`\x1b[36mℹ Found ${gitignorePatterns.length} gitignore patterns\x1b[0m`);
-  }
-  
-  const structure = {};
-  
-  try {
-    const items = fs.readdirSync(dirPath);
-    
-    for (const item of items) {
-      const itemPath = path.join(dirPath, item);
-      
-      // Skip hidden files (except .gitignore itself)
-      if (item.startsWith('.') && item !== '.gitignore') {
-        continue;
-      }
-      
-      // Skip excluded directories
-      if (excludeDirs.includes(item)) {
-        continue;
-      }
-      
-      // Skip items that match gitignore patterns
-      if (shouldIgnoreItem(itemPath, gitignorePatterns, basePath)) {
-        continue;
-      }
-      
-      const stats = fs.statSync(itemPath);
-      
-      if (stats.isDirectory()) {
-        // Recursively get structure for subdirectories
-        structure[item] = getProjectDirectoryStructure(itemPath, excludeDirs, basePath, gitignorePatterns);
-      } else if (stats.isFile()) {
-        // Add files to an array, grouped by their parent directory
-        if (!structure._files) {
-          structure._files = [];
-        }
-        structure._files.push(item);
-      }
-    }
-    
-    // Clean up the structure to match the desired format
-    const cleanedStructure = {};
-    
-    for (const [key, value] of Object.entries(structure)) {
-      if (key === '_files') {
-        // If there are files at this level, we need to handle them differently
-        // based on whether there are also subdirectories
-        const hasSubDirs = Object.keys(structure).some(k => k !== '_files');
-        
-        if (!hasSubDirs) {
-          // If only files, return the files array directly
-          return value;
-        } else {
-          // If mixed files and directories, add files to the structure
-          cleanedStructure._files = value;
-        }
-      } else {
-        cleanedStructure[key] = value;
-      }
-    }
-    
-    return cleanedStructure;
+    const treeString = tree(process.cwd(), {
+      dirsFirst: true,
+      exclude: excludePatterns, // Use gitignore patterns
+    });
+    console.log(`\x1b[36mℹ Generated project tree structure\x1b[0m`);
+    return treeString;
   } catch (error) {
-    console.error(`Error reading directory ${dirPath}:`, error.message);
-    return {};
+    console.error(`Error generating project structure: ${error.message}`);
+    return 'Unable to generate project structure';
   }
 }
 
