@@ -408,6 +408,10 @@ async function getAiChanges({
   );
   console.log(`\x1b[36mℹ AI Instruction: ${aiInstruction}\x1b[0m`);
 
+  // Get project structure
+  const projectStructure = getProjectDirectoryStructure();
+  console.log(`\x1b[36mℹ Including project structure in AI request\x1b[0m`);
+
   return await callBackendApi(
     "POST",
     "code-sync/get-ai-changes",
@@ -417,6 +421,7 @@ async function getAiChanges({
       file_content: fileContent,
       github_repo_name: githubRepoName,
       github_mode: githubMode,
+      project_structure: projectStructure,
     },
     authHeader
   );
@@ -564,6 +569,24 @@ function createApp() {
       environment: process.env.NODE_ENV || "development",
       uptime: process.uptime(),
     });
+  });
+
+  // Project structure route
+  app.get("/project-structure", async (request, reply) => {
+    try {
+      const structure = getProjectDirectoryStructure();
+      return reply.code(200).send({
+        success: true,
+        structure: structure,
+      });
+    } catch (error) {
+      console.error("Error getting project structure:", error);
+      return reply.code(500).send({
+        success: false,
+        error: "Failed to get project structure",
+        message: error.message,
+      });
+    }
   });
 
   // Visual editor API route for regular agent changes
@@ -829,6 +852,167 @@ async function startServer(options = {}) {
       console.error("Codepress Dev Server error:", err);
     }
     return null;
+  }
+}
+
+/**
+ * Parse .gitignore file and return patterns
+ * @param {string} gitignorePath Path to .gitignore file
+ * @returns {Array<string>} Array of gitignore patterns
+ */
+function parseGitignore(gitignorePath) {
+  try {
+    if (!fs.existsSync(gitignorePath)) {
+      return [];
+    }
+    
+    const content = fs.readFileSync(gitignorePath, 'utf8');
+    return content
+      .split('\n')
+      .map(line => line.trim())
+      .filter(line => line && !line.startsWith('#')) // Remove empty lines and comments
+      .map(pattern => {
+        // Remove leading slash if present
+        if (pattern.startsWith('/')) {
+          pattern = pattern.substring(1);
+        }
+        // Remove trailing slash for directories
+        if (pattern.endsWith('/')) {
+          pattern = pattern.substring(0, pattern.length - 1);
+        }
+        return pattern;
+      });
+  } catch (error) {
+    console.error(`Error reading .gitignore: ${error.message}`);
+    return [];
+  }
+}
+
+/**
+ * Check if a path matches any gitignore pattern
+ * @param {string} itemPath The path to check
+ * @param {Array<string>} patterns Gitignore patterns
+ * @param {string} basePath Base project path
+ * @returns {boolean} True if path should be ignored
+ */
+function shouldIgnoreItem(itemPath, patterns, basePath) {
+  const relativePath = path.relative(basePath, itemPath);
+  const itemName = path.basename(itemPath);
+  
+  for (const pattern of patterns) {
+    // Handle exact matches
+    if (relativePath === pattern || itemName === pattern) {
+      return true;
+    }
+    
+    // Handle wildcard patterns (basic implementation)
+    if (pattern.includes('*')) {
+      const regexPattern = pattern
+        .replace(/\./g, '\\.')
+        .replace(/\*/g, '.*');
+      const regex = new RegExp(`^${regexPattern}$`);
+      
+      if (regex.test(relativePath) || regex.test(itemName)) {
+        return true;
+      }
+    }
+    
+    // Handle directory patterns (check if current path starts with pattern)
+    if (relativePath.startsWith(pattern + '/') || relativePath.startsWith(pattern + path.sep)) {
+      return true;
+    }
+  }
+  
+  return false;
+}
+
+/**
+ * Get the directory structure of the current project
+ * @param {string} dirPath The directory path to scan (defaults to current working directory)
+ * @param {Array<string>} excludeDirs Directories to exclude from scanning
+ * @param {string} basePath Base project path (used for gitignore pattern matching)
+ * @param {Array<string>} gitignorePatterns Gitignore patterns to exclude
+ * @returns {Object} Nested object representing the directory structure
+ */
+function getProjectDirectoryStructure(
+  dirPath = process.cwd(), 
+  excludeDirs = [],
+  basePath = null,
+  gitignorePatterns = null
+) {
+  // Initialize base path and gitignore patterns on first call
+  if (basePath === null) {
+    basePath = dirPath;
+  }
+  
+  if (gitignorePatterns === null) {
+    const gitignorePath = path.join(basePath, '.gitignore');
+    gitignorePatterns = parseGitignore(gitignorePath);
+    console.log(`\x1b[36mℹ Found ${gitignorePatterns.length} gitignore patterns\x1b[0m`);
+  }
+  
+  const structure = {};
+  
+  try {
+    const items = fs.readdirSync(dirPath);
+    
+    for (const item of items) {
+      const itemPath = path.join(dirPath, item);
+      
+      // Skip hidden files (except .gitignore itself)
+      if (item.startsWith('.') && item !== '.gitignore') {
+        continue;
+      }
+      
+      // Skip excluded directories
+      if (excludeDirs.includes(item)) {
+        continue;
+      }
+      
+      // Skip items that match gitignore patterns
+      if (shouldIgnoreItem(itemPath, gitignorePatterns, basePath)) {
+        continue;
+      }
+      
+      const stats = fs.statSync(itemPath);
+      
+      if (stats.isDirectory()) {
+        // Recursively get structure for subdirectories
+        structure[item] = getProjectDirectoryStructure(itemPath, excludeDirs, basePath, gitignorePatterns);
+      } else if (stats.isFile()) {
+        // Add files to an array, grouped by their parent directory
+        if (!structure._files) {
+          structure._files = [];
+        }
+        structure._files.push(item);
+      }
+    }
+    
+    // Clean up the structure to match the desired format
+    const cleanedStructure = {};
+    
+    for (const [key, value] of Object.entries(structure)) {
+      if (key === '_files') {
+        // If there are files at this level, we need to handle them differently
+        // based on whether there are also subdirectories
+        const hasSubDirs = Object.keys(structure).some(k => k !== '_files');
+        
+        if (!hasSubDirs) {
+          // If only files, return the files array directly
+          return value;
+        } else {
+          // If mixed files and directories, add files to the structure
+          cleanedStructure._files = value;
+        }
+      } else {
+        cleanedStructure[key] = value;
+      }
+    }
+    
+    return cleanedStructure;
+  } catch (error) {
+    console.error(`Error reading directory ${dirPath}:`, error.message);
+    return {};
   }
 }
 
