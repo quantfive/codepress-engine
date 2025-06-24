@@ -400,6 +400,7 @@ async function getAiChanges({
   aiInstruction,
   fileContent,
   githubRepoName,
+  githubMode,
   authHeader,
 }) {
   console.log(
@@ -415,6 +416,7 @@ async function getAiChanges({
       ai_instruction: aiInstruction,
       file_content: fileContent,
       github_repo_name: githubRepoName,
+      github_mode: githubMode,
     },
     authHeader
   );
@@ -677,6 +679,7 @@ function createApp() {
       const {
         encoded_location,
         github_repo_name,
+        github_mode,
         image_data,
         filename,
         aiInstruction,
@@ -720,6 +723,7 @@ function createApp() {
           aiInstruction: actualAiInstruction,
           fileContent,
           githubRepoName: github_repo_name,
+          githubMode: github_mode,
           authHeader,
         });
 
