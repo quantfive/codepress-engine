@@ -5,7 +5,6 @@ const fs = require("fs");
 const path = require("path");
 const prettier = require("prettier");
 const fetch = require("node-fetch");
-const tree = require('tree-node-cli');
 const { decode } = require("./index");
 
 /**
@@ -857,8 +856,8 @@ async function startServer(options = {}) {
 }
 
 /**
- * Get the directory structure of the current project using tree package
- * @returns {string} Tree structure as a string
+ * Get a list of files in the current project, respecting gitignore patterns
+ * @returns {string} List of file paths, one per line
  */
 function getProjectStructure() {
   try {
@@ -873,12 +872,12 @@ function getProjectStructure() {
         .map(line => line.trim())
         .filter(line => line && !line.startsWith('#')) // Remove empty lines and comments
         .map(pattern => {
-          // Convert gitignore patterns to regex patterns that work with tree-node-cli
+          // Convert gitignore patterns to regex patterns
           let regexPattern = pattern;
           
           // Handle negation patterns (starting with !)
           if (pattern.startsWith('!')) {
-            // Skip negation patterns for now as tree-node-cli doesn't support them directly
+            // Skip negation patterns for now as they're complex to implement
             return null;
           }
           
@@ -912,14 +911,13 @@ function getProjectStructure() {
             .replace(/\*/g, '[^/]*')   // * matches anything except path separator
             .replace(/\?/g, '[^/]');   // ? matches single character except path separator
           
-          // For tree-node-cli, we need to match the full path
-          // Add anchors to match the pattern properly
+          // Create regex pattern for matching file paths
           if (!regexPattern.includes('/')) {
             // If no slash, match files/directories at any level
-            regexPattern = `(^|/)${regexPattern}(/|$)`;
+            regexPattern = `(^|/)${regexPattern}(/.*)?$`;
           } else {
             // If contains slash, match from start
-            regexPattern = `^${regexPattern}(/|$)`;
+            regexPattern = `^${regexPattern}(/.*)?$`;
           }
           
           try {
@@ -936,12 +934,48 @@ function getProjectStructure() {
       console.log(`\x1b[33m⚠ No .gitignore file found, no exclusions applied\x1b[0m`);
     }
 
-    const treeString = tree(process.cwd(), {
-      dirsFirst: true,
-      exclude: excludePatterns, // Use gitignore patterns
-    });
-    console.log(`\x1b[36mℹ Generated project tree structure\x1b[0m`);
-    return treeString;
+    // Function to check if a path should be excluded
+    function shouldExclude(relativePath) {
+      return excludePatterns.some(pattern => pattern.test(relativePath));
+    }
+
+    // Function to recursively get all files
+    function getFilesRecursively(dir, baseDir = dir) {
+      const files = [];
+      
+      try {
+        const entries = fs.readdirSync(dir, { withFileTypes: true });
+        
+        for (const entry of entries) {
+          const fullPath = path.join(dir, entry.name);
+          const relativePath = path.relative(baseDir, fullPath);
+          
+          // Skip if excluded by gitignore patterns
+          if (shouldExclude(relativePath)) {
+            continue;
+          }
+          
+          if (entry.isDirectory()) {
+            // Recursively get files from subdirectory
+            files.push(...getFilesRecursively(fullPath, baseDir));
+          } else if (entry.isFile()) {
+            // Add file to list
+            files.push(relativePath);
+          }
+        }
+      } catch (error) {
+        console.warn(`\x1b[33m⚠ Error reading directory ${dir}: ${error.message}\x1b[0m`);
+      }
+      
+      return files;
+    }
+
+    const fileList = getFilesRecursively(process.cwd());
+    console.log(`\x1b[36mℹ Generated file list with ${fileList.length} files\x1b[0m`);
+    
+    // Return as a formatted string with one file per line
+    return fileList.sort().join('\n');
+    
   } catch (error) {
     console.error(`Error generating project structure: ${error.message}`);
     return 'Unable to generate project structure';
