@@ -154,7 +154,18 @@ module.exports = {
 
 - **Use SWC Transform** if you want maximum performance and your build tool supports custom transformations
 - **Use Babel Plugin** if you need maximum compatibility or are using a traditional Babel-based setup
-- Both provide identical functionality - the choice is about performance vs compatibility
+
+### Key Differences
+
+| Feature           | Babel Plugin                          | SWC Plugin                                           |
+| ----------------- | ------------------------------------- | ---------------------------------------------------- |
+| **Performance**   | 1x (baseline)                         | 20-70x faster                                        |
+| **Line Numbers**  | ✅ Accurate source line numbers       | ❌ Not included (to avoid WASM serialization issues) |
+| **Encoding**      | ✅ Identical XOR + base64 encoding    | ✅ Identical XOR + base64 encoding                   |
+| **Git Detection** | ✅ Auto-detects repo/branch           | ✅ Auto-detects repo/branch                          |
+| **Output Format** | `{encodedPath}:{startLine}-{endLine}` | `{encodedPath}` (no line numbers)                    |
+
+Both plugins provide identical functionality and output - the choice is about performance vs compatibility.
 
 ## How the Plugin Works
 
@@ -164,7 +175,7 @@ The Babel plugin transforms your JSX elements during the build process by:
 
    - An encoded file path (for security)
    - Line numbers indicating where the element appears in the source code
-   - Format: `{encodedPath}:{startLine}-{endLine}`
+   - Format: `{encodedPath}:{startLine}-{endLine}` (SWC) or `{encodedPath}:{startLine}-{endLine}` (Babel)
 
 2. **Adding Repository Information**: Container elements (html, body, div) get:
 
@@ -178,36 +189,108 @@ The Babel plugin transforms your JSX elements during the build process by:
 
 ### Example Output
 
-Given this JSX code in `src/components/Header.jsx`:
+Given this JSX code in `src/components/Button.jsx`:
 
 ```jsx
-function Header() {
+// Line 1
+import React from "react";
+
+// Line 4
+const Button = ({ variant, children, ...props }) => {
   return (
-    <div className="header">
-      <h1>Welcome</h1>
-      <p>This is the header component</p>
+    <button className={`btn btn-${variant}`} {...props}>
+      {children}
+    </button>
+  );
+};
+
+// Line 15
+export default function ButtonExamples() {
+  return (
+    <div className="examples">
+      <Button variant="primary">Primary Button</Button>
+
+      <Button variant="secondary">Secondary Button</Button>
     </div>
   );
 }
 ```
 
-The plugin transforms it to:
+The plugin transforms it to (showing encoded file paths with line numbers):
 
 ```jsx
-function Header() {
+// Babel Plugin Output (with line numbers):
+const Button = ({ variant, children, ...props }) => {
+  return (
+    <button
+      className={`btn btn-${variant}`}
+      codepress-data-fp="EB0HShMdCAMcQwMHGBYCLhIWWxkQGQ:6-12"
+      {...props}
+    >
+      {children}
+    </button>
+  );
+};
+
+export default function ButtonExamples() {
   return (
     <div
-      className="header"
-      codepress-data-fp="c3JjL2NvbXBvbmVudHMvSGVhZGVyLmpzeg:2-6"
+      className="examples"
+      codepress-data-fp="EB0HShMdCAMcQwMHGBYCLhIWWxkQGQ:17-26"
       codepress-github-repo-name="owner/repo"
       codepress-github-branch="main"
     >
-      <h1 codepress-data-fp="c3JjL2NvbXBvbmVudHMvSGVhZGVyLmpzeg:3-3">
-        Welcome
-      </h1>
-      <p codepress-data-fp="c3JjL2NvbXBvbmVudHMvSGVhZGVyLmpzeg:4-4">
-        This is the header component
-      </p>
+      <Button
+        variant="primary"
+        codepress-data-fp="EB0HShMdCAMcQwMHGBYCLhIWWxkQGQ:18-20"
+      >
+        Primary Button
+      </Button>
+
+      <Button
+        variant="secondary"
+        codepress-data-fp="EB0HShMdCAMcQwMHGBYCLhIWWxkQGQ:22-24"
+      >
+        Secondary Button
+      </Button>
+    </div>
+  );
+}
+
+// SWC Plugin Output (without line numbers to avoid serialization issues):
+const Button = ({ variant, children, ...props }) => {
+  return (
+    <button
+      className={`btn btn-${variant}`}
+      codepress-data-fp="EB0HShMdCAMcQwMHGBYCLhIWWxkQGQ"
+      {...props}
+    >
+      {children}
+    </button>
+  );
+};
+
+export default function ButtonExamples() {
+  return (
+    <div
+      className="examples"
+      codepress-data-fp="EB0HShMdCAMcQwMHGBYCLhIWWxkQGQ"
+      codepress-github-repo-name="owner/repo"
+      codepress-github-branch="main"
+    >
+      <Button
+        variant="primary"
+        codepress-data-fp="EB0HShMdCAMcQwMHGBYCLhIWWxkQGQ"
+      >
+        Primary Button
+      </Button>
+
+      <Button
+        variant="secondary"
+        codepress-data-fp="EB0HShMdCAMcQwMHGBYCLhIWWxkQGQ"
+      >
+        Secondary Button
+      </Button>
     </div>
   );
 }
