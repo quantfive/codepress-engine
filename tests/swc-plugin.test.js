@@ -121,16 +121,41 @@ export default App;
       expect(fs.existsSync(nextJsPluginPath)).toBe(true);
     });
 
-    test("package.json should have correct SWC export", () => {
+    test("package.json should have correct SWC exports", () => {
       const packageJson = require("../package.json");
-      expect(packageJson.exports["./swc"]).toBe("./swc/codepress_engine.wasm");
+      expect(packageJson.exports["./swc"]).toBe("./swc/index.js");
+      expect(packageJson.exports["./swc/wasm"]).toBe(
+        "./swc/codepress_engine.wasm"
+      );
     });
 
     test("should be loadable as Node.js module export", () => {
-      // This tests that the package structure allows proper importing
-      const wasmPath = require.resolve("@quantfive/codepress-engine/swc");
+      // Test that the wrapper is loadable
+      const swcWrapper = require.resolve("@quantfive/codepress-engine/swc");
+      expect(fs.existsSync(swcWrapper)).toBe(true);
+      expect(swcWrapper.endsWith("index.js")).toBe(true);
+
+      // Test that the WASM file is accessible via the wasm export
+      const wasmPath = require.resolve("@quantfive/codepress-engine/swc/wasm");
       expect(fs.existsSync(wasmPath)).toBe(true);
       expect(wasmPath.endsWith("codepress_engine.wasm")).toBe(true);
+    });
+
+    test("SWC wrapper should auto-detect git information", () => {
+      const createSWCPlugin = require("../swc/index.js");
+      const pluginConfig = createSWCPlugin();
+
+      // Should return array with WASM path and config
+      expect(Array.isArray(pluginConfig)).toBe(true);
+      expect(pluginConfig).toHaveLength(2);
+
+      const [wasmPath, config] = pluginConfig;
+      expect(wasmPath.endsWith("codepress_engine.wasm")).toBe(true);
+      expect(typeof config).toBe("object");
+
+      // Should have auto-detected git info (or null if not in git repo)
+      expect(config).toHaveProperty("repo_name");
+      expect(config).toHaveProperty("branch_name");
     });
   });
 });

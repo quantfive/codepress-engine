@@ -1,10 +1,11 @@
 // next.config.js usage example for Next.js 15 (SWC compiler)
+const createSWCPlugin = require("@quantfive/codepress-engine/swc");
 
 module.exports = {
   experimental: {
     swcPlugins: [
-      // Default usage - uses auto-detected git repo and branch
-      ["@quantfive/codepress-engine/swc", {}],
+      // Automatically detects git repo and branch!
+      createSWCPlugin(),
     ],
   },
 };
@@ -13,11 +14,10 @@ module.exports = {
 // module.exports = {
 //   experimental: {
 //     swcPlugins: [
-//       ['@quantfive/codepress-engine/swc', {
-//         attributeName: 'custom-file-path',
-//         repoAttributeName: 'custom-repo-name',
-//         branchAttributeName: 'custom-branch-name'
-//       }]
+//       createSWCPlugin({
+//         repo_name: 'custom-org/custom-repo',
+//         branch_name: 'custom-branch'
+//       })
 //     ]
 //   }
 // };
