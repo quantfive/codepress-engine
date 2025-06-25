@@ -653,7 +653,7 @@ function createApp() {
         console.log(`\x1b[36mℹ Received response from backend\x1b[0m`);
 
         // Process the response data directly - iterate over each file
-        const responseData = backendResponse.response;
+        const responseData = backendResponse.response,.coding_agent_output;
         const results = [];
         
         for (const fileData of responseData) {
