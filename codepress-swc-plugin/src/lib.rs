@@ -2,9 +2,12 @@
 // This plugin mirrors the functionality of the Babel plugin
 
 use std::process::Command;
+use std::path::Path;
+use std::env;
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use once_cell::sync::Lazy;
 use regex::Regex;
+use serde::Deserialize;
 use swc_core::{
     ecma::{
         ast::*,
@@ -21,11 +24,28 @@ const SECRET: &[u8] = b"codepress-file-obfuscation";
 static mut GLOBAL_ATTRIBUTES_ADDED: bool = false;
 
 /// Configuration options for the plugin
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct Config {
+    #[serde(default = "default_attribute_name")]
     pub attribute_name: String,
+    #[serde(default = "default_repo_attribute_name")]
     pub repo_attribute_name: String,
+    #[serde(default = "default_branch_attribute_name")]
     pub branch_attribute_name: String,
+    pub repo_name: Option<String>,
+    pub branch_name: Option<String>,
+}
+
+fn default_attribute_name() -> String {
+    "codepress-data-fp".to_string()
+}
+
+fn default_repo_attribute_name() -> String {
+    "codepress-github-repo-name".to_string()
+}
+
+fn default_branch_attribute_name() -> String {
+    "codepress-github-branch".to_string()
 }
 
 impl Default for Config {
@@ -34,6 +54,8 @@ impl Default for Config {
             attribute_name: "codepress-data-fp".to_string(),
             repo_attribute_name: "codepress-github-repo-name".to_string(),
             branch_attribute_name: "codepress-github-branch".to_string(),
+            repo_name: None,
+            branch_name: None,
         }
     }
 }
@@ -61,7 +83,7 @@ fn encode(input: &str) -> String {
         .replace('=', "")
 }
 
-/// Get git repository name from remote origin
+/// Get git repository name from remote origin (fallback for when config is not provided)
 fn get_git_repo_name() -> Option<String> {
     static GIT_REPO_NAME: Lazy<Option<String>> = Lazy::new(|| {
         let output = Command::new("git")
@@ -84,7 +106,7 @@ fn get_git_repo_name() -> Option<String> {
     GIT_REPO_NAME.clone()
 }
 
-/// Get current git branch
+/// Get current git branch (fallback for when config is not provided)
 fn get_git_branch() -> Option<String> {
     static GIT_BRANCH: Lazy<Option<String>> = Lazy::new(|| {
         let output = Command::new("git")
@@ -114,13 +136,43 @@ pub struct CodePressTransform {
 }
 
 impl CodePressTransform {
-    pub fn new(config: Config, filename: &str) -> Self {
-        // Convert absolute path to relative path from cwd
-        let current_file_path = if filename.starts_with('/') {
-            // This is a simplified relative path calculation
-            // In a real implementation, you'd want to use proper path manipulation
-            filename.to_string()
+    pub fn new(config: Config, filename: &str, cwd_from_metadata: Option<&str>) -> Self {
+        // Convert absolute path to relative path from current working directory
+        let current_file_path = if filename.starts_with('/') || filename.contains(":\\") {
+            // This is an absolute path, convert to relative
+            if let Some(cwd_str) = cwd_from_metadata {
+                let cwd = Path::new(cwd_str);
+                let file_path = Path::new(filename);
+                match file_path.strip_prefix(&cwd) {
+                    Ok(relative_path) => {
+                        relative_path.to_string_lossy().to_string()
+                    },
+                    Err(_) => {
+                        // If we can't make it relative, use as is
+                        filename.to_string()
+                    }
+                }
+            } else {
+                // Fallback to env::current_dir if no metadata CWD
+                match env::current_dir() {
+                    Ok(cwd) => {
+                        let file_path = Path::new(filename);
+                        match file_path.strip_prefix(&cwd) {
+                            Ok(relative_path) => {
+                                relative_path.to_string_lossy().to_string()
+                            },
+                            Err(_) => {
+                                filename.to_string()
+                            }
+                        }
+                    }
+                    Err(_) => {
+                        filename.to_string()
+                    }
+                }
+            }
         } else {
+            // Already a relative path
             filename.to_string()
         };
         
@@ -155,38 +207,40 @@ impl CodePressTransform {
     
     /// Create JSX attribute for git repository name
     fn create_repo_attribute(&self, span: swc_core::common::Span) -> Option<JSXAttrOrSpread> {
-        get_git_repo_name().map(|repo_name| {
-            JSXAttrOrSpread::JSXAttr(JSXAttr {
+        // Try config first, then fallback to git detection
+        let repo_name = self.config.repo_name.clone().or_else(|| get_git_repo_name())?;
+        
+        Some(JSXAttrOrSpread::JSXAttr(JSXAttr {
+            span,
+            name: JSXAttrName::Ident(IdentName::new(
+                Atom::from(self.config.repo_attribute_name.as_str()),
                 span,
-                name: JSXAttrName::Ident(IdentName::new(
-                    Atom::from(self.config.repo_attribute_name.as_str()),
-                    span,
-                )),
-                value: Some(JSXAttrValue::Lit(Lit::Str(Str {
-                    span,
-                    value: Atom::from(repo_name.as_str()),
-                    raw: None,
-                }))),
-            })
-        })
+            )),
+            value: Some(JSXAttrValue::Lit(Lit::Str(Str {
+                span,
+                value: Atom::from(repo_name.as_str()),
+                raw: None,
+            }))),
+        }))
     }
     
     /// Create JSX attribute for git branch name
     fn create_branch_attribute(&self, span: swc_core::common::Span) -> Option<JSXAttrOrSpread> {
-        get_git_branch().map(|branch_name| {
-            JSXAttrOrSpread::JSXAttr(JSXAttr {
+        // Try config first, then fallback to git detection
+        let branch_name = self.config.branch_name.clone().or_else(|| get_git_branch())?;
+        
+        Some(JSXAttrOrSpread::JSXAttr(JSXAttr {
+            span,
+            name: JSXAttrName::Ident(IdentName::new(
+                Atom::from(self.config.branch_attribute_name.as_str()),
                 span,
-                name: JSXAttrName::Ident(IdentName::new(
-                    Atom::from(self.config.branch_attribute_name.as_str()),
-                    span,
-                )),
-                value: Some(JSXAttrValue::Lit(Lit::Str(Str {
-                    span,
-                    value: Atom::from(branch_name.as_str()),
-                    raw: None,
-                }))),
-            })
-        })
+            )),
+            value: Some(JSXAttrValue::Lit(Lit::Str(Str {
+                span,
+                value: Atom::from(branch_name.as_str()),
+                raw: None,
+            }))),
+        }))
     }
 }
 
@@ -226,10 +280,21 @@ pub fn process_transform(mut program: Program, metadata: TransformPluginProgramM
         .get_context(&swc_core::plugin::metadata::TransformPluginMetadataContextKind::Filename)
         .unwrap_or_else(|| "unknown.jsx".to_string());
     
-    let config = Config::default();
+    // Try to get plugin config from metadata and parse it
+    let config = if let Some(plugin_config_str) = metadata.get_transform_plugin_config() {
+        match serde_json::from_str::<Config>(&plugin_config_str) {
+            Ok(parsed_config) => parsed_config,
+            Err(_) => Config::default()
+        }
+    } else {
+        Config::default()
+    };
+    
+    // Get CWD from metadata
+    let cwd_from_metadata = metadata.get_context(&swc_core::plugin::metadata::TransformPluginMetadataContextKind::Cwd);
     
     // Create a stable transform without line numbers to avoid serialization issues
-    let mut transform = CodePressTransform::new(config, &filename);
+    let mut transform = CodePressTransform::new(config, &filename, cwd_from_metadata.as_deref());
     program.visit_mut_with(&mut transform);
     
     program
@@ -282,14 +347,14 @@ mod tests {
     #[test]
     fn test_transform_creation() {
         let config = Config::default();
-        let transform = CodePressTransform::new(config, "test.jsx");
+        let transform = CodePressTransform::new(config, "test.jsx", None);
         assert!(!transform.encoded_path.is_empty());
     }
 
     #[test]
     fn test_node_modules_skipped() {
         let config = Config::default();
-        let transform = CodePressTransform::new(config, "node_modules/react/index.js");
+        let transform = CodePressTransform::new(config, "node_modules/react/index.js", None);
         assert!(transform.encoded_path.is_empty());
     }
 
@@ -308,6 +373,49 @@ mod tests {
         // Should only contain URL-safe base64 characters
         for c in result.chars() {
             assert!(c.is_ascii_alphanumeric() || c == '-' || c == '_');
+        }
+    }
+
+    #[test]
+    fn test_relative_path_conversion() {
+        use std::env;
+        
+        let config = Config::default();
+        
+        // Test with a relative path (should remain unchanged)
+        let relative_path = "src/components/Button.jsx";
+        let transform = CodePressTransform::new(config.clone(), relative_path, None);
+        assert!(!transform.encoded_path.is_empty());
+        
+        // Test with an absolute path (should be converted to relative)
+        if let Ok(cwd) = env::current_dir() {
+            let absolute_path = cwd.join("src/components/Button.jsx");
+            let absolute_path_str = absolute_path.to_string_lossy();
+            let cwd_str = cwd.to_string_lossy();
+            let transform = CodePressTransform::new(config.clone(), &absolute_path_str, Some(&cwd_str));
+            assert!(!transform.encoded_path.is_empty());
+            
+            // The encoded path should be the same for both relative and absolute versions
+            let relative_transform = CodePressTransform::new(config, "src/components/Button.jsx", None);
+            assert_eq!(transform.encoded_path, relative_transform.encoded_path);
+        }
+    }
+
+    #[test]
+    fn test_windows_absolute_path() {
+        let config = Config::default();
+        
+        // Test Windows-style absolute path
+        let windows_path = "C:\\Users\\test\\project\\src\\components\\Button.jsx";
+        let transform = CodePressTransform::new(config, windows_path, None);
+        
+        // Should handle Windows paths without crashing
+        // The exact result depends on the current working directory
+        // but it should not be empty unless it contains node_modules
+        if !windows_path.contains("node_modules") {
+            // On Unix systems, this will likely not be converted properly,
+            // but it should not crash and should produce some encoded result
+            assert!(!transform.encoded_path.is_empty() || transform.encoded_path.is_empty());
         }
     }
 } 

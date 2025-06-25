@@ -6,7 +6,8 @@
   "exports": {
     ".": "./babel/index.js",
     "./babel": "./babel/index.js",
-    "./swc": "./swc/codepress_engine.wasm",
+    "./swc": "./swc/index.js",
+    "./swc/wasm": "./swc/codepress_engine.wasm",
     "./hash-util": "./dist/hash-util.js",
     "./server": "./dist/server.js",
     "./cli": "./dist/cli.js"

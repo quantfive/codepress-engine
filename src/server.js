@@ -862,99 +862,105 @@ async function startServer(options = {}) {
 function getProjectStructure() {
   try {
     // Read .gitignore patterns
-    const gitignorePath = path.join(process.cwd(), '.gitignore');
+    const gitignorePath = path.join(process.cwd(), ".gitignore");
     let excludePatterns = [];
-    
+
     if (fs.existsSync(gitignorePath)) {
-      const gitignoreContent = fs.readFileSync(gitignorePath, 'utf8');
+      const gitignoreContent = fs.readFileSync(gitignorePath, "utf8");
       excludePatterns = gitignoreContent
-        .split('\n')
-        .map(line => line.trim())
-        .filter(line => line && !line.startsWith('#')) // Remove empty lines and comments
-        .map(pattern => {
+        .split("\n")
+        .map((line) => line.trim())
+        .filter((line) => line && !line.startsWith("#")) // Remove empty lines and comments
+        .map((pattern) => {
           // Convert gitignore patterns to regex patterns
           let regexPattern = pattern;
-          
+
           // Handle negation patterns (starting with !)
-          if (pattern.startsWith('!')) {
+          if (pattern.startsWith("!")) {
             // Skip negation patterns for now as they're complex to implement
             return null;
           }
-          
+
           // Remove leading slash if present (gitignore treats /pattern as root-relative)
-          if (regexPattern.startsWith('/')) {
+          if (regexPattern.startsWith("/")) {
             regexPattern = regexPattern.substring(1);
           }
-          
+
           // Remove trailing slash for directories
-          if (regexPattern.endsWith('/')) {
+          if (regexPattern.endsWith("/")) {
             regexPattern = regexPattern.substring(0, regexPattern.length - 1);
           }
-          
+
           // Escape special regex characters except * and ?
           regexPattern = regexPattern
-            .replace(/\./g, '\\.')     // Escape dots
-            .replace(/\+/g, '\\+')     // Escape plus
-            .replace(/\^/g, '\\^')     // Escape caret
-            .replace(/\$/g, '\\$')     // Escape dollar
-            .replace(/\(/g, '\\(')     // Escape parentheses
-            .replace(/\)/g, '\\)')
-            .replace(/\[/g, '\\[')     // Escape brackets
-            .replace(/\]/g, '\\]')
-            .replace(/\{/g, '\\{')     // Escape braces
-            .replace(/\}/g, '\\}')
-            .replace(/\|/g, '\\|');    // Escape pipe
-          
+            .replace(/\./g, "\\.") // Escape dots
+            .replace(/\+/g, "\\+") // Escape plus
+            .replace(/\^/g, "\\^") // Escape caret
+            .replace(/\$/g, "\\$") // Escape dollar
+            .replace(/\(/g, "\\(") // Escape parentheses
+            .replace(/\)/g, "\\)")
+            .replace(/\[/g, "\\[") // Escape brackets
+            .replace(/\]/g, "\\]")
+            .replace(/\{/g, "\\{") // Escape braces
+            .replace(/\}/g, "\\}")
+            .replace(/\|/g, "\\|"); // Escape pipe
+
           // Convert gitignore wildcards to regex
           regexPattern = regexPattern
-            .replace(/\*\*/g, '.*')    // ** matches any number of directories
-            .replace(/\*/g, '[^/]*')   // * matches anything except path separator
-            .replace(/\?/g, '[^/]');   // ? matches single character except path separator
-          
+            .replace(/\*\*/g, ".*") // ** matches any number of directories
+            .replace(/\*/g, "[^/]*") // * matches anything except path separator
+            .replace(/\?/g, "[^/]"); // ? matches single character except path separator
+
           // Create regex pattern for matching file paths
-          if (!regexPattern.includes('/')) {
+          if (!regexPattern.includes("/")) {
             // If no slash, match files/directories at any level
             regexPattern = `(^|/)${regexPattern}(/.*)?$`;
           } else {
             // If contains slash, match from start
             regexPattern = `^${regexPattern}(/.*)?$`;
           }
-          
+
           try {
             return new RegExp(regexPattern);
           } catch (error) {
-            console.warn(`\x1b[33m⚠ Invalid regex pattern for "${pattern}": ${error.message}\x1b[0m`);
+            console.warn(
+              `\x1b[33m⚠ Invalid regex pattern for "${pattern}": ${error.message}\x1b[0m`
+            );
             return null;
           }
         })
-        .filter(regex => regex !== null); // Remove null entries
-      
-      console.log(`\x1b[36mℹ Found ${excludePatterns.length} valid gitignore patterns\x1b[0m`);
+        .filter((regex) => regex !== null); // Remove null entries
+
+      console.log(
+        `\x1b[36mℹ Found ${excludePatterns.length} valid gitignore patterns\x1b[0m`
+      );
     } else {
-      console.log(`\x1b[33m⚠ No .gitignore file found, no exclusions applied\x1b[0m`);
+      console.log(
+        `\x1b[33m⚠ No .gitignore file found, no exclusions applied\x1b[0m`
+      );
     }
 
     // Function to check if a path should be excluded
     function shouldExclude(relativePath) {
-      return excludePatterns.some(pattern => pattern.test(relativePath));
+      return excludePatterns.some((pattern) => pattern.test(relativePath));
     }
 
     // Function to recursively get all files
     function getFilesRecursively(dir, baseDir = dir) {
       const files = [];
-      
+
       try {
         const entries = fs.readdirSync(dir, { withFileTypes: true });
-        
+
         for (const entry of entries) {
           const fullPath = path.join(dir, entry.name);
           const relativePath = path.relative(baseDir, fullPath);
-          
+
           // Skip if excluded by gitignore patterns
           if (shouldExclude(relativePath)) {
             continue;
           }
-          
+
           if (entry.isDirectory()) {
             // Recursively get files from subdirectory
             files.push(...getFilesRecursively(fullPath, baseDir));
@@ -964,21 +970,24 @@ function getProjectStructure() {
           }
         }
       } catch (error) {
-        console.warn(`\x1b[33m⚠ Error reading directory ${dir}: ${error.message}\x1b[0m`);
+        console.warn(
+          `\x1b[33m⚠ Error reading directory ${dir}: ${error.message}\x1b[0m`
+        );
       }
-      
+
       return files;
     }
 
     const fileList = getFilesRecursively(process.cwd());
-    console.log(`\x1b[36mℹ Generated file list with ${fileList.length} files\x1b[0m`);
-    
+    console.log(
+      `\x1b[36mℹ Generated file list with ${fileList.length} files\x1b[0m`
+    );
+
     // Return as a formatted string with one file per line
-    return fileList.sort().join('\n');
-    
+    return fileList.sort().join("\n");
   } catch (error) {
     console.error(`Error generating project structure: ${error.message}`);
-    return 'Unable to generate project structure';
+    return "Unable to generate project structure";
   }
 }
 

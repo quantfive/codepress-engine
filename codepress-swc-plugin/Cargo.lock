@@ -252,6 +252,8 @@ dependencies = [
  "base64",
  "once_cell",
  "regex",
+ "serde",
+ "serde_json",
  "swc_core",
 ]
 

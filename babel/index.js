@@ -1,11 +1,6 @@
 // babel-plugin-codepress-html
 const path = require("path");
-const fs = require("fs");
 const { execSync } = require("child_process");
-
-// Keep track of the last request time to throttle requests
-let lastRequestTime = 0;
-const MIN_REQUEST_INTERVAL = 0; // Minimum 50ms between requests
 
 // encoder (build time)
 const SECRET = Buffer.from("codepress-file-obfuscation"); // Use a slightly more descriptive key
