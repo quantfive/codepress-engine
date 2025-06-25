@@ -758,18 +758,19 @@ function createApp() {
         console.log(`\x1b[36mℹ Received response from backend\x1b[0m`);
 
         // Check if this is the new CodingAgentOutput format with path and content
-        if (backendResponse.path && backendResponse.content !== undefined) {
-          console.log(`\x1b[36mℹ Processing CodingAgentOutput format for path: ${backendResponse.path}\x1b[0m`);
+        const responseData = backendResponse.coding_agent_output;
+        if (responseData.path && responseData.content !== undefined) {
+          console.log(`\x1b[36mℹ Processing CodingAgentOutput format for path: ${responseData.path}\x1b[0m`);
           
           // Determine the target file path
-          const targetFilePath = backendResponse.path.startsWith('/') 
-            ? backendResponse.path 
-            : path.join(process.cwd(), backendResponse.path);
+          const targetFilePath = responseData.path.startsWith('/') 
+            ? responseData.path 
+            : path.join(process.cwd(), responseData.path);
           
           // Format with Prettier
           let formattedCode;
           try {
-            formattedCode = await prettier.format(backendResponse.content, {
+            formattedCode = await prettier.format(responseData.content, {
               parser: "typescript",
               semi: true,
               singleQuote: false,
@@ -777,7 +778,7 @@ function createApp() {
           } catch (prettierError) {
             console.error("Prettier formatting failed:", prettierError);
             // If formatting fails, use the unformatted code
-            formattedCode = backendResponse.content;
+            formattedCode = responseData.content;
           }
 
           // Write to file
@@ -787,14 +788,14 @@ function createApp() {
 
           return reply.code(200).send({
             success: true,
-            message: `Applied AI changes to ${backendResponse.path}`,
+            message: `Applied AI changes to ${responseData.path}`,
             modified_content: formattedCode,
-            path: backendResponse.path,
+            path: responseData.path,
           });
         } else {
           console.error(
             `\x1b[31m✗ Invalid response format: ${JSON.stringify(
-              backendResponse
+              responseData
             )}\x1b[0m`
           );
           throw new Error("Invalid response format from backend - expected path and content fields");
