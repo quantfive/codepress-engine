@@ -4,8 +4,12 @@ coverage
 .DS_Store
 *.log
 
+
 # Rust build artifacts
 codepress-swc-plugin/target/
 
 # Keep main branch clean with source code only
 swc/codepress_engine.wasm
+
+# SWC plugin cache directory
+.swc/

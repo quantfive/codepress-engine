@@ -79,4 +79,5 @@ function createSWCPlugin(userConfig = {}) {
   return [path.resolve(__dirname, "codepress_engine.wasm"), config];
 }
 
+// Support both CommonJS and ES6 imports
 module.exports = createSWCPlugin;
