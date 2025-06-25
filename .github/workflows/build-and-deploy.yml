@@ -33,8 +33,8 @@ jobs:
       - name: Build JavaScript artifacts
         run: npm run build
 
-      - name: Build Rust WASM plugin
-        run: npm run build:rust
+      - name: Build all WASM variants
+        run: npm run build:wasm
 
       - name: Prepare publish directory
         run: |

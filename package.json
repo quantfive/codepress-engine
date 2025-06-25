@@ -8,6 +8,8 @@
     "./babel": "./babel/index.js",
     "./swc": "./swc/index.js",
     "./swc/wasm": "./swc/codepress_engine.wasm",
+    "./swc/wasm-27": "./dist/wasm-27.wasm",
+    "./swc/wasm-29": "./dist/wasm-29.wasm",
     "./hash-util": "./dist/hash-util.js",
     "./server": "./dist/server.js",
     "./cli": "./dist/cli.js"
@@ -23,9 +25,10 @@
   ],
   "scripts": {
     "build": "babel src --out-dir dist --copy-files",
+    "build:wasm": "node scripts/build-wasm-matrix.js",
     "build:rust": "mkdir -p swc && cargo build --release --target wasm32-wasip1 --manifest-path codepress-swc-plugin/Cargo.toml && cp codepress-swc-plugin/target/wasm32-wasip1/release/codepress_swc_plugin.wasm swc/codepress_engine.wasm",
     "test": "jest",
-    "dev:link": "npm run build && npm run build:rust && npm link"
+    "dev:link": "npm run build && npm run build:wasm && npm link"
   },
   "keywords": [
     "babel",
