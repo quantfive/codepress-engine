@@ -11,9 +11,10 @@ use swc_core::common::{SourceMapper, DUMMY_SP};
 // Global flag to ensure repo/branch attributes are added only once
 static GLOBAL_ATTRIBUTES_ADDED: AtomicBool = AtomicBool::new(false);
 
-/// XOR encodes a string with a simple key
-fn xor_encode(input: &str, key: u8) -> String {
-    let xored: Vec<u8> = input.bytes().map(|b| b ^ key).collect();
+/// XOR encodes a string with a multi-byte rotating key (same as Babel plugin)
+fn xor_encode(input: &str) -> String {
+    const SECRET: &[u8] = b"codepress-file-obfuscation";
+    let xored: Vec<u8> = input.bytes().enumerate().map(|(i, b)| b ^ SECRET[i % SECRET.len()]).collect();
     let base64_encoded = STANDARD.encode(xored);
     base64_encoded
         .replace('+', "-")
@@ -61,7 +62,7 @@ impl CodePressTransform {
     }
 
     fn create_encoded_path_attr(&self, filename: &str, opening_span: swc_core::common::Span, parent_span: Option<swc_core::common::Span>) -> JSXAttrOrSpread {
-        let encoded_path = xor_encode(filename, 42);
+        let encoded_path = xor_encode(filename);
         
         let attr_value = if let Some(line_info) = self.get_line_info(opening_span, parent_span) {
             format!("{}:{}", encoded_path, line_info)
@@ -206,7 +207,7 @@ mod tests {
     #[test]
     fn test_xor_encode() {
         let input = "test";
-        let encoded = xor_encode(input, 42);
+        let encoded = xor_encode(input);
         assert!(!encoded.is_empty());
         assert!(!encoded.contains('+'));
         assert!(!encoded.contains('/'));
