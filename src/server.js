@@ -873,11 +873,13 @@ function getProjectStructure() {
   try {
     // Read .gitignore patterns
     const gitignorePath = path.join(process.cwd(), ".gitignore");
-    let excludePatterns = [];
+    let excludePatterns = [
+      /^\.git(\/.*)?$/ // Exclude .git directory by default
+    ];
 
     if (fs.existsSync(gitignorePath)) {
       const gitignoreContent = fs.readFileSync(gitignorePath, "utf8");
-      excludePatterns = gitignoreContent
+      const gitignorePatterns = gitignoreContent
         .split("\n")
         .map((line) => line.trim())
         .filter((line) => line && !line.startsWith("#")) // Remove empty lines and comments
@@ -941,8 +943,11 @@ function getProjectStructure() {
         })
         .filter((regex) => regex !== null); // Remove null entries
 
+      // Combine default patterns with gitignore patterns
+      excludePatterns = [...excludePatterns, ...gitignorePatterns];
+
       console.log(
-        `\x1b[36mℹ Found ${excludePatterns.length} valid gitignore patterns\x1b[0m`
+        `\x1b[36mℹ Found ${gitignorePatterns.length} valid gitignore patterns\x1b[0m`
       );
     } else {
       console.log(
