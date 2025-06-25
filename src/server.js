@@ -344,7 +344,12 @@ function readFileFromEncodedLocation(encodedLocation) {
   const encodedFilePath = encodedLocation.split(":")[0];
   const filePath = decode(encodedFilePath);
   console.log(`\x1b[36mℹ Decoded file path: ${filePath}\x1b[0m`);
-  const targetFile = path.join(process.cwd(), filePath);
+  
+  // Check if the path is already absolute, if so use it directly
+  const targetFile = path.isAbsolute(filePath) 
+    ? filePath 
+    : path.join(process.cwd(), filePath);
+    
   console.log(`\x1b[36mℹ Reading file: ${targetFile}\x1b[0m`);
   const fileContent = fs.readFileSync(targetFile, "utf8");
 
@@ -752,35 +757,39 @@ function createApp() {
 
         console.log(`\x1b[36mℹ Received response from backend\x1b[0m`);
 
-        // Check if this is the new format with modified_content (full file replacement)
-        if (backendResponse.modified_content) {
-          // Handle full file replacement
-          const formattedCode = await applyFullFileReplacement(
-            backendResponse.modified_content,
-            targetFile
-          );
+        // Check if this is the new CodingAgentOutput format with path and content
+        if (backendResponse.path && backendResponse.content !== undefined) {
+          console.log(`\x1b[36mℹ Processing CodingAgentOutput format for path: ${backendResponse.path}\x1b[0m`);
+          
+          // Determine the target file path
+          const targetFilePath = backendResponse.path.startsWith('/') 
+            ? backendResponse.path 
+            : path.join(process.cwd(), backendResponse.path);
+          
+          // Format with Prettier
+          let formattedCode;
+          try {
+            formattedCode = await prettier.format(backendResponse.content, {
+              parser: "typescript",
+              semi: true,
+              singleQuote: false,
+            });
+          } catch (prettierError) {
+            console.error("Prettier formatting failed:", prettierError);
+            // If formatting fails, use the unformatted code
+            formattedCode = backendResponse.content;
+          }
+
+          // Write to file
+          fs.writeFileSync(targetFilePath, formattedCode, "utf8");
+          
+          console.log(`\x1b[32m✓ Updated file ${targetFilePath} with AI-generated content\x1b[0m`);
 
           return reply.code(200).send({
             success: true,
-            message:
-              backendResponse.message || `Applied AI changes to ${filePath}`,
+            message: `Applied AI changes to ${backendResponse.path}`,
             modified_content: formattedCode,
-          });
-        } else if (
-          backendResponse.changes &&
-          Array.isArray(backendResponse.changes)
-        ) {
-          // Handle incremental changes (fallback)
-          const formattedCode = await applyChangesAndFormat(
-            fileContent,
-            backendResponse.changes,
-            targetFile
-          );
-
-          return reply.code(200).send({
-            success: true,
-            message: `Applied ${backendResponse.changes.length} AI-suggested changes to ${filePath}`,
-            modified_content: formattedCode,
+            path: backendResponse.path,
           });
         } else {
           console.error(
@@ -788,7 +797,7 @@ function createApp() {
               backendResponse
             )}\x1b[0m`
           );
-          throw new Error("Invalid response format from backend");
+          throw new Error("Invalid response format from backend - expected path and content fields");
         }
       } catch (apiError) {
         console.error("Error applying AI changes:", apiError);
