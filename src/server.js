@@ -757,48 +757,41 @@ function createApp() {
 
         console.log(`\x1b[36mℹ Received response from backend\x1b[0m`);
 
-        // Check if this is the new CodingAgentOutput format with path and content
-        const responseData = backendResponse.coding_agent_output;
-        if (responseData.path && responseData.content !== undefined) {
-          console.log(`\x1b[36mℹ Processing CodingAgentOutput format for path: ${responseData.path}\x1b[0m`);
+        // Check if this is the new response format with path and changes
+        const responseData = backendResponse.response;
+        if (responseData && responseData.path && responseData.changes && Array.isArray(responseData.changes)) {
+          console.log(`\x1b[36mℹ Processing response format for path: ${responseData.path}\x1b[0m`);
           
           // Determine the target file path
           const targetFilePath = responseData.path.startsWith('/') 
             ? responseData.path 
             : path.join(process.cwd(), responseData.path);
           
-          // Format with Prettier
-          let formattedCode;
-          try {
-            formattedCode = await prettier.format(responseData.content, {
-              parser: "typescript",
-              semi: true,
-              singleQuote: false,
-            });
-          } catch (prettierError) {
-            console.error("Prettier formatting failed:", prettierError);
-            // If formatting fails, use the unformatted code
-            formattedCode = responseData.content;
-          }
-
-          // Write to file
-          fs.writeFileSync(targetFilePath, formattedCode, "utf8");
+          // Read the current file content for the target file
+          const currentFileContent = fs.readFileSync(targetFilePath, "utf8");
           
-          console.log(`\x1b[32m✓ Updated file ${targetFilePath} with AI-generated content\x1b[0m`);
+          // Apply the changes using the existing function
+          const formattedCode = await applyChangesAndFormat(
+            currentFileContent,
+            responseData.changes,
+            targetFilePath
+          );
+
+          console.log(`\x1b[32m✓ Updated file ${responseData.path} with ${responseData.changes.length} AI-generated changes\x1b[0m`);
 
           return reply.code(200).send({
             success: true,
-            message: `Applied AI changes to ${responseData.path}`,
+            message: `Applied ${responseData.changes.length} AI changes to ${responseData.path}`,
             modified_content: formattedCode,
             path: responseData.path,
           });
         } else {
           console.error(
             `\x1b[31m✗ Invalid response format: ${JSON.stringify(
-              responseData
+              backendResponse
             )}\x1b[0m`
           );
-          throw new Error("Invalid response format from backend - expected path and content fields");
+          throw new Error("Invalid response format from backend - expected response.path and response.changes fields");
         }
       } catch (apiError) {
         console.error("Error applying AI changes:", apiError);
