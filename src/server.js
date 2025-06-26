@@ -752,47 +752,44 @@ function createApp() {
 
         console.log(`\x1b[36mℹ Received response from backend\x1b[0m`);
 
-        console.log("🔍 Backend response:", backendResponse);
-
-        // Process the response data directly - iterate over each file
-        const responseData = backendResponse.coding_agent_output;
-        const results = [];
-
-        for (const fileData of responseData) {
-          console.log(`\x1b[36mℹ Processing file: ${fileData.path}\x1b[0m`);
-
-          // Determine the target file path
-          const targetFilePath = fileData.path.startsWith("/")
-            ? fileData.path
-            : path.join(process.cwd(), fileData.path);
-
-          // Read the current file content for the target file
-          const currentFileContent = fs.readFileSync(targetFilePath, "utf8");
-
-          // Apply the changes using the existing function
-          const formattedCode = await applyChangesAndFormat(
-            currentFileContent,
-            fileData.changes,
-            targetFilePath,
-            false
+        console.log("backendResponse", backendResponse);
+        // Check if this is the new agent response format with modified_content
+        if (backendResponse.modified_content) {
+          // Handle full file replacement
+          const formattedCode = await applyFullFileReplacement(
+            backendResponse.modified_content,
+            targetFile
           );
 
-          console.log(
-            `\x1b[32m✓ Updated file ${fileData.path} with ${fileData.changes.length} AI-generated changes\x1b[0m`
-          );
-
-          results.push({
-            path: fileData.path,
-            changes_applied: fileData.changes.length,
+          return reply.code(200).send({
+            success: true,
+            message:
+              backendResponse.message || `Applied agent changes to ${filePath}`,
             modified_content: formattedCode,
           });
-        }
+        } else if (
+          backendResponse.changes &&
+          Array.isArray(backendResponse.changes)
+        ) {
+          // Handle incremental changes (fallback)
+          const formattedCode = await applyChangesAndFormat(
+            fileContent,
+            backendResponse.changes,
+            targetFile
+          );
 
-        return reply.code(200).send({
-          success: true,
-          message: `Applied AI changes to ${results.length} files`,
-          files: results,
-        });
+          return reply.code(200).send({
+            success: true,
+            message: `Applied ${backendResponse.changes.length} changes to ${filePath}`,
+          });
+        } else {
+          console.error(
+            `\x1b[31m✗ Invalid response format: ${JSON.stringify(
+              backendResponse
+            )}\x1b[0m`
+          );
+          throw new Error("Invalid response format from backend");
+        }
       } catch (apiError) {
         console.error("Error applying changes:", apiError);
         return reply.code(500).send({ error: apiError.message });
