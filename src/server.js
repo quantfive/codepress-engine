@@ -160,7 +160,9 @@ function applyPatternChanges(fileContent, changes) {
             modifiedContent = modifiedContent.replace(find, replaceWith);
             console.log(`\x1b[32m✓ Replaced pattern successfully\x1b[0m`);
           } else {
-            console.warn(`\x1b[33m⚠ Pattern not found for replace: ${find.substring(0, 50)}...\x1b[0m`);
+            console.warn(
+              `\x1b[33m⚠ Pattern not found for replace: ${find.substring(0, 50)}...\x1b[0m`
+            );
           }
         } else {
           console.warn("Invalid 'replace' change object:", change);
@@ -171,9 +173,13 @@ function applyPatternChanges(fileContent, changes) {
         if (find && insert !== undefined) {
           if (modifiedContent.includes(find)) {
             modifiedContent = modifiedContent.replace(find, find + insert);
-            console.log(`\x1b[32m✓ Inserted content after pattern successfully\x1b[0m`);
+            console.log(
+              `\x1b[32m✓ Inserted content after pattern successfully\x1b[0m`
+            );
           } else {
-            console.warn(`\x1b[33m⚠ Pattern not found for insertAfter: ${find.substring(0, 50)}...\x1b[0m`);
+            console.warn(
+              `\x1b[33m⚠ Pattern not found for insertAfter: ${find.substring(0, 50)}...\x1b[0m`
+            );
           }
         } else {
           console.warn("Invalid 'insertAfter' change object:", change);
@@ -184,9 +190,13 @@ function applyPatternChanges(fileContent, changes) {
         if (find && insert !== undefined) {
           if (modifiedContent.includes(find)) {
             modifiedContent = modifiedContent.replace(find, insert + find);
-            console.log(`\x1b[32m✓ Inserted content before pattern successfully\x1b[0m`);
+            console.log(
+              `\x1b[32m✓ Inserted content before pattern successfully\x1b[0m`
+            );
           } else {
-            console.warn(`\x1b[33m⚠ Pattern not found for insertBefore: ${find.substring(0, 50)}...\x1b[0m`);
+            console.warn(
+              `\x1b[33m⚠ Pattern not found for insertBefore: ${find.substring(0, 50)}...\x1b[0m`
+            );
           }
         } else {
           console.warn("Invalid 'insertBefore' change object:", change);
@@ -199,7 +209,9 @@ function applyPatternChanges(fileContent, changes) {
             modifiedContent = modifiedContent.replace(find, "");
             console.log(`\x1b[32m✓ Deleted pattern successfully\x1b[0m`);
           } else {
-            console.warn(`\x1b[33m⚠ Pattern not found for delete: ${find.substring(0, 50)}...\x1b[0m`);
+            console.warn(
+              `\x1b[33m⚠ Pattern not found for delete: ${find.substring(0, 50)}...\x1b[0m`
+            );
           }
         } else {
           console.warn("Invalid 'delete' change object:", change);
@@ -424,12 +436,12 @@ function readFileFromEncodedLocation(encodedLocation) {
   const encodedFilePath = encodedLocation.split(":")[0];
   const filePath = decode(encodedFilePath);
   console.log(`\x1b[36mℹ Decoded file path: ${filePath}\x1b[0m`);
-  
+
   // Check if the path is already absolute, if so use it directly
-  const targetFile = path.isAbsolute(filePath) 
-    ? filePath 
+  const targetFile = path.isAbsolute(filePath)
+    ? filePath
     : path.join(process.cwd(), filePath);
-    
+
   console.log(`\x1b[36mℹ Reading file: ${targetFile}\x1b[0m`);
   const fileContent = fs.readFileSync(targetFile, "utf8");
 
@@ -444,13 +456,18 @@ function readFileFromEncodedLocation(encodedLocation) {
  * @param {boolean} usePatternChanges Whether to use pattern-based changes (true) or text-based changes (false)
  * @returns {Promise<string>} Formatted code
  */
-async function applyChangesAndFormat(fileContent, changes, targetFile, usePatternChanges = true) {
+async function applyChangesAndFormat(
+  fileContent,
+  changes,
+  targetFile,
+  usePatternChanges = true
+) {
   console.log(
     `\x1b[36mℹ Received ${changes.length} changes from backend\x1b[0m`
   );
 
   // Apply the changes using the appropriate function based on the flag
-  const modifiedContent = usePatternChanges 
+  const modifiedContent = usePatternChanges
     ? applyPatternChanges(fileContent, changes)
     : applyTextChanges(fileContent, changes);
 
@@ -472,7 +489,7 @@ async function applyChangesAndFormat(fileContent, changes, targetFile, usePatter
   fs.writeFileSync(targetFile, formattedCode, "utf8");
 
   console.log(
-    `\x1b[32m✓ Updated file ${targetFile} with ${changes.length} changes using ${usePatternChanges ? 'pattern-based' : 'text-based'} approach\x1b[0m`
+    `\x1b[32m✓ Updated file ${targetFile} with ${changes.length} changes using ${usePatternChanges ? "pattern-based" : "text-based"} approach\x1b[0m`
   );
 
   return formattedCode;
@@ -735,21 +752,23 @@ function createApp() {
 
         console.log(`\x1b[36mℹ Received response from backend\x1b[0m`);
 
+        console.log("🔍 Backend response:", backendResponse);
+
         // Process the response data directly - iterate over each file
         const responseData = backendResponse.coding_agent_output;
         const results = [];
-        
+
         for (const fileData of responseData) {
           console.log(`\x1b[36mℹ Processing file: ${fileData.path}\x1b[0m`);
-          
+
           // Determine the target file path
-          const targetFilePath = fileData.path.startsWith('/') 
-            ? fileData.path 
+          const targetFilePath = fileData.path.startsWith("/")
+            ? fileData.path
             : path.join(process.cwd(), fileData.path);
-          
+
           // Read the current file content for the target file
           const currentFileContent = fs.readFileSync(targetFilePath, "utf8");
-          
+
           // Apply the changes using the existing function
           const formattedCode = await applyChangesAndFormat(
             currentFileContent,
@@ -758,8 +777,10 @@ function createApp() {
             false
           );
 
-          console.log(`\x1b[32m✓ Updated file ${fileData.path} with ${fileData.changes.length} AI-generated changes\x1b[0m`);
-          
+          console.log(
+            `\x1b[32m✓ Updated file ${fileData.path} with ${fileData.changes.length} AI-generated changes\x1b[0m`
+          );
+
           results.push({
             path: fileData.path,
             changes_applied: fileData.changes.length,
@@ -842,18 +863,18 @@ function createApp() {
         // Process the response data directly - iterate over each file
         const responseData = backendResponse.coding_agent_output;
         const results = [];
-        
+
         for (const fileData of responseData) {
           console.log(`\x1b[36mℹ Processing file: ${fileData.path}\x1b[0m`);
-          
+
           // Determine the target file path
-          const targetFilePath = fileData.path.startsWith('/') 
-            ? fileData.path 
+          const targetFilePath = fileData.path.startsWith("/")
+            ? fileData.path
             : path.join(process.cwd(), fileData.path);
-          
+
           // Read the current file content for the target file
           const currentFileContent = fs.readFileSync(targetFilePath, "utf8");
-          
+
           // Apply the changes using the existing function
           const formattedCode = await applyChangesAndFormat(
             currentFileContent,
@@ -861,8 +882,10 @@ function createApp() {
             targetFilePath
           );
 
-          console.log(`\x1b[32m✓ Updated file ${fileData.path} with ${fileData.changes.length} AI-generated changes\x1b[0m`);
-          
+          console.log(
+            `\x1b[32m✓ Updated file ${fileData.path} with ${fileData.changes.length} AI-generated changes\x1b[0m`
+          );
+
           results.push({
             path: fileData.path,
             changes_applied: fileData.changes.length,
@@ -949,7 +972,7 @@ function getProjectStructure() {
     // Read .gitignore patterns
     const gitignorePath = path.join(process.cwd(), ".gitignore");
     let excludePatterns = [
-      /^\.git(\/.*)?$/ // Exclude .git directory by default
+      /^\.git(\/.*)?$/, // Exclude .git directory by default
     ];
 
     if (fs.existsSync(gitignorePath)) {
