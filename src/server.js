@@ -135,6 +135,86 @@ function applyTextChanges(fileContent, changes) {
 }
 
 /**
+ * Apply pattern-based changes to the file content based on the new format.
+ * @param {string} fileContent The original file content
+ * @param {Array<Object>} changes The changes to apply in the new format.
+ *        Each change object can have:
+ *        - { type: "replace", find: string, replaceWith: string, explanation: string }
+ *        - { type: "insertAfter", find: string, insert: string, explanation: string }
+ *        - { type: "insertBefore", find: string, insert: string, explanation: string }
+ *        - { type: "delete", find: string, explanation: string }
+ * @returns {string} The modified file content
+ */
+function applyPatternChanges(fileContent, changes) {
+  let modifiedContent = fileContent;
+
+  for (const change of changes) {
+    const { type, find, replaceWith, insert, explanation } = change;
+
+    console.log(`\x1b[36mℹ Applying ${type} change: ${explanation}\x1b[0m`);
+
+    switch (type) {
+      case "replace":
+        if (find && replaceWith !== undefined) {
+          if (modifiedContent.includes(find)) {
+            modifiedContent = modifiedContent.replace(find, replaceWith);
+            console.log(`\x1b[32m✓ Replaced pattern successfully\x1b[0m`);
+          } else {
+            console.warn(`\x1b[33m⚠ Pattern not found for replace: ${find.substring(0, 50)}...\x1b[0m`);
+          }
+        } else {
+          console.warn("Invalid 'replace' change object:", change);
+        }
+        break;
+
+      case "insertAfter":
+        if (find && insert !== undefined) {
+          if (modifiedContent.includes(find)) {
+            modifiedContent = modifiedContent.replace(find, find + insert);
+            console.log(`\x1b[32m✓ Inserted content after pattern successfully\x1b[0m`);
+          } else {
+            console.warn(`\x1b[33m⚠ Pattern not found for insertAfter: ${find.substring(0, 50)}...\x1b[0m`);
+          }
+        } else {
+          console.warn("Invalid 'insertAfter' change object:", change);
+        }
+        break;
+
+      case "insertBefore":
+        if (find && insert !== undefined) {
+          if (modifiedContent.includes(find)) {
+            modifiedContent = modifiedContent.replace(find, insert + find);
+            console.log(`\x1b[32m✓ Inserted content before pattern successfully\x1b[0m`);
+          } else {
+            console.warn(`\x1b[33m⚠ Pattern not found for insertBefore: ${find.substring(0, 50)}...\x1b[0m`);
+          }
+        } else {
+          console.warn("Invalid 'insertBefore' change object:", change);
+        }
+        break;
+
+      case "delete":
+        if (find) {
+          if (modifiedContent.includes(find)) {
+            modifiedContent = modifiedContent.replace(find, "");
+            console.log(`\x1b[32m✓ Deleted pattern successfully\x1b[0m`);
+          } else {
+            console.warn(`\x1b[33m⚠ Pattern not found for delete: ${find.substring(0, 50)}...\x1b[0m`);
+          }
+        } else {
+          console.warn("Invalid 'delete' change object:", change);
+        }
+        break;
+
+      default:
+        console.warn(`Unknown change type: ${type}`);
+    }
+  }
+
+  return modifiedContent;
+}
+
+/**
  * Make an HTTP request to the FastAPI backend using fetch
  * @param {string} method The HTTP method
  * @param {string} endpoint The API endpoint
@@ -361,15 +441,18 @@ function readFileFromEncodedLocation(encodedLocation) {
  * @param {string} fileContent Original file content
  * @param {Array} changes Array of changes to apply
  * @param {string} targetFile Target file path
+ * @param {boolean} usePatternChanges Whether to use pattern-based changes (true) or text-based changes (false)
  * @returns {Promise<string>} Formatted code
  */
-async function applyChangesAndFormat(fileContent, changes, targetFile) {
+async function applyChangesAndFormat(fileContent, changes, targetFile, usePatternChanges = true) {
   console.log(
     `\x1b[36mℹ Received ${changes.length} changes from backend\x1b[0m`
   );
 
-  // Apply the changes
-  const modifiedContent = applyTextChanges(fileContent, changes);
+  // Apply the changes using the appropriate function based on the flag
+  const modifiedContent = usePatternChanges 
+    ? applyPatternChanges(fileContent, changes)
+    : applyTextChanges(fileContent, changes);
 
   // Format with Prettier
   let formattedCode;
@@ -389,7 +472,7 @@ async function applyChangesAndFormat(fileContent, changes, targetFile) {
   fs.writeFileSync(targetFile, formattedCode, "utf8");
 
   console.log(
-    `\x1b[32m✓ Updated file ${targetFile} with ${changes.length} changes\x1b[0m`
+    `\x1b[32m✓ Updated file ${targetFile} with ${changes.length} changes using ${usePatternChanges ? 'pattern-based' : 'text-based'} approach\x1b[0m`
   );
 
   return formattedCode;
@@ -671,7 +754,8 @@ function createApp() {
           const formattedCode = await applyChangesAndFormat(
             currentFileContent,
             fileData.changes,
-            targetFilePath
+            targetFilePath,
+            false
           );
 
           console.log(`\x1b[32m✓ Updated file ${fileData.path} with ${fileData.changes.length} AI-generated changes\x1b[0m`);
