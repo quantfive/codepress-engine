@@ -1,7 +1,7 @@
 {
   "name": "@quantfive/codepress-engine",
-  "version": "0.2.0",
-  "description": "CodePress engine – Babel and SWC plug-ins",
+  "version": "0.3.0",
+  "description": "CodePress engine - Babel and SWC plug-ins",
   "main": "./babel/index.js",
   "exports": {
     ".": "./babel/index.js",
