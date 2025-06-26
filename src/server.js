@@ -857,7 +857,45 @@ function createApp() {
 
         console.log(`\x1b[36mℹ Received response from backend\x1b[0m`);
 
-        // Process the response data directly - iterate over each file
+        // Check if the response has updated_files field (new format)
+        if (backendResponse.updated_files) {
+          console.log(`\x1b[36mℹ Processing updated_files format\x1b[0m`);
+          
+          const results = [];
+          
+          // Process each file in updated_files
+          for (const [filePath, newContent] of Object.entries(backendResponse.updated_files)) {
+            console.log(`\x1b[36mℹ Processing file: ${filePath}\x1b[0m`);
+
+            // Determine the target file path
+            const targetFilePath = filePath.startsWith("/")
+              ? filePath
+              : path.join(process.cwd(), filePath);
+
+            // Apply the complete file replacement and format
+            const formattedCode = await applyFullFileReplacement(
+              newContent,
+              targetFilePath
+            );
+
+            console.log(
+              `\x1b[32m✓ Updated file ${filePath} with complete AI-generated content\x1b[0m`
+            );
+
+            results.push({
+              path: filePath,
+              modified_content: formattedCode,
+            });
+          }
+
+          return reply.code(200).send({
+            success: true,
+            message: `Applied AI changes to ${results.length} files`,
+            files: results,
+          });
+        }
+        
+        // Fallback to old format if updated_files is not present
         const responseData = backendResponse.coding_agent_output;
         const results = [];
 
