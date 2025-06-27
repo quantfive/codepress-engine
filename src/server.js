@@ -255,6 +255,14 @@ async function callBackendApi(method, endpoint, data, incomingAuthHeader) {
     // First try to use API token from environment variable
     let authToken = process.env.CODEPRESS_API_TOKEN;
 
+    // Debug: Log environment token status
+    console.log(
+      `\x1b[36mℹ Environment API token: ${authToken ? "[PRESENT]" : "[NOT SET]"}\x1b[0m`
+    );
+    console.log(
+      `\x1b[36mℹ Incoming auth header: ${incomingAuthHeader ? "[PRESENT]" : "[NOT PROVIDED]"}\x1b[0m`
+    );
+
     // If no API token, try to use the incoming Authorization header
     if (!authToken && incomingAuthHeader) {
       authToken = incomingAuthHeader.split(" ")[1]; // Extract token part
@@ -276,6 +284,9 @@ async function callBackendApi(method, endpoint, data, incomingAuthHeader) {
           process.env.CODEPRESS_API_TOKEN ? "API Token" : "GitHub OAuth Token"
         } for authentication\x1b[0m`
       );
+      console.log(
+        `\x1b[36mℹ Final auth header: Bearer ${authToken.substring(0, 10)}...\x1b[0m`
+      );
     } else {
       console.log("\x1b[33m⚠ No authentication token available\x1b[0m");
     }
@@ -289,8 +300,17 @@ async function callBackendApi(method, endpoint, data, incomingAuthHeader) {
     // Get the response text
     const responseText = await response.text();
 
+    // Debug: Log response status and preview
+    console.log(`\x1b[36mℹ Response status: ${response.status}\x1b[0m`);
+    console.log(
+      `\x1b[36mℹ Response preview: ${responseText.substring(0, 100)}...\x1b[0m`
+    );
+
     // Check if response is successful
     if (!response.ok) {
+      console.log(
+        `\x1b[31m✖ API request failed with status ${response.status}: ${responseText}\x1b[0m`
+      );
       throw new Error(
         `API request failed with status ${response.status}: ${responseText}`
       );
@@ -536,23 +556,17 @@ async function getAiChanges({
  * @param {Object} params Request parameters
  * @returns {Promise<Object>} Backend response
  */
-async function getChanges({
-  changes,
-  fileContent,
-  githubRepoName,
-  authHeader,
-}) {
+async function getChanges({ githubRepoName, fileChanges, authHeader }) {
   console.log(
-    `\x1b[36mℹ Getting ${changes.length} changes from backend\x1b[0m`
+    `\x1b[36mℹ Getting changes from backend for ${fileChanges.length} files\x1b[0m`
   );
 
   return await callBackendApi(
     "POST",
     "code-sync/get-changes",
     {
-      changes: changes, // Sending a list of changes
-      file_content: fileContent,
       github_repo_name: githubRepoName,
+      file_changes: fileChanges,
     },
     authHeader
   );
@@ -689,6 +703,18 @@ function createApp() {
   app.post("/visual-editor-api", async (request, reply) => {
     try {
       const { changes, github_repo_name } = request.body;
+      const authHeader =
+        request.headers.authorization || request.headers["authorization"];
+
+      // Debug: Log auth header info
+      console.log(
+        `\x1b[36mℹ Auth header received: ${authHeader ? "[PRESENT]" : "[MISSING]"}\x1b[0m`
+      );
+      if (authHeader) {
+        console.log(
+          `\x1b[36mℹ Auth header format: ${authHeader.substring(0, 20)}...\x1b[0m`
+        );
+      }
 
       if (!Array.isArray(changes)) {
         return reply.code(400).send({
@@ -728,75 +754,78 @@ function createApp() {
         }
       }
 
-      const processingPromises = [];
-      const updatedFiles = new Set();
-      const authHeader = request.headers.authorization;
-
-      for (const [targetFile, fileChanges] of changesByFile.entries()) {
-        const filePromise = (async () => {
-          try {
-            console.log(
-              `\x1b[36mℹ Processing ${fileChanges.length} changes for file: ${targetFile}\x1b[0m`
-            );
-
-            const { fileContent } = readFileFromEncodedLocation(
-              fileChanges[0].encoded_location
-            );
-            const originalFileContent = fileContent;
-
-            // Process image uploads first
-            for (const change of fileChanges) {
-              if (change.image_data && change.filename) {
-                await saveImageData(change.image_data, change.filename);
-              }
-            }
-
-            // Separate changes by type
-            const regularChanges = fileChanges.filter(
-              (c) => !c.mode && !c.agent_mode
-            );
-
-            let modifiedContent = originalFileContent;
-            let backendResponse;
-
-            if (regularChanges.length > 0) {
-              // Handle regular changes if no agent changes
-              backendResponse = await getChanges({
-                changes: regularChanges,
-                fileContent: originalFileContent,
-                githubRepoName: github_repo_name,
-                authHeader,
-              });
-            }
-
-            if (backendResponse && backendResponse.modified_content) {
-              modifiedContent = backendResponse.modified_content;
-              await applyFullFileReplacement(modifiedContent, targetFile);
-              updatedFiles.add(targetFile);
-            } else {
-              console.log(
-                `\x1b[36mℹ No content changes to apply for file: ${targetFile}\x1b[0m`
-              );
-            }
-          } catch (err) {
-            console.error(
-              `\x1b[31m✖ Error processing changes for file ${targetFile}: ${err.message}\x1b[0m`
-            );
-            throw new Error(`Failed to process file: ${targetFile}`);
-          }
-        })();
-        processingPromises.push(filePromise);
+      // Process image uploads first across all files
+      for (const change of changes) {
+        if (change.image_data && change.filename) {
+          await saveImageData(change.image_data, change.filename);
+        }
       }
 
-      const results = await Promise.allSettled(processingPromises);
-      console.log("results", results);
-      results.forEach((result) => {
-        if (result.status === "rejected") {
-          console.error(
-            `\x1b[31m✖ A file processing promise was rejected: ${result.reason}\x1b[0m`
+      const fileDataPromises = Array.from(changesByFile.entries()).map(
+        async ([targetFile, fileChanges]) => {
+          const { fileContent } = readFileFromEncodedLocation(
+            fileChanges[0].encoded_location
           );
+          return {
+            encoded_location: fileChanges[0].encoded_location,
+            file_content: fileContent,
+            style_changes: fileChanges.flatMap((c) => c.style_changes || []),
+            text_changes: fileChanges
+              .filter((c) => c.old_html !== undefined)
+              .map((change) => ({
+                ...change,
+                old_text: change.old_html,
+                new_text: change.new_html,
+              })),
+            targetFile: targetFile,
+          };
         }
+      );
+
+      const fileDataForBackend = (await Promise.all(fileDataPromises)).filter(
+        (f) => f.style_changes.length > 0 || f.text_changes.length > 0
+      );
+
+      if (fileDataForBackend.length === 0) {
+        return reply.code(200).send({
+          message: "No changes to apply.",
+          updatedFiles: [],
+        });
+      }
+
+      console.log(
+        `\x1b[36mℹ Preparing bulk request for ${fileDataForBackend.length} files.\x1b[0m`
+      );
+
+      const fileChangesForBackend = fileDataForBackend.map((f) => {
+        return {
+          encoded_location: f.encoded_location,
+          file_content: f.file_content,
+          style_changes: f.style_changes,
+          text_changes: f.text_changes,
+        };
       });
+
+      const backendResponse = await getChanges({
+        githubRepoName: github_repo_name,
+        fileChanges: fileChangesForBackend,
+        authHeader,
+      });
+
+      const updatedFiles = new Set();
+      if (backendResponse && backendResponse.updated_files) {
+        console.log(`\x1b[36mℹ Processing updated_files format\x1b[0m`);
+        for (const [filePath, newContent] of Object.entries(
+          backendResponse.updated_files
+        )) {
+          const targetFile = filePath.startsWith("/")
+            ? filePath
+            : path.join(process.cwd(), filePath);
+
+          await applyFullFileReplacement(newContent, targetFile);
+          updatedFiles.add(targetFile);
+        }
+      }
 
       if (updatedFiles.size === 0) {
         return reply.code(200).send({
@@ -836,7 +865,13 @@ function createApp() {
         style_changes,
         text_changes,
       } = data;
-      const authHeader = request.headers["authorization"];
+      const authHeader =
+        request.headers.authorization || request.headers["authorization"];
+
+      // Debug: Log auth header info
+      console.log(
+        `\x1b[36mℹ [visual-editor-api-agent] Auth header received: ${authHeader ? "[PRESENT]" : "[MISSING]"}\x1b[0m`
+      );
 
       const { targetFile, fileContent } =
         readFileFromEncodedLocation(encoded_location);
@@ -891,6 +926,13 @@ function createApp() {
 
       // Use ai_instruction if provided, otherwise use aiInstruction
       const actualAiInstruction = ai_instruction || aiInstruction;
+      const authHeader =
+        request.headers.authorization || request.headers["authorization"];
+
+      // Debug: Log auth header info
+      console.log(
+        `\x1b[36mℹ [visual-editor-api-ai] Auth header received: ${authHeader ? "[PRESENT]" : "[MISSING]"}\x1b[0m`
+      );
 
       // Debug logging to see what's being received
       console.log(
@@ -911,8 +953,6 @@ function createApp() {
       }
 
       try {
-        const authHeader = request.headers["authorization"];
-
         // Read file content
         const { filePath, targetFile, fileContent } =
           readFileFromEncodedLocation(encoded_location);
