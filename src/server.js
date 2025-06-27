@@ -436,11 +436,7 @@ function readFileFromEncodedLocation(encodedLocation) {
   const filePath = decode(encodedFilePath);
   console.log(`\x1b[36mℹ Decoded file path: ${filePath}\x1b[0m`);
 
-<<<<<<< HEAD
-  // Check if the path is already absolute, if so use it directly
-=======
   // If filePath is absolute, use it directly. Otherwise, join with cwd.
->>>>>>> 379c72f (updating server)
   const targetFile = path.isAbsolute(filePath)
     ? filePath
     : path.join(process.cwd(), filePath);
@@ -939,11 +935,13 @@ function createApp() {
         // Check if the response has updated_files field (new format)
         if (backendResponse.updated_files) {
           console.log(`\x1b[36mℹ Processing updated_files format\x1b[0m`);
-          
+
           const results = [];
-          
+
           // Process each file in updated_files
-          for (const [filePath, newContent] of Object.entries(backendResponse.updated_files)) {
+          for (const [filePath, newContent] of Object.entries(
+            backendResponse.updated_files
+          )) {
             console.log(`\x1b[36mℹ Processing file: ${filePath}\x1b[0m`);
 
             // Determine the target file path
@@ -973,7 +971,7 @@ function createApp() {
             files: results,
           });
         }
-        
+
         // Fallback to old format if updated_files is not present
         const responseData = backendResponse.coding_agent_output;
         const results = [];
