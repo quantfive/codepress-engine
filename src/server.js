@@ -329,7 +329,6 @@ function validateRequestData(data, isAiMode) {
   } = data;
 
   const actualAiInstruction = ai_instruction || aiInstruction;
-
   if (!encoded_location) {
     return {
       isValid: false,
@@ -437,7 +436,11 @@ function readFileFromEncodedLocation(encodedLocation) {
   const filePath = decode(encodedFilePath);
   console.log(`\x1b[36mℹ Decoded file path: ${filePath}\x1b[0m`);
 
+<<<<<<< HEAD
   // Check if the path is already absolute, if so use it directly
+=======
+  // If filePath is absolute, use it directly. Otherwise, join with cwd.
+>>>>>>> 379c72f (updating server)
   const targetFile = path.isAbsolute(filePath)
     ? filePath
     : path.join(process.cwd(), filePath);
@@ -538,30 +541,22 @@ async function getAiChanges({
  * @returns {Promise<Object>} Backend response
  */
 async function getChanges({
-  oldHtml,
-  newHtml,
-  githubRepoName,
-  encodedLocation,
-  styleChanges,
-  textChanges,
+  changes,
   fileContent,
+  githubRepoName,
   authHeader,
 }) {
   console.log(
-    `\x1b[36mℹ Getting changes from backend for file encoded_location: ${encodedLocation}\x1b[0m`
+    `\x1b[36mℹ Getting ${changes.length} changes from backend\x1b[0m`
   );
 
   return await callBackendApi(
     "POST",
     "code-sync/get-changes",
     {
-      old_html: oldHtml,
-      new_html: newHtml,
-      github_repo_name: githubRepoName,
-      encoded_location: encodedLocation,
-      style_changes: styleChanges,
-      text_changes: textChanges,
+      changes: changes, // Sending a list of changes
       file_content: fileContent,
+      github_repo_name: githubRepoName,
     },
     authHeader
   );
@@ -697,106 +692,190 @@ function createApp() {
   // Visual editor API route for regular agent changes
   app.post("/visual-editor-api", async (request, reply) => {
     try {
+      const { changes, github_repo_name } = request.body;
+
+      if (!Array.isArray(changes)) {
+        return reply.code(400).send({
+          error: "Invalid request format: 'changes' must be an array.",
+        });
+      }
+
+      console.log(
+        `\x1b[36mℹ Visual Editor API Request: Received ${changes.length} changes for repo ${github_repo_name}\x1b[0m`
+      );
+
+      const changesByFile = new Map();
+      for (const change of changes) {
+        try {
+          if (!change.encoded_location) {
+            console.warn(
+              `\x1b[33m⚠ Skipping change with missing encoded_location.\x1b[0m`
+            );
+            continue;
+          }
+          const encodedFilePath = change.encoded_location.split(":")[0];
+          const targetFile = decode(encodedFilePath);
+          if (!targetFile) {
+            console.warn(
+              `\x1b[33m⚠ Skipping change with undecodable file from encoded_location: ${change.encoded_location}.\x1b[0m`
+            );
+            continue;
+          }
+          if (!changesByFile.has(targetFile)) {
+            changesByFile.set(targetFile, []);
+          }
+          changesByFile.get(targetFile).push(change);
+        } catch (e) {
+          console.error(
+            `\x1b[31m✖ Error decoding location: ${change.encoded_location}\x1b[0m`
+          );
+        }
+      }
+
+      const processingPromises = [];
+      const updatedFiles = new Set();
+      const authHeader = request.headers.authorization;
+
+      for (const [targetFile, fileChanges] of changesByFile.entries()) {
+        const filePromise = (async () => {
+          try {
+            console.log(
+              `\x1b[36mℹ Processing ${fileChanges.length} changes for file: ${targetFile}\x1b[0m`
+            );
+
+            const { fileContent } = readFileFromEncodedLocation(
+              fileChanges[0].encoded_location
+            );
+            const originalFileContent = fileContent;
+
+            // Process image uploads first
+            for (const change of fileChanges) {
+              if (change.image_data && change.filename) {
+                await saveImageData(change.image_data, change.filename);
+              }
+            }
+
+            // Separate changes by type
+            const regularChanges = fileChanges.filter(
+              (c) => !c.mode && !c.agent_mode
+            );
+
+            let modifiedContent = originalFileContent;
+            let backendResponse;
+
+            if (regularChanges.length > 0) {
+              // Handle regular changes if no agent changes
+              backendResponse = await getChanges({
+                changes: regularChanges,
+                fileContent: originalFileContent,
+                githubRepoName: github_repo_name,
+                authHeader,
+              });
+            }
+
+            if (backendResponse && backendResponse.modified_content) {
+              modifiedContent = backendResponse.modified_content;
+              await applyFullFileReplacement(modifiedContent, targetFile);
+              updatedFiles.add(targetFile);
+            } else {
+              console.log(
+                `\x1b[36mℹ No content changes to apply for file: ${targetFile}\x1b[0m`
+              );
+            }
+          } catch (err) {
+            console.error(
+              `\x1b[31m✖ Error processing changes for file ${targetFile}: ${err.message}\x1b[0m`
+            );
+            throw new Error(`Failed to process file: ${targetFile}`);
+          }
+        })();
+        processingPromises.push(filePromise);
+      }
+
+      const results = await Promise.allSettled(processingPromises);
+      console.log("results", results);
+      results.forEach((result) => {
+        if (result.status === "rejected") {
+          console.error(
+            `\x1b[31m✖ A file processing promise was rejected: ${result.reason}\x1b[0m`
+          );
+        }
+      });
+
+      if (updatedFiles.size === 0) {
+        return reply.code(200).send({
+          message: "No changes were applied.",
+          updatedFiles: [],
+        });
+      }
+
+      return reply.code(200).send({
+        message: `Changes applied successfully to ${
+          updatedFiles.size
+        } file(s).`,
+        updatedFiles: Array.from(updatedFiles),
+      });
+    } catch (err) {
+      console.error(
+        `\x1b[31m✖ Fatal error in /visual-editor-api: ${err.message}\x1b[0m`
+      );
+      return reply.code(500).send({
+        error: "An internal server error occurred",
+        details: err.message,
+      });
+    }
+  });
+
+  // Visual editor API route for agent changes
+  app.post("/visual-editor-api-agent", async (request, reply) => {
+    try {
       const data = request.body;
       const {
         encoded_location,
-        old_html,
-        new_html,
         github_repo_name,
         image_data,
         filename,
+        old_html,
+        new_html,
         style_changes,
         text_changes,
-        agent_mode,
       } = data;
+      const authHeader = request.headers["authorization"];
 
-      // Debug logging to see what's being received
-      console.log(
-        `\x1b[36mℹ Visual Editor API Request data: ${JSON.stringify({
-          data,
-        })}\x1b[0m`
+      const { targetFile, fileContent } =
+        readFileFromEncodedLocation(encoded_location);
+
+      await saveImageData(image_data, filename);
+
+      const backendResponse = await getAgentChanges({
+        oldHtml: old_html,
+        newHtml: new_html,
+        githubRepoName: github_repo_name,
+        encodedLocation: encoded_location,
+        styleChanges: style_changes,
+        textChanges: text_changes,
+        fileContent,
+        authHeader,
+      });
+
+      if (!backendResponse.changes || !Array.isArray(backendResponse.changes)) {
+        throw new Error("Invalid response format from backend");
+      }
+
+      const formattedCode = await applyChangesAndFormat(
+        fileContent,
+        backendResponse.changes,
+        targetFile
       );
 
-      // Validate request data for regular mode
-      const validation = validateRequestData(data, false);
-      if (!validation.isValid) {
-        return reply.code(400).send({
-          error: validation.error,
-          ...validation.errorData,
-        });
-      }
-
-      try {
-        const authHeader = request.headers["authorization"];
-
-        // Read file content
-        const { filePath, targetFile, fileContent } =
-          readFileFromEncodedLocation(encoded_location);
-
-        // Save image if present
-        await saveImageData(image_data, filename);
-
-        const getChangeApi = agent_mode ? getAgentChanges : getChanges;
-
-        // Get agent changes from backend
-        const backendResponse = await getChangeApi({
-          oldHtml: old_html,
-          newHtml: new_html,
-          githubRepoName: github_repo_name,
-          encodedLocation: encoded_location,
-          styleChanges: style_changes,
-          textChanges: text_changes,
-          fileContent,
-          authHeader,
-        });
-
-        console.log(`\x1b[36mℹ Received response from backend\x1b[0m`);
-
-        console.log("backendResponse", backendResponse);
-        // Check if this is the new agent response format with modified_content
-        if (backendResponse.modified_content) {
-          // Handle full file replacement
-          const formattedCode = await applyFullFileReplacement(
-            backendResponse.modified_content,
-            targetFile
-          );
-
-          return reply.code(200).send({
-            success: true,
-            message:
-              backendResponse.message || `Applied agent changes to ${filePath}`,
-            modified_content: formattedCode,
-          });
-        } else if (
-          backendResponse.changes &&
-          Array.isArray(backendResponse.changes)
-        ) {
-          // Handle incremental changes (fallback)
-          const formattedCode = await applyChangesAndFormat(
-            fileContent,
-            backendResponse.changes,
-            targetFile
-          );
-
-          return reply.code(200).send({
-            success: true,
-            message: `Applied ${backendResponse.changes.length} changes to ${filePath}`,
-          });
-        } else {
-          console.error(
-            `\x1b[31m✗ Invalid response format: ${JSON.stringify(
-              backendResponse
-            )}\x1b[0m`
-          );
-          throw new Error("Invalid response format from backend");
-        }
-      } catch (apiError) {
-        console.error("Error applying changes:", apiError);
-        return reply.code(500).send({ error: apiError.message });
-      }
-    } catch (parseError) {
-      console.error("Error parsing request data:", parseError);
-      return reply.code(400).send({ error: "Invalid JSON" });
+      return reply.code(200).send({
+        success: true,
+        message: "Agent changes applied successfully.",
+        modified_content: formattedCode,
+      });
+    } catch (err) {
+      console.error(`Error in /visual-editor-api-agent: ${err.message}`);
+      return reply.code(500).send({ error: err.message });
     }
   });
 
