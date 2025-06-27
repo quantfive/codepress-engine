@@ -225,10 +225,10 @@ line 4`;
       const endpoint = "code-sync/get-changes";
       const protocol =
         apiHost === "localhost" || apiHost === "127.0.0.1" ? "http" : "https";
-      const expectedUrl = `${protocol}://${apiHost}:${apiPort}/api/${endpoint}`;
+      const expectedUrl = `${protocol}://${apiHost}:${apiPort}/v1/${endpoint}`;
 
       expect(expectedUrl).toBe(
-        "http://localhost:8000/api/code-sync/get-changes"
+        "http://localhost:8000/v1/code-sync/get-changes"
       );
     });
 
@@ -238,10 +238,10 @@ line 4`;
       const endpoint = "code-sync/get-ai-changes";
       const protocol =
         apiHost === "localhost" || apiHost === "127.0.0.1" ? "http" : "https";
-      const expectedUrl = `${protocol}://${apiHost}:${apiPort}/api/${endpoint}`;
+      const expectedUrl = `${protocol}://${apiHost}:${apiPort}/v1/${endpoint}`;
 
       expect(expectedUrl).toBe(
-        "https://api.example.com:443/api/code-sync/get-ai-changes"
+        "https://api.example.com:443/v1/code-sync/get-ai-changes"
       );
     });
 

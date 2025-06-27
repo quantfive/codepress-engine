@@ -248,7 +248,7 @@ async function callBackendApi(method, endpoint, data, incomingAuthHeader) {
   console.log(`\x1b[36mℹ API Path: ${apiPath} \x1b[0m`);
   const url = `${protocol}://${apiHost}${
     apiPort ? `:${apiPort}` : ""
-  }/api/${apiPath}`;
+  }/v1/${apiPath}`;
   console.log(`\x1b[36mℹ Sending request to ${url} \x1b[0m`);
 
   try {
