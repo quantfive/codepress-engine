@@ -308,9 +308,6 @@ async function callBackendApi(method, endpoint, data, incomingAuthHeader) {
 
     // Check if response is successful
     if (!response.ok) {
-      console.log(
-        `\x1b[31m✖ API request failed with status ${response.status}: ${responseText}\x1b[0m`
-      );
       throw new Error(
         `API request failed with status ${response.status}: ${responseText}`
       );
@@ -554,7 +551,18 @@ async function getAiChanges({
 /**
  * Service: Get changes from backend (original endpoint)
  * @param {Object} params Request parameters
- * @returns {Promise<Object>} Backend response
+ * @param {string} params.githubRepoName The GitHub repository name
+ * @param {Array<Object>} params.fileChanges Array of file change objects to process. Each object represents changes for a single file.
+ * @param {string} params.fileChanges[].encoded_location The encoded file location identifier used to determine which file to modify
+ * @param {string} params.fileChanges[].file_content The current content of the file being modified
+ * @param {Array<Object>} params.fileChanges[].style_changes Array of style-related changes to apply to the file. Each object contains styling modifications.
+ * @param {Array<Object>} params.fileChanges[].text_changes Array of text-based changes to apply to the file. Each object contains:
+ * @param {string} params.fileChanges[].text_changes[].old_text The original HTML/text content to be replaced (mapped from old_html)
+ * @param {string} params.fileChanges[].text_changes[].new_text The new HTML/text content to replace with (mapped from new_html)
+ * @param {string} [params.fileChanges[].text_changes[].encoded_location] The encoded location for this specific text change (inherited from parent change object)
+ * @param {Array<Object>} [params.fileChanges[].text_changes[].style_changes] Any style changes associated with this text change (inherited from parent change object)
+ * @param {string} [params.authHeader] The authorization header for backend API authentication (Bearer token)
+ * @returns {Promise<Object>} Backend response containing the processed changes, typically with an 'updated_files' property mapping file paths to their new content
  */
 async function getChanges({ githubRepoName, fileChanges, authHeader }) {
   console.log(
@@ -710,11 +718,6 @@ function createApp() {
       console.log(
         `\x1b[36mℹ Auth header received: ${authHeader ? "[PRESENT]" : "[MISSING]"}\x1b[0m`
       );
-      if (authHeader) {
-        console.log(
-          `\x1b[36mℹ Auth header format: ${authHeader.substring(0, 20)}...\x1b[0m`
-        );
-      }
 
       if (!Array.isArray(changes)) {
         return reply.code(400).send({
