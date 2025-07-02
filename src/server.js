@@ -255,6 +255,14 @@ async function callBackendApi(method, endpoint, data, incomingAuthHeader) {
     // First try to use API token from environment variable
     let authToken = process.env.CODEPRESS_API_TOKEN;
 
+    // Debug: Log environment token status
+    console.log(
+      `\x1b[36mℹ Environment API token: ${authToken ? "[PRESENT]" : "[NOT SET]"}\x1b[0m`
+    );
+    console.log(
+      `\x1b[36mℹ Incoming auth header: ${incomingAuthHeader ? "[PRESENT]" : "[NOT PROVIDED]"}\x1b[0m`
+    );
+
     // If no API token, try to use the incoming Authorization header
     if (!authToken && incomingAuthHeader) {
       authToken = incomingAuthHeader.split(" ")[1]; // Extract token part
@@ -276,6 +284,9 @@ async function callBackendApi(method, endpoint, data, incomingAuthHeader) {
           process.env.CODEPRESS_API_TOKEN ? "API Token" : "GitHub OAuth Token"
         } for authentication\x1b[0m`
       );
+      console.log(
+        `\x1b[36mℹ Final auth header: Bearer ${authToken.substring(0, 10)}...\x1b[0m`
+      );
     } else {
       console.log("\x1b[33m⚠ No authentication token available\x1b[0m");
     }
@@ -288,6 +299,12 @@ async function callBackendApi(method, endpoint, data, incomingAuthHeader) {
 
     // Get the response text
     const responseText = await response.text();
+
+    // Debug: Log response status and preview
+    console.log(`\x1b[36mℹ Response status: ${response.status}\x1b[0m`);
+    console.log(
+      `\x1b[36mℹ Response preview: ${responseText.substring(0, 100)}...\x1b[0m`
+    );
 
     // Check if response is successful
     if (!response.ok) {
@@ -329,7 +346,6 @@ function validateRequestData(data, isAiMode) {
   } = data;
 
   const actualAiInstruction = ai_instruction || aiInstruction;
-
   if (!encoded_location) {
     return {
       isValid: false,
@@ -437,7 +453,7 @@ function readFileFromEncodedLocation(encodedLocation) {
   const filePath = decode(encodedFilePath);
   console.log(`\x1b[36mℹ Decoded file path: ${filePath}\x1b[0m`);
 
-  // Check if the path is already absolute, if so use it directly
+  // If filePath is absolute, use it directly. Otherwise, join with cwd.
   const targetFile = path.isAbsolute(filePath)
     ? filePath
     : path.join(process.cwd(), filePath);
@@ -535,33 +551,30 @@ async function getAiChanges({
 /**
  * Service: Get changes from backend (original endpoint)
  * @param {Object} params Request parameters
- * @returns {Promise<Object>} Backend response
+ * @param {string} params.githubRepoName The GitHub repository name
+ * @param {Array<Object>} params.fileChanges Array of file change objects to process. Each object represents changes for a single file.
+ * @param {string} params.fileChanges[].encoded_location The encoded file location identifier used to determine which file to modify
+ * @param {string} params.fileChanges[].file_content The current content of the file being modified
+ * @param {Array<Object>} params.fileChanges[].style_changes Array of style-related changes to apply to the file. Each object contains styling modifications.
+ * @param {Array<Object>} params.fileChanges[].text_changes Array of text-based changes to apply to the file. Each object contains:
+ * @param {string} params.fileChanges[].text_changes[].old_text The original HTML/text content to be replaced (mapped from old_html)
+ * @param {string} params.fileChanges[].text_changes[].new_text The new HTML/text content to replace with (mapped from new_html)
+ * @param {string} [params.fileChanges[].text_changes[].encoded_location] The encoded location for this specific text change (inherited from parent change object)
+ * @param {Array<Object>} [params.fileChanges[].text_changes[].style_changes] Any style changes associated with this text change (inherited from parent change object)
+ * @param {string} [params.authHeader] The authorization header for backend API authentication (Bearer token)
+ * @returns {Promise<Object>} Backend response containing the processed changes, typically with an 'updated_files' property mapping file paths to their new content
  */
-async function getChanges({
-  oldHtml,
-  newHtml,
-  githubRepoName,
-  encodedLocation,
-  styleChanges,
-  textChanges,
-  fileContent,
-  authHeader,
-}) {
+async function getChanges({ githubRepoName, fileChanges, authHeader }) {
   console.log(
-    `\x1b[36mℹ Getting changes from backend for file encoded_location: ${encodedLocation}\x1b[0m`
+    `\x1b[36mℹ Getting changes from backend for ${fileChanges.length} files\x1b[0m`
   );
 
   return await callBackendApi(
     "POST",
     "code-sync/get-changes",
     {
-      old_html: oldHtml,
-      new_html: newHtml,
       github_repo_name: githubRepoName,
-      encoded_location: encodedLocation,
-      style_changes: styleChanges,
-      text_changes: textChanges,
-      file_content: fileContent,
+      file_changes: fileChanges,
     },
     authHeader
   );
@@ -697,106 +710,206 @@ function createApp() {
   // Visual editor API route for regular agent changes
   app.post("/visual-editor-api", async (request, reply) => {
     try {
+      const { changes, github_repo_name } = request.body;
+      const authHeader =
+        request.headers.authorization || request.headers["authorization"];
+
+      // Debug: Log auth header info
+      console.log(
+        `\x1b[36mℹ Auth header received: ${authHeader ? "[PRESENT]" : "[MISSING]"}\x1b[0m`
+      );
+
+      if (!Array.isArray(changes)) {
+        return reply.code(400).send({
+          error: "Invalid request format: 'changes' must be an array.",
+        });
+      }
+
+      console.log(
+        `\x1b[36mℹ Visual Editor API Request: Received ${changes.length} changes for repo ${github_repo_name}\x1b[0m`
+      );
+
+      const changesByFile = new Map();
+      for (const change of changes) {
+        try {
+          if (!change.encoded_location) {
+            console.warn(
+              `\x1b[33m⚠ Skipping change with missing encoded_location.\x1b[0m`
+            );
+            continue;
+          }
+          const encodedFilePath = change.encoded_location.split(":")[0];
+          const targetFile = decode(encodedFilePath);
+          if (!targetFile) {
+            console.warn(
+              `\x1b[33m⚠ Skipping change with undecodable file from encoded_location: ${change.encoded_location}.\x1b[0m`
+            );
+            continue;
+          }
+          if (!changesByFile.has(targetFile)) {
+            changesByFile.set(targetFile, []);
+          }
+          changesByFile.get(targetFile).push(change);
+        } catch (e) {
+          console.error(
+            `\x1b[31m✖ Error decoding location: ${change.encoded_location}\x1b[0m`
+          );
+        }
+      }
+
+      // Process image uploads first across all files
+      for (const change of changes) {
+        if (change.image_data && change.filename) {
+          await saveImageData(change.image_data, change.filename);
+        }
+      }
+
+      const fileDataPromises = Array.from(changesByFile.entries()).map(
+        async ([targetFile, fileChanges]) => {
+          const { fileContent } = readFileFromEncodedLocation(
+            fileChanges[0].encoded_location
+          );
+          return {
+            encoded_location: fileChanges[0].encoded_location,
+            file_content: fileContent,
+            style_changes: fileChanges.flatMap((c) => c.style_changes || []),
+            text_changes: fileChanges
+              .filter((c) => c.old_html !== undefined)
+              .map((change) => ({
+                ...change,
+                old_text: change.old_html,
+                new_text: change.new_html,
+              })),
+            targetFile: targetFile,
+          };
+        }
+      );
+
+      const fileDataForBackend = (await Promise.all(fileDataPromises)).filter(
+        (f) => f.style_changes.length > 0 || f.text_changes.length > 0
+      );
+
+      if (fileDataForBackend.length === 0) {
+        return reply.code(200).send({
+          message: "No changes to apply.",
+          updatedFiles: [],
+        });
+      }
+
+      console.log(
+        `\x1b[36mℹ Preparing bulk request for ${fileDataForBackend.length} files.\x1b[0m`
+      );
+
+      const fileChangesForBackend = fileDataForBackend.map((f) => {
+        return {
+          encoded_location: f.encoded_location,
+          file_content: f.file_content,
+          style_changes: f.style_changes,
+          text_changes: f.text_changes,
+        };
+      });
+
+      const backendResponse = await getChanges({
+        githubRepoName: github_repo_name,
+        fileChanges: fileChangesForBackend,
+        authHeader,
+      });
+
+      const updatedFiles = new Set();
+      if (backendResponse && backendResponse.updated_files) {
+        console.log(`\x1b[36mℹ Processing updated_files format\x1b[0m`);
+        for (const [filePath, newContent] of Object.entries(
+          backendResponse.updated_files
+        )) {
+          const targetFile = filePath.startsWith("/")
+            ? filePath
+            : path.join(process.cwd(), filePath);
+
+          await applyFullFileReplacement(newContent, targetFile);
+          updatedFiles.add(targetFile);
+        }
+      }
+
+      if (updatedFiles.size === 0) {
+        return reply.code(200).send({
+          message: "No changes were applied.",
+          updatedFiles: [],
+        });
+      }
+
+      return reply.code(200).send({
+        message: `Changes applied successfully to ${
+          updatedFiles.size
+        } file(s).`,
+        updatedFiles: Array.from(updatedFiles),
+      });
+    } catch (err) {
+      console.error(
+        `\x1b[31m✖ Fatal error in /visual-editor-api: ${err.message}\x1b[0m`
+      );
+      return reply.code(500).send({
+        error: "An internal server error occurred",
+        details: err.message,
+      });
+    }
+  });
+
+  // Visual editor API route for agent changes
+  app.post("/visual-editor-api-agent", async (request, reply) => {
+    try {
       const data = request.body;
       const {
         encoded_location,
-        old_html,
-        new_html,
         github_repo_name,
         image_data,
         filename,
+        old_html,
+        new_html,
         style_changes,
         text_changes,
-        agent_mode,
       } = data;
+      const authHeader =
+        request.headers.authorization || request.headers["authorization"];
 
-      // Debug logging to see what's being received
+      // Debug: Log auth header info
       console.log(
-        `\x1b[36mℹ Visual Editor API Request data: ${JSON.stringify({
-          data,
-        })}\x1b[0m`
+        `\x1b[36mℹ [visual-editor-api-agent] Auth header received: ${authHeader ? "[PRESENT]" : "[MISSING]"}\x1b[0m`
       );
 
-      // Validate request data for regular mode
-      const validation = validateRequestData(data, false);
-      if (!validation.isValid) {
-        return reply.code(400).send({
-          error: validation.error,
-          ...validation.errorData,
-        });
+      const { targetFile, fileContent } =
+        readFileFromEncodedLocation(encoded_location);
+
+      await saveImageData(image_data, filename);
+
+      const backendResponse = await getAgentChanges({
+        oldHtml: old_html,
+        newHtml: new_html,
+        githubRepoName: github_repo_name,
+        encodedLocation: encoded_location,
+        styleChanges: style_changes,
+        textChanges: text_changes,
+        fileContent,
+        authHeader,
+      });
+
+      if (!backendResponse.changes || !Array.isArray(backendResponse.changes)) {
+        throw new Error("Invalid response format from backend");
       }
 
-      try {
-        const authHeader = request.headers["authorization"];
+      const formattedCode = await applyChangesAndFormat(
+        fileContent,
+        backendResponse.changes,
+        targetFile
+      );
 
-        // Read file content
-        const { filePath, targetFile, fileContent } =
-          readFileFromEncodedLocation(encoded_location);
-
-        // Save image if present
-        await saveImageData(image_data, filename);
-
-        const getChangeApi = agent_mode ? getAgentChanges : getChanges;
-
-        // Get agent changes from backend
-        const backendResponse = await getChangeApi({
-          oldHtml: old_html,
-          newHtml: new_html,
-          githubRepoName: github_repo_name,
-          encodedLocation: encoded_location,
-          styleChanges: style_changes,
-          textChanges: text_changes,
-          fileContent,
-          authHeader,
-        });
-
-        console.log(`\x1b[36mℹ Received response from backend\x1b[0m`);
-
-        console.log("backendResponse", backendResponse);
-        // Check if this is the new agent response format with modified_content
-        if (backendResponse.modified_content) {
-          // Handle full file replacement
-          const formattedCode = await applyFullFileReplacement(
-            backendResponse.modified_content,
-            targetFile
-          );
-
-          return reply.code(200).send({
-            success: true,
-            message:
-              backendResponse.message || `Applied agent changes to ${filePath}`,
-            modified_content: formattedCode,
-          });
-        } else if (
-          backendResponse.changes &&
-          Array.isArray(backendResponse.changes)
-        ) {
-          // Handle incremental changes (fallback)
-          const formattedCode = await applyChangesAndFormat(
-            fileContent,
-            backendResponse.changes,
-            targetFile
-          );
-
-          return reply.code(200).send({
-            success: true,
-            message: `Applied ${backendResponse.changes.length} changes to ${filePath}`,
-          });
-        } else {
-          console.error(
-            `\x1b[31m✗ Invalid response format: ${JSON.stringify(
-              backendResponse
-            )}\x1b[0m`
-          );
-          throw new Error("Invalid response format from backend");
-        }
-      } catch (apiError) {
-        console.error("Error applying changes:", apiError);
-        return reply.code(500).send({ error: apiError.message });
-      }
-    } catch (parseError) {
-      console.error("Error parsing request data:", parseError);
-      return reply.code(400).send({ error: "Invalid JSON" });
+      return reply.code(200).send({
+        success: true,
+        message: "Agent changes applied successfully.",
+        modified_content: formattedCode,
+      });
+    } catch (err) {
+      console.error(`Error in /visual-editor-api-agent: ${err.message}`);
+      return reply.code(500).send({ error: err.message });
     }
   });
 
@@ -816,6 +929,13 @@ function createApp() {
 
       // Use ai_instruction if provided, otherwise use aiInstruction
       const actualAiInstruction = ai_instruction || aiInstruction;
+      const authHeader =
+        request.headers.authorization || request.headers["authorization"];
+
+      // Debug: Log auth header info
+      console.log(
+        `\x1b[36mℹ [visual-editor-api-ai] Auth header received: ${authHeader ? "[PRESENT]" : "[MISSING]"}\x1b[0m`
+      );
 
       // Debug logging to see what's being received
       console.log(
@@ -836,8 +956,6 @@ function createApp() {
       }
 
       try {
-        const authHeader = request.headers["authorization"];
-
         // Read file content
         const { filePath, targetFile, fileContent } =
           readFileFromEncodedLocation(encoded_location);
@@ -860,11 +978,13 @@ function createApp() {
         // Check if the response has updated_files field (new format)
         if (backendResponse.updated_files) {
           console.log(`\x1b[36mℹ Processing updated_files format\x1b[0m`);
-          
+
           const results = [];
-          
+
           // Process each file in updated_files
-          for (const [filePath, newContent] of Object.entries(backendResponse.updated_files)) {
+          for (const [filePath, newContent] of Object.entries(
+            backendResponse.updated_files
+          )) {
             console.log(`\x1b[36mℹ Processing file: ${filePath}\x1b[0m`);
 
             // Determine the target file path
@@ -894,7 +1014,7 @@ function createApp() {
             files: results,
           });
         }
-        
+
         // Fallback to old format if updated_files is not present
         const responseData = backendResponse.coding_agent_output;
         const results = [];
