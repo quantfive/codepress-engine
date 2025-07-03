@@ -148,6 +148,29 @@ function applyTextChanges(fileContent, changes) {
 function applyPatternChanges(fileContent, changes) {
   let modifiedContent = fileContent;
 
+  // Detect potential conflicts by checking for duplicate find patterns
+  const findPatterns = new Map();
+  changes.forEach((change, index) => {
+    if (change.find) {
+      if (findPatterns.has(change.find)) {
+        const existingIndex = findPatterns.get(change.find);
+        console.warn(
+          `\x1b[33m⚠ CONFLICT DETECTED: Multiple changes target the same pattern\x1b[0m`
+        );
+        console.warn(
+          `  Change ${existingIndex + 1}: ${changes[existingIndex].explanation}`
+        );
+        console.warn(`  Change ${index + 1}: ${change.explanation}`);
+        console.warn(`  Pattern: ${change.find.substring(0, 100)}...`);
+        console.warn(
+          `\x1b[33m  → Only the first change will be applied\x1b[0m`
+        );
+      } else {
+        findPatterns.set(change.find, index);
+      }
+    }
+  });
+
   for (const change of changes) {
     const { type, find, replaceWith, insert, explanation } = change;
 
@@ -157,11 +180,30 @@ function applyPatternChanges(fileContent, changes) {
       case "replace":
         if (find && replaceWith !== undefined) {
           if (modifiedContent.includes(find)) {
+            // Check if replaceWith contains malformed JSX
+            const openTags = (replaceWith.match(/<[^\/][^>]*>/g) || []).length;
+            const closeTags = (replaceWith.match(/<\/[^>]*>/g) || []).length;
+
+            if (openTags !== closeTags) {
+              console.warn(
+                `\x1b[33m⚠ POTENTIAL JSX MALFORMATION: Unmatched tags in replacement\x1b[0m`
+              );
+              console.warn(
+                `  Open tags: ${openTags}, Close tags: ${closeTags}`
+              );
+              console.warn(
+                `  Replacement: ${replaceWith.substring(0, 200)}...`
+              );
+            }
+
             modifiedContent = modifiedContent.replace(find, replaceWith);
             console.log(`\x1b[32m✓ Replaced pattern successfully\x1b[0m`);
           } else {
             console.warn(
               `\x1b[33m⚠ Pattern not found for replace: ${find.substring(0, 50)}...\x1b[0m`
+            );
+            console.warn(
+              `\x1b[33m  This might be due to a previous change modifying the content\x1b[0m`
             );
           }
         } else {
@@ -729,6 +771,7 @@ function createApp() {
         `\x1b[36mℹ Visual Editor API Request: Received ${changes.length} changes for repo ${github_repo_name}\x1b[0m`
       );
 
+      // Group changes by file to eliminate duplication
       const changesByFile = new Map();
       for (const change of changes) {
         try {
@@ -738,6 +781,7 @@ function createApp() {
             );
             continue;
           }
+
           const encodedFilePath = change.encoded_location.split(":")[0];
           const targetFile = decode(encodedFilePath);
           if (!targetFile) {
@@ -746,13 +790,40 @@ function createApp() {
             );
             continue;
           }
+
+          // Initialize file entry if not exists
           if (!changesByFile.has(targetFile)) {
-            changesByFile.set(targetFile, []);
+            changesByFile.set(targetFile, {
+              encoded_location: change.encoded_location,
+              file_content: null, // Will be set below
+              changes: [],
+            });
           }
-          changesByFile.get(targetFile).push(change);
+
+          // Add this element change to the file
+          const elementChange = {
+            style_changes: change.style_changes || [],
+            text_changes: [],
+          };
+
+          // Create text_changes from old_html/new_html if present
+          if (change.old_html !== undefined && change.new_html !== undefined) {
+            elementChange.text_changes.push({
+              old_text: change.old_html,
+              new_text: change.new_html,
+            });
+          }
+
+          // Only add the change if it has actual content
+          if (
+            elementChange.style_changes.length > 0 ||
+            elementChange.text_changes.length > 0
+          ) {
+            changesByFile.get(targetFile).changes.push(elementChange);
+          }
         } catch (e) {
           console.error(
-            `\x1b[31m✖ Error decoding location: ${change.encoded_location}\x1b[0m`
+            `\x1b[31m✖ Error processing change for location: ${change.encoded_location}\x1b[0m`
           );
         }
       }
@@ -764,32 +835,32 @@ function createApp() {
         }
       }
 
-      const fileDataPromises = Array.from(changesByFile.entries()).map(
-        async ([targetFile, fileChanges]) => {
+      // Read file content for each file and create the grouped structure
+      const fileChangesForBackend = [];
+      for (const [targetFile, fileData] of changesByFile.entries()) {
+        try {
+          // Read file content once per file
           const { fileContent } = readFileFromEncodedLocation(
-            fileChanges[0].encoded_location
+            fileData.encoded_location
           );
-          return {
-            encoded_location: fileChanges[0].encoded_location,
-            file_content: fileContent,
-            style_changes: fileChanges.flatMap((c) => c.style_changes || []),
-            text_changes: fileChanges
-              .filter((c) => c.old_html !== undefined)
-              .map((change) => ({
-                ...change,
-                old_text: change.old_html,
-                new_text: change.new_html,
-              })),
-            targetFile: targetFile,
-          };
+          fileData.file_content = fileContent;
+
+          // Only include files that have actual changes
+          if (fileData.changes.length > 0) {
+            fileChangesForBackend.push({
+              encoded_location: fileData.encoded_location,
+              file_content: fileData.file_content,
+              changes: fileData.changes,
+            });
+          }
+        } catch (error) {
+          console.error(
+            `\x1b[31m✖ Error reading file content for ${targetFile}: ${error.message}\x1b[0m`
+          );
         }
-      );
+      }
 
-      const fileDataForBackend = (await Promise.all(fileDataPromises)).filter(
-        (f) => f.style_changes.length > 0 || f.text_changes.length > 0
-      );
-
-      if (fileDataForBackend.length === 0) {
+      if (fileChangesForBackend.length === 0) {
         return reply.code(200).send({
           message: "No changes to apply.",
           updatedFiles: [],
@@ -797,17 +868,8 @@ function createApp() {
       }
 
       console.log(
-        `\x1b[36mℹ Preparing bulk request for ${fileDataForBackend.length} files.\x1b[0m`
+        `\x1b[36mℹ Sending grouped request for ${fileChangesForBackend.length} files with ${changes.length} total changes\x1b[0m`
       );
-
-      const fileChangesForBackend = fileDataForBackend.map((f) => {
-        return {
-          encoded_location: f.encoded_location,
-          file_content: f.file_content,
-          style_changes: f.style_changes,
-          text_changes: f.text_changes,
-        };
-      });
 
       const backendResponse = await getChanges({
         githubRepoName: github_repo_name,
@@ -840,7 +902,7 @@ function createApp() {
       return reply.code(200).send({
         message: `Changes applied successfully to ${
           updatedFiles.size
-        } file(s).`,
+        } file(s). Processed ${changes.length} individual changes across ${fileChangesForBackend.length} files.`,
         updatedFiles: Array.from(updatedFiles),
       });
     } catch (err) {
