@@ -803,16 +803,8 @@ function createApp() {
           // Add this element change to the file
           const elementChange = {
             style_changes: change.style_changes || [],
-            text_changes: [],
+            text_changes: change.text_changes || [],
           };
-
-          // Create text_changes from old_html/new_html if present
-          if (change.old_html !== undefined && change.new_html !== undefined) {
-            elementChange.text_changes.push({
-              old_text: change.old_html,
-              new_text: change.new_html,
-            });
-          }
 
           // Only add the change if it has actual content
           if (
