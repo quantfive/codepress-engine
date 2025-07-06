@@ -784,8 +784,11 @@ function createApp() {
         console.log(`\x1b[33m⚠ No browser dimensions found in changes\x1b[0m`);
       }
 
-      // Process each change individually to preserve line number information
-      const fileChangesForBackend = [];
+      // Optimize file reading by pre-fetching unique file contents
+      const uniqueEncodedLocations = new Set();
+      const validChanges = [];
+
+      // First pass: collect unique encoded locations and validate changes
       for (const change of changes) {
         console.log(`\x1b[36mℹ change: ${JSON.stringify(change)}\x1b[0m`);
 
@@ -819,10 +822,45 @@ function createApp() {
             continue;
           }
 
-          // Read file content for this specific change
-          const { fileContent } = readFileFromEncodedLocation(
-            change.encoded_location
+          // Collect unique encoded locations for batch reading
+          uniqueEncodedLocations.add(change.encoded_location);
+          validChanges.push(change);
+        } catch (e) {
+          console.error(
+            `\x1b[31m✖ Error processing change for location: ${change.encoded_location}\x1b[0m`
           );
+        }
+      }
+
+      // Pre-fetch all unique file contents once
+      const fileContentMap = new Map();
+      for (const encodedLocation of uniqueEncodedLocations) {
+        try {
+          const { fileContent } = readFileFromEncodedLocation(encodedLocation);
+          fileContentMap.set(encodedLocation, fileContent);
+        } catch (e) {
+          console.error(
+            `\x1b[31m✖ Error reading file for location: ${encodedLocation}\x1b[0m`
+          );
+        }
+      }
+
+      console.log(
+        `\x1b[36mℹ Pre-fetched ${fileContentMap.size} unique files for ${validChanges.length} changes\x1b[0m`
+      );
+
+      // Second pass: process each change with pre-fetched content
+      const fileChangesForBackend = [];
+      for (const change of validChanges) {
+        try {
+          // Get pre-fetched file content from map
+          const fileContent = fileContentMap.get(change.encoded_location);
+          if (!fileContent) {
+            console.warn(
+              `\x1b[33m⚠ Skipping change with missing file content for: ${change.encoded_location}\x1b[0m`
+            );
+            continue;
+          }
 
           // Create individual change entry with its specific encoded_location
           fileChangesForBackend.push({
