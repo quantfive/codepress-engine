@@ -773,12 +773,12 @@ function createApp() {
 
       // Debug: Check if browser dimensions are provided
       const changesWithDimensions = changes.filter(
-        (change) => change.browserWidth && change.browserHeight
+        (change) => change.browser_width && change.browser_height
       );
       if (changesWithDimensions.length > 0) {
         const sampleChange = changesWithDimensions[0];
         console.log(
-          `\x1b[36mℹ Browser dimensions detected: ${sampleChange.browserWidth}x${sampleChange.browserHeight}\x1b[0m`
+          `\x1b[36mℹ Browser dimensions detected: ${sampleChange.browser_width}x${sampleChange.browser_height}\x1b[0m`
         );
       } else {
         console.log(`\x1b[33m⚠ No browser dimensions found in changes\x1b[0m`);
@@ -787,6 +787,8 @@ function createApp() {
       // Process each change individually to preserve line number information
       const fileChangesForBackend = [];
       for (const change of changes) {
+        console.log(`\x1b[36mℹ change: ${JSON.stringify(change)}\x1b[0m`);
+
         try {
           if (!change.encoded_location) {
             console.warn(
@@ -832,8 +834,8 @@ function createApp() {
                 text_changes: change.text_changes || [],
               },
             ],
-            browser_width: change.browserWidth,
-            browser_height: change.browserHeight,
+            browser_width: change.browser_width,
+            browser_height: change.browser_height,
           });
         } catch (e) {
           console.error(
