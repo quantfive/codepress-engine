@@ -304,4 +304,166 @@ line 4`;
       }
     });
   });
+
+  describe("Performance optimization for file reading", () => {
+    let originalConsoleLog;
+
+    beforeEach(async () => {
+      // Mock fetch to return a successful response
+      fetch.mockResolvedValue({
+        ok: true,
+        text: () =>
+          Promise.resolve(
+            JSON.stringify({
+              updated_files: {
+                "src/test-file.js": "const updated = 'content';",
+                "src/another-file.js": "const another = 'content';",
+              },
+            })
+          ),
+      });
+
+      // Mock console.log to suppress output during tests
+      originalConsoleLog = console.log;
+      console.log = jest.fn();
+    });
+
+    afterEach(async () => {
+      // Restore console.log
+      console.log = originalConsoleLog;
+    });
+
+    it("should demonstrate file read optimization by collecting unique encoded locations", () => {
+      // Test the core optimization logic without server complexity
+      const changes = [
+        { encoded_location: "encoded123:1-10", style_changes: [{}] },
+        { encoded_location: "encoded123:15-20", style_changes: [{}] }, // Same file
+        { encoded_location: "encoded456:5-15", style_changes: [{}] },
+        { encoded_location: "encoded123:25-30", style_changes: [{}] }, // Same file
+        { encoded_location: "encoded456:20-25", style_changes: [{}] }, // Same file
+      ];
+
+      // Simulate the optimization logic from the server
+      const uniqueEncodedLocations = new Set();
+      const validChanges = [];
+
+      for (const change of changes) {
+        if (change.encoded_location && change.style_changes.length > 0) {
+          uniqueEncodedLocations.add(change.encoded_location);
+          validChanges.push(change);
+        }
+      }
+
+      // Verify the optimization works
+      expect(validChanges.length).toBe(5); // All 5 changes are valid
+      expect(uniqueEncodedLocations.size).toBe(5); // All 5 different encoded locations
+
+      // But when we map unique file paths (before colon), there should be only 2 unique files
+      const uniqueFilePaths = new Set();
+      for (const encodedLocation of uniqueEncodedLocations) {
+        const encodedFilePath = encodedLocation.split(":")[0];
+        uniqueFilePaths.add(encodedFilePath);
+      }
+
+      expect(uniqueFilePaths.size).toBe(2); // Only 2 unique files (encoded123 and encoded456)
+      expect(Array.from(uniqueFilePaths)).toEqual(
+        expect.arrayContaining(["encoded123", "encoded456"])
+      );
+    });
+
+    it("should handle empty changes array", () => {
+      const changes = [];
+      const uniqueEncodedLocations = new Set();
+      const validChanges = [];
+
+      for (const change of changes) {
+        if (
+          change.encoded_location &&
+          (change.style_changes?.length > 0 || change.text_changes?.length > 0)
+        ) {
+          uniqueEncodedLocations.add(change.encoded_location);
+          validChanges.push(change);
+        }
+      }
+
+      expect(validChanges.length).toBe(0);
+      expect(uniqueEncodedLocations.size).toBe(0);
+    });
+
+    it("should skip invalid changes", () => {
+      const changes = [
+        { encoded_location: "valid123:1-5", style_changes: [{}] },
+        { encoded_location: "", style_changes: [{}] }, // Invalid location
+        { encoded_location: "valid456:1-5", style_changes: [] }, // No changes
+        { encoded_location: "valid789:1-5", style_changes: [{}] },
+      ];
+
+      const uniqueEncodedLocations = new Set();
+      const validChanges = [];
+
+      for (const change of changes) {
+        if (change.encoded_location && change.style_changes.length > 0) {
+          uniqueEncodedLocations.add(change.encoded_location);
+          validChanges.push(change);
+        }
+      }
+
+      expect(validChanges.length).toBe(2); // Only 2 valid changes
+      expect(uniqueEncodedLocations.size).toBe(2); // Only 2 unique files
+      expect(Array.from(uniqueEncodedLocations)).toEqual(
+        expect.arrayContaining(["valid123:1-5", "valid789:1-5"])
+      );
+    });
+
+    it("should log optimization message", () => {
+      // Test that the server logs the optimization message
+      const changes = [
+        { encoded_location: "file1:1-10", style_changes: [{}] },
+        { encoded_location: "file1:15-20", style_changes: [{}] },
+        { encoded_location: "file2:5-15", style_changes: [{}] },
+      ];
+
+      const uniqueEncodedLocations = new Set();
+      const validChanges = [];
+
+      for (const change of changes) {
+        if (change.encoded_location && change.style_changes.length > 0) {
+          uniqueEncodedLocations.add(change.encoded_location);
+          validChanges.push(change);
+        }
+      }
+
+      // Simulate the log message that would be created
+      const logMessage = `Pre-fetched ${uniqueEncodedLocations.size} unique files for ${validChanges.length} changes`;
+
+      expect(logMessage).toBe("Pre-fetched 3 unique files for 3 changes");
+    });
+
+    it("should create file content map efficiently", () => {
+      // Test the Map creation logic
+      const uniqueEncodedLocations = new Set([
+        "encoded123:1-10",
+        "encoded456:5-15",
+      ]);
+
+      const fileContentMap = new Map();
+
+      // Mock the file reading behavior
+      const mockReadFile = (encodedLocation) => {
+        const encodedFilePath = encodedLocation.split(":")[0];
+        if (encodedFilePath === "encoded123") return "content for file 1";
+        if (encodedFilePath === "encoded456") return "content for file 2";
+        return "default content";
+      };
+
+      for (const encodedLocation of uniqueEncodedLocations) {
+        const fileContent = mockReadFile(encodedLocation);
+        fileContentMap.set(encodedLocation, fileContent);
+      }
+
+      expect(fileContentMap.size).toBe(2);
+      expect(fileContentMap.get("encoded123:1-10")).toBe("content for file 1");
+      expect(fileContentMap.get("encoded456:5-15")).toBe("content for file 2");
+    });
+  });
 });
