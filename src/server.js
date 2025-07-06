@@ -771,8 +771,21 @@ function createApp() {
         `\x1b[36mℹ Visual Editor API Request: Received ${changes.length} changes for repo ${github_repo_name}\x1b[0m`
       );
 
-      // Group changes by file to eliminate duplication
-      const changesByFile = new Map();
+      // Debug: Check if browser dimensions are provided
+      const changesWithDimensions = changes.filter(
+        (change) => change.browserWidth && change.browserHeight
+      );
+      if (changesWithDimensions.length > 0) {
+        const sampleChange = changesWithDimensions[0];
+        console.log(
+          `\x1b[36mℹ Browser dimensions detected: ${sampleChange.browserWidth}x${sampleChange.browserHeight}\x1b[0m`
+        );
+      } else {
+        console.log(`\x1b[33m⚠ No browser dimensions found in changes\x1b[0m`);
+      }
+
+      // Process each change individually to preserve line number information
+      const fileChangesForBackend = [];
       for (const change of changes) {
         try {
           if (!change.encoded_location) {
@@ -791,28 +804,37 @@ function createApp() {
             continue;
           }
 
-          // Initialize file entry if not exists
-          if (!changesByFile.has(targetFile)) {
-            changesByFile.set(targetFile, {
-              encoded_location: change.encoded_location,
-              file_content: null, // Will be set below
-              changes: [],
-            });
+          // Check if this change has actual content
+          const hasStyleChanges =
+            change.style_changes && change.style_changes.length > 0;
+          const hasTextChanges =
+            change.text_changes && change.text_changes.length > 0;
+
+          if (!hasStyleChanges && !hasTextChanges) {
+            console.warn(
+              `\x1b[33m⚠ Skipping change with no style or text changes.\x1b[0m`
+            );
+            continue;
           }
 
-          // Add this element change to the file
-          const elementChange = {
-            style_changes: change.style_changes || [],
-            text_changes: change.text_changes || [],
-          };
+          // Read file content for this specific change
+          const { fileContent } = readFileFromEncodedLocation(
+            change.encoded_location
+          );
 
-          // Only add the change if it has actual content
-          if (
-            elementChange.style_changes.length > 0 ||
-            elementChange.text_changes.length > 0
-          ) {
-            changesByFile.get(targetFile).changes.push(elementChange);
-          }
+          // Create individual change entry with its specific encoded_location
+          fileChangesForBackend.push({
+            encoded_location: change.encoded_location, // Preserve individual encoded_location
+            file_content: fileContent,
+            changes: [
+              {
+                style_changes: change.style_changes || [],
+                text_changes: change.text_changes || [],
+              },
+            ],
+            browser_width: change.browserWidth,
+            browser_height: change.browserHeight,
+          });
         } catch (e) {
           console.error(
             `\x1b[31m✖ Error processing change for location: ${change.encoded_location}\x1b[0m`
@@ -827,31 +849,6 @@ function createApp() {
         }
       }
 
-      // Read file content for each file and create the grouped structure
-      const fileChangesForBackend = [];
-      for (const [targetFile, fileData] of changesByFile.entries()) {
-        try {
-          // Read file content once per file
-          const { fileContent } = readFileFromEncodedLocation(
-            fileData.encoded_location
-          );
-          fileData.file_content = fileContent;
-
-          // Only include files that have actual changes
-          if (fileData.changes.length > 0) {
-            fileChangesForBackend.push({
-              encoded_location: fileData.encoded_location,
-              file_content: fileData.file_content,
-              changes: fileData.changes,
-            });
-          }
-        } catch (error) {
-          console.error(
-            `\x1b[31m✖ Error reading file content for ${targetFile}: ${error.message}\x1b[0m`
-          );
-        }
-      }
-
       if (fileChangesForBackend.length === 0) {
         return reply.code(200).send({
           message: "No changes to apply.",
@@ -860,8 +857,18 @@ function createApp() {
       }
 
       console.log(
-        `\x1b[36mℹ Sending grouped request for ${fileChangesForBackend.length} files with ${changes.length} total changes\x1b[0m`
+        `\x1b[36mℹ Sending request for ${fileChangesForBackend.length} individual changes (${changes.length} total original changes)\x1b[0m`
       );
+
+      // Debug: Log browser dimensions being sent to backend
+      const backendChangesWithDimensions = fileChangesForBackend.filter(
+        (change) => change.browser_width && change.browser_height
+      );
+      if (backendChangesWithDimensions.length > 0) {
+        console.log(
+          `\x1b[36mℹ Sending browser dimensions to backend for ${backendChangesWithDimensions.length} changes\x1b[0m`
+        );
+      }
 
       const backendResponse = await getChanges({
         githubRepoName: github_repo_name,
@@ -894,7 +901,7 @@ function createApp() {
       return reply.code(200).send({
         message: `Changes applied successfully to ${
           updatedFiles.size
-        } file(s). Processed ${changes.length} individual changes across ${fileChangesForBackend.length} files.`,
+        } file(s). Processed ${changes.length} individual changes with preserved line number information.`,
         updatedFiles: Array.from(updatedFiles),
       });
     } catch (err) {
