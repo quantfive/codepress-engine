@@ -1,0 +1,11 @@
+/home/joey/quantfive/codepress/codepress-engine/codepress-swc-plugin/target/wasm32-wasip1/release/deps/libmunge-2bd62aefe2d3197b.rmeta: /home/joey/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/munge-0.4.4/src/lib.rs /home/joey/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/munge-0.4.4/src/__macro.rs /home/joey/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/munge-0.4.4/src/impls.rs /home/joey/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/munge-0.4.4/src/internal.rs /home/joey/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/munge-0.4.4/src/../example.md
+
+/home/joey/quantfive/codepress/codepress-engine/codepress-swc-plugin/target/wasm32-wasip1/release/deps/libmunge-2bd62aefe2d3197b.rlib: /home/joey/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/munge-0.4.4/src/lib.rs /home/joey/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/munge-0.4.4/src/__macro.rs /home/joey/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/munge-0.4.4/src/impls.rs /home/joey/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/munge-0.4.4/src/internal.rs /home/joey/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/munge-0.4.4/src/../example.md
+
+/home/joey/quantfive/codepress/codepress-engine/codepress-swc-plugin/target/wasm32-wasip1/release/deps/munge-2bd62aefe2d3197b.d: /home/joey/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/munge-0.4.4/src/lib.rs /home/joey/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/munge-0.4.4/src/__macro.rs /home/joey/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/munge-0.4.4/src/impls.rs /home/joey/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/munge-0.4.4/src/internal.rs /home/joey/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/munge-0.4.4/src/../example.md
+
+/home/joey/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/munge-0.4.4/src/lib.rs:
+/home/joey/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/munge-0.4.4/src/__macro.rs:
+/home/joey/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/munge-0.4.4/src/impls.rs:
+/home/joey/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/munge-0.4.4/src/internal.rs:
+/home/joey/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/munge-0.4.4/src/../example.md:

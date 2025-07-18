@@ -1,0 +1,1 @@
+/home/joey/quantfive/codepress/codepress-engine/codepress-swc-plugin/target/wasm32-wasip1/release/codepress_swc_plugin.wasm: /home/joey/quantfive/codepress/codepress-engine/codepress-swc-plugin/src/lib.rs
