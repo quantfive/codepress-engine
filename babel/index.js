@@ -126,11 +126,13 @@ const plugin = function (babel, options = {}) {
     attributeName = "codepress-data-fp",
     repoAttributeName = "codepress-github-repo-name",
     branchAttributeName = "codepress-github-branch",
+    repoName = "",
+    branchName = "",
   } = options;
 
   // Always use auto-detected values
-  const repoName = currentRepoName;
-  const branch = currentBranch;
+  const repo = repoName || currentRepoName;
+  const branch = branchName || currentBranch;
 
   return {
     name: "babel-plugin-codepress-html",
@@ -191,7 +193,7 @@ const plugin = function (babel, options = {}) {
 
         // --- Add repo and branch attributes (once globally to a root-like element) ---
         // Check if repo/branch info is available and attributes haven't been added globally yet
-        if (repoName && !globalAttributesAdded) {
+        if (repo && !globalAttributesAdded) {
           // Check if the current element is a suitable root element (html, body, or a top-level div)
           let isSuitableElement = false;
           let elementName = "";
@@ -216,7 +218,7 @@ const plugin = function (babel, options = {}) {
               node.attributes.push(
                 t.jsxAttribute(
                   t.jsxIdentifier(repoAttributeName),
-                  t.stringLiteral(repoName)
+                  t.stringLiteral(repo)
                 )
               );
             }
