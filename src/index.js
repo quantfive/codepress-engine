@@ -133,9 +133,8 @@ const plugin = function (babel, options = {}) {
     branchAttributeName = "codepress-github-branch",
   } = options;
 
-  // Always use auto-detected values
-  const repoName = currentRepoName;
-  const branch = currentBranch;
+  const repo = options.repo_name ? options.repo_name : currentRepoName;
+  const branch = options.branch_name ? options.branch_name : currentBranch;
 
   return {
     name: "babel-plugin-codepress-html",
