@@ -12,7 +12,7 @@ const SECRET = Buffer.from("codepress-file-obfuscation"); // Use a slightly more
 function encode(relPath) {
   if (!relPath) return "";
   const xored = Buffer.from(relPath).map(
-    (b, i) => b ^ SECRET[i % SECRET.length]
+    (b, i) => b ^ SECRET[i % SECRET.length],
   );
   return xored
     .toString("base64") // 1.2× length of path
@@ -24,7 +24,7 @@ function decode(attr) {
   if (!attr) return "";
   const buf = Buffer.from(
     attr.replace(/[-_]/g, (c) => ({ "-": "+", _: "/" })[c]),
-    "base64"
+    "base64",
   );
   return buf.map((b, i) => b ^ SECRET[i % SECRET.length]).toString();
 }
@@ -34,6 +34,22 @@ function decode(attr) {
  * @returns {string} The current branch name or 'main' if detection fails
  */
 function detectGitBranch() {
+  const fromEnv =
+    process.env.GIT_BRANCH ||
+    // Vercel
+    process.env.VERCEL_GIT_COMMIT_REF ||
+    // GitHub Actions (PRs use GITHUB_HEAD_REF, pushes use GITHUB_REF_NAME)
+    process.env.GITHUB_HEAD_REF ||
+    process.env.GITHUB_REF_NAME ||
+    // GitLab CI
+    process.env.CI_COMMIT_REF_NAME ||
+    // CircleCI
+    process.env.CIRCLE_BRANCH ||
+    // Bitbucket Pipelines
+    process.env.BITBUCKET_BRANCH ||
+    // Netlify
+    process.env.BRANCH;
+  if (fromEnv) return fromEnv;
   try {
     // Run git command to get current branch
     const branch = execSync("git rev-parse --abbrev-ref HEAD", {
@@ -42,7 +58,7 @@ function detectGitBranch() {
     return branch || "main";
   } catch (error) {
     console.log(
-      "\x1b[33m⚠ Could not detect git branch, using default: main\x1b[0m"
+      "\x1b[33m⚠ Could not detect git branch, using default: main\x1b[0m",
     );
     return "main";
   }
@@ -70,7 +86,7 @@ function detectGitRepoName() {
 
     // Parse HTTPS URL format: https://github.com/owner/repo.git
     const httpsMatch = remoteUrl.match(
-      /https:\/\/github\.com\/([^\/]+)\/([^\/\.]+)(?:\.git)?$/
+      /https:\/\/github\.com\/([^\/]+)\/([^\/\.]+)(?:\.git)?$/,
     );
     if (httpsMatch) {
       [, owner, repo] = httpsMatch;
@@ -78,7 +94,7 @@ function detectGitRepoName() {
 
     // Parse SSH URL format: git@github.com:owner/repo.git
     const sshMatch = remoteUrl.match(
-      /git@github\.com:([^\/]+)\/([^\/\.]+)(?:\.git)?$/
+      /git@github\.com:([^\/]+)\/([^\/\.]+)(?:\.git)?$/,
     );
     if (sshMatch) {
       [, owner, repo] = sshMatch;
@@ -92,7 +108,7 @@ function detectGitRepoName() {
     }
 
     console.log(
-      "\x1b[33m⚠ Could not parse GitHub repository from remote URL\x1b[0m"
+      "\x1b[33m⚠ Could not parse GitHub repository from remote URL\x1b[0m",
     );
     return null;
   } catch (error) {
@@ -177,7 +193,7 @@ const plugin = function (babel, options = {}) {
         let existingAttribute = node.attributes.find(
           (attr) =>
             t.isJSXAttribute(attr) &&
-            t.isJSXIdentifier(attr.name, { name: attributeName })
+            t.isJSXIdentifier(attr.name, { name: attributeName }),
         );
 
         if (existingAttribute) {
@@ -188,8 +204,8 @@ const plugin = function (babel, options = {}) {
           node.attributes.push(
             t.jsxAttribute(
               t.jsxIdentifier(attributeName),
-              t.stringLiteral(currentAttributeValue)
-            )
+              t.stringLiteral(currentAttributeValue),
+            ),
           );
         }
 
@@ -211,17 +227,17 @@ const plugin = function (babel, options = {}) {
             const hasRepoAttribute = node.attributes.some(
               (attr) =>
                 t.isJSXAttribute(attr) &&
-                t.isJSXIdentifier(attr.name, { name: repoAttributeName })
+                t.isJSXIdentifier(attr.name, { name: repoAttributeName }),
             );
             if (!hasRepoAttribute) {
               console.log(
-                `\x1b[32m✓ Adding repo attribute globally to <${elementName}> in ${path.basename(state.file.opts.filename)}\x1b[0m`
+                `\x1b[32m✓ Adding repo attribute globally to <${elementName}> in ${path.basename(state.file.opts.filename)}\x1b[0m`,
               );
               node.attributes.push(
                 t.jsxAttribute(
                   t.jsxIdentifier(repoAttributeName),
-                  t.stringLiteral(repoName)
-                )
+                  t.stringLiteral(repoName),
+                ),
               );
             }
 
@@ -229,24 +245,24 @@ const plugin = function (babel, options = {}) {
             const hasBranchAttribute = node.attributes.some(
               (attr) =>
                 t.isJSXAttribute(attr) &&
-                t.isJSXIdentifier(attr.name, { name: branchAttributeName })
+                t.isJSXIdentifier(attr.name, { name: branchAttributeName }),
             );
             if (!hasBranchAttribute && branch) {
               console.log(
-                `\x1b[32m✓ Adding branch attribute globally to <${elementName}> in ${path.basename(state.file.opts.filename)}\x1b[0m`
+                `\x1b[32m✓ Adding branch attribute globally to <${elementName}> in ${path.basename(state.file.opts.filename)}\x1b[0m`,
               );
               node.attributes.push(
                 t.jsxAttribute(
                   t.jsxIdentifier(branchAttributeName),
-                  t.stringLiteral(branch)
-                )
+                  t.stringLiteral(branch),
+                ),
               );
             }
 
             // Mark that we've added attributes globally
             globalAttributesAdded = true;
             console.log(
-              `\x1b[36mℹ Repo/branch attributes added globally. Won't add again.\x1b[0m`
+              `\x1b[36mℹ Repo/branch attributes added globally. Won't add again.\x1b[0m`,
             );
           }
         }
@@ -258,7 +274,7 @@ const plugin = function (babel, options = {}) {
       // Display the total number of files processed
       if (processedFileCount > 0) {
         console.log(
-          `\x1b[36mℹ Processed ${processedFileCount} files with CodePress\x1b[0m`
+          `\x1b[36mℹ Processed ${processedFileCount} files with CodePress\x1b[0m`,
         );
       } else {
         console.log("\x1b[33m⚠ No files were processed by CodePress\x1b[0m");
