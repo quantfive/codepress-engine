@@ -29,6 +29,26 @@ function decode(attr) {
  * @returns {string} The current branch name or 'main' if detection fails
  */
 function detectGitBranch() {
+  const fromEnv =
+    process.env.GIT_BRANCH ||
+    // Vercel
+    process.env.VERCEL_GIT_COMMIT_REF ||
+    // GitHub Actions (PRs use GITHUB_HEAD_REF, pushes use GITHUB_REF_NAME)
+    process.env.GITHUB_HEAD_REF ||
+    process.env.GITHUB_REF_NAME ||
+    // GitLab CI
+    process.env.CI_COMMIT_REF_NAME ||
+    // CircleCI
+    process.env.CIRCLE_BRANCH ||
+    // Bitbucket Pipelines
+    process.env.BITBUCKET_BRANCH ||
+    // Netlify
+    process.env.BRANCH;
+  if (fromEnv) {
+    console.info(`Using branch from env ${fromEnv}`);
+    return fromEnv;
+  }
+
   try {
     // Run git command to get current branch
     const branch = execSync("git rev-parse --abbrev-ref HEAD", {
@@ -129,8 +149,8 @@ const plugin = function (babel, options = {}) {
   } = options;
 
   // Always use auto-detected values
-  const repoName = currentRepoName;
-  const branch = currentBranch;
+  const repoName = options.repo_name ? options.repo_name : currentRepoName;
+  const branch = options.branch_name ? options.branch_name : currentRepoName;
 
   return {
     name: "babel-plugin-codepress-html",
