@@ -21,6 +21,7 @@ function detectGitBranch() {
     process.env.BITBUCKET_BRANCH ||
     // Netlify
     process.env.BRANCH;
+  console.log("LOGGING detectGitBranch", fromEnv);
   if (fromEnv) return fromEnv;
 
   try {
@@ -92,6 +93,9 @@ function createSWCPlugin(userConfig = {}) {
     ...userConfig,
   };
 
+  console.log(
+    `[CodePress] repo=${repoName}, branch=${branchName}, env=${process.env.VERCEL_ENV}`,
+  );
   // Return the plugin configuration array
   return [path.resolve(__dirname, "codepress_engine.wasm"), config];
 }
