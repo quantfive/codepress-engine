@@ -6,6 +6,24 @@ const path = require("path");
  * @returns {string|null} The current branch name or null if detection fails
  */
 function detectGitBranch() {
+  const fromEnv =
+    process.env.GIT_BRANCH ||
+    // Vercel
+    process.env.VERCEL_GIT_COMMIT_REF ||
+    // GitHub Actions (PRs use GITHUB_HEAD_REF, pushes use GITHUB_REF_NAME)
+    process.env.GITHUB_HEAD_REF ||
+    process.env.GITHUB_REF_NAME ||
+    // GitLab CI
+    process.env.CI_COMMIT_REF_NAME ||
+    // CircleCI
+    process.env.CIRCLE_BRANCH ||
+    // Bitbucket Pipelines
+    process.env.BITBUCKET_BRANCH ||
+    // Netlify
+    process.env.BRANCH;
+  if (fromEnv) {
+    return fromEnv;
+  }
   try {
     const branch = execSync("git rev-parse --abbrev-ref HEAD", {
       encoding: "utf8",
