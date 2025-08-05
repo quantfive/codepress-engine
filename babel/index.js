@@ -45,7 +45,6 @@ function detectGitBranch() {
     // Netlify
     process.env.BRANCH;
   if (fromEnv) {
-    console.info(`Using branch from env ${fromEnv}`);
     return fromEnv;
   }
 
@@ -150,7 +149,7 @@ const plugin = function (babel, options = {}) {
 
   // Always use auto-detected values
   const repoName = options.repo_name ? options.repo_name : currentRepoName;
-  const branch = options.branch_name ? options.branch_name : currentRepoName;
+  const branch = options.branch_name ? options.branch_name : currentBranch;
 
   return {
     name: "babel-plugin-codepress-html",

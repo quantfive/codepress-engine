@@ -22,7 +22,6 @@ function detectGitBranch() {
     // Netlify
     process.env.BRANCH;
   if (fromEnv) {
-    console.info(`Using branch from env ${fromEnv}`);
     return fromEnv;
   }
   try {
