@@ -221,14 +221,14 @@ line 4`;
   describe("Backend API communication", () => {
     it("should construct correct API URLs for localhost", () => {
       const apiHost = "localhost";
-      const apiPort = 8000;
+      const apiPort = 8007;
       const endpoint = "code-sync/get-changes";
       const protocol =
         apiHost === "localhost" || apiHost === "127.0.0.1" ? "http" : "https";
       const expectedUrl = `${protocol}://${apiHost}:${apiPort}/v1/${endpoint}`;
 
       expect(expectedUrl).toBe(
-        "http://localhost:8000/v1/code-sync/get-changes"
+        "http://localhost:8007/v1/code-sync/get-changes"
       );
     });
 

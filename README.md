@@ -459,7 +459,7 @@ The server can be configured using environment variables:
 
 - `CODEPRESS_DEV_PORT`: Port to run the server on (default: 4321)
 - `CODEPRESS_BACKEND_HOST`: Backend API host (default: localhost)
-- `CODEPRESS_BACKEND_PORT`: Backend API port (default: 8000)
+- `CODEPRESS_BACKEND_PORT`: Backend API port (default: 8007)
 - `CODEPRESS_API_TOKEN`: API token for backend authentication
 - `NODE_ENV`: Must be different from 'production' for the server to start
 

@@ -279,7 +279,7 @@ function applyPatternChanges(fileContent, changes) {
 async function callBackendApi(method, endpoint, data, incomingAuthHeader) {
   // Backend API settings
   const apiHost = process.env.CODEPRESS_BACKEND_HOST || "localhost";
-  const apiPort = parseInt(process.env.CODEPRESS_BACKEND_PORT || "8000", 10);
+  const apiPort = parseInt(process.env.CODEPRESS_BACKEND_PORT || "8007", 10);
   const apiPath = endpoint.startsWith("/")
     ? endpoint.replace("/", "")
     : endpoint;
