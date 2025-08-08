@@ -8,6 +8,32 @@ const fetch = require("node-fetch");
 const { decode } = require("./index");
 
 /**
+ * Normalizes a possibly-relative or malformed absolute path into an absolute path.
+ * - Uses CWD for relative paths
+ * - Fixes common case where macOS absolute paths lose their leading slash (e.g., "Users/...")
+ * @param {string} inputPath
+ * @returns {string}
+ */
+function toAbsolutePath(inputPath) {
+  if (!inputPath) return inputPath;
+  const trimmedPath = String(inputPath).trim();
+
+  // Fix macOS-like absolute paths missing the leading slash, e.g. "Users/..."
+  const looksLikePosixAbsNoSlash =
+    process.platform !== "win32" &&
+    (trimmedPath.startsWith("Users" + path.sep) ||
+      trimmedPath.startsWith("Volumes" + path.sep));
+
+  const candidate = looksLikePosixAbsNoSlash
+    ? path.sep + trimmedPath
+    : trimmedPath;
+
+  return path.isAbsolute(candidate)
+    ? candidate
+    : path.join(process.cwd(), candidate);
+}
+
+/**
  * Gets the port to use for the server
  * @returns {number} The configured port
  */
@@ -632,9 +658,8 @@ async function getAgentChanges({
   newHtml,
   githubRepoName,
   encodedLocation,
-  styleChanges,
-  textChanges,
   fileContent,
+  additionalContext,
   authHeader,
 }) {
   console.log(
@@ -649,9 +674,8 @@ async function getAgentChanges({
       new_html: newHtml,
       github_repo_name: githubRepoName,
       encoded_location: encodedLocation,
-      style_changes: styleChanges,
-      text_changes: textChanges,
       file_content: fileContent,
+      additional_context: additionalContext,
     },
     authHeader
   );
@@ -922,9 +946,7 @@ function createApp() {
         for (const [filePath, newContent] of Object.entries(
           backendResponse.updated_files
         )) {
-          const targetFile = filePath.startsWith("/")
-            ? filePath
-            : path.join(process.cwd(), filePath);
+          const targetFile = toAbsolutePath(filePath);
 
           await applyFullFileReplacement(newContent, targetFile);
           updatedFiles.add(targetFile);
@@ -968,6 +990,8 @@ function createApp() {
         new_html,
         style_changes,
         text_changes,
+        additional_context,
+        additionalContext,
       } = data;
       const authHeader =
         request.headers.authorization || request.headers["authorization"];
@@ -990,24 +1014,85 @@ function createApp() {
         styleChanges: style_changes,
         textChanges: text_changes,
         fileContent,
+        additionalContext: additional_context || additionalContext,
         authHeader,
       });
-
-      if (!backendResponse.changes || !Array.isArray(backendResponse.changes)) {
-        throw new Error("Invalid response format from backend");
+      // New shape: updated_files dict of path -> content. Replace all files present
+      if (backendResponse && backendResponse.updated_files) {
+        const results = [];
+        for (const [filePath, newContent] of Object.entries(
+          backendResponse.updated_files
+        )) {
+          const targetFilePath = toAbsolutePath(filePath);
+          const formattedCode = await applyFullFileReplacement(
+            newContent,
+            targetFilePath
+          );
+          results.push({ path: filePath, modified_content: formattedCode });
+        }
+        return reply.code(200).send({
+          success: true,
+          message: `Agent changes applied to ${results.length} file(s).`,
+          files: results,
+        });
       }
 
-      const formattedCode = await applyChangesAndFormat(
-        fileContent,
-        backendResponse.changes,
-        targetFile
-      );
+      // Legacy fallback: maintain previous handling
+      if (backendResponse && backendResponse.modified_content != null) {
+        const modifiedContentStr = String(backendResponse.modified_content);
+        const formattedCode = await applyFullFileReplacement(
+          modifiedContentStr,
+          targetFile
+        );
+        return reply.code(200).send({
+          success: true,
+          message: "Agent changes applied successfully.",
+          modified_content: formattedCode,
+        });
+      }
 
-      return reply.code(200).send({
-        success: true,
-        message: "Agent changes applied successfully.",
-        modified_content: formattedCode,
-      });
+      if (
+        backendResponse &&
+        backendResponse.coding_agent_output &&
+        Array.isArray(backendResponse.coding_agent_output)
+      ) {
+        const fileData =
+          backendResponse.coding_agent_output.find(
+            (f) =>
+              f.path &&
+              (f.path === targetFile ||
+                f.path.endsWith(path.basename(targetFile)))
+          ) || backendResponse.coding_agent_output[0];
+
+        const currentContent = fs.readFileSync(targetFile, "utf8");
+        const formattedCode = await applyChangesAndFormat(
+          currentContent,
+          fileData.changes,
+          targetFile,
+          false
+        );
+        return reply.code(200).send({
+          success: true,
+          message: "Agent changes applied successfully.",
+          modified_content: formattedCode,
+        });
+      }
+
+      if (backendResponse && Array.isArray(backendResponse.changes)) {
+        const formattedCode = await applyChangesAndFormat(
+          fileContent,
+          backendResponse.changes,
+          targetFile,
+          false
+        );
+        return reply.code(200).send({
+          success: true,
+          message: "Agent changes applied successfully.",
+          modified_content: formattedCode,
+        });
+      }
+
+      throw new Error("Invalid response format from backend");
     } catch (err) {
       console.error(`Error in /visual-editor-api-agent: ${err.message}`);
       return reply.code(500).send({ error: err.message });
@@ -1089,9 +1174,7 @@ function createApp() {
             console.log(`\x1b[36mℹ Processing file: ${filePath}\x1b[0m`);
 
             // Determine the target file path
-            const targetFilePath = filePath.startsWith("/")
-              ? filePath
-              : path.join(process.cwd(), filePath);
+            const targetFilePath = toAbsolutePath(filePath);
 
             // Apply the complete file replacement and format
             const formattedCode = await applyFullFileReplacement(
@@ -1124,9 +1207,7 @@ function createApp() {
           console.log(`\x1b[36mℹ Processing file: ${fileData.path}\x1b[0m`);
 
           // Determine the target file path
-          const targetFilePath = fileData.path.startsWith("/")
-            ? fileData.path
-            : path.join(process.cwd(), fileData.path);
+          const targetFilePath = toAbsolutePath(fileData.path);
 
           // Read the current file content for the target file
           const currentFileContent = fs.readFileSync(targetFilePath, "utf8");
