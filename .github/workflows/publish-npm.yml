@@ -3,8 +3,8 @@ name: publish
 on:
   push:
     tags:
-      - 'codepress-engine-v*'
-  workflow_dispatch:
+      - 'codepress-engine-v*'   # e.g. codepress-engine-v0.3.7
+  workflow_dispatch: {}
 
 jobs:
   npm-publish:
@@ -12,16 +12,57 @@ jobs:
     permissions:
       contents: read
       packages: write
+
+    env:
+      CARGO_TERM_COLOR: always
+
     steps:
       - uses: actions/checkout@v4
+
+      # Rust for building the WASM
+      - name: Set up Rust (stable) with WASI-P1
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip1
+
+      # Speed up Rust compiles
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            codepress-swc-plugin
+
+      # Node for packing/publishing the package
       - uses: actions/setup-node@v4
         with:
           node-version: 20
           registry-url: https://npm.pkg.github.com
           scope: '@quantfive'
-      - run: npm ci
-      - run: npm run build
-      - run: npm run build:rust
-      - run: npm publish --access=restricted
+          cache: 'npm'
+
+      - name: Install JS deps
+        run: npm ci
+
+      - name: Build JS
+        run: npm run build
+
+      - name: Build WASM (Rust → swc/codepress_engine.wasm)
+        run: npm run build:rust
+
+      # Sanity: ensure the wasm is in place
+      - name: Check built artifacts
+        run: |
+          ls -lah swc
+          test -f swc/codepress_engine.wasm
+
+      # Sanity: show what will be published
+      - name: Pack & list files
+        run: |
+          FILE=$(npm pack --json | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d)[0].filename))")
+          echo "Packed: $FILE"
+          tar -tf "$FILE" | sed 's/^/ - /'
+
+      - name: Publish to GitHub Packages
+        run: npm publish --access=restricted
         env:
           NODE_AUTH_TOKEN: ${{ secrets.CODEPRESS_PAT }}
