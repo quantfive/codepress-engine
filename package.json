@@ -1,6 +1,6 @@
 {
   "name": "@quantfive/codepress-engine",
-  "version": "0.3.4",
+  "version": "0.3.5",
   "description": "CodePress engine - Babel and SWC plug-ins",
   "main": "./babel/index.js",
   "exports": {
@@ -28,7 +28,10 @@
     "dev:link": "npm run build && npm run build:rust && npm link",
     "prepublishOnly": "npm run build && npm run build:rust"
   },
-  "publishConfig": { "registry": "https://npm.pkg.github.com", "access": "restricted" },
+  "publishConfig": {
+    "registry": "https://npm.pkg.github.com",
+    "access": "restricted"
+  },
   "keywords": [
     "babel",
     "babel-plugin",
