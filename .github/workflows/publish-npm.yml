@@ -19,7 +19,6 @@ jobs:
           node-version: 20
           registry-url: https://npm.pkg.github.com
           scope: '@quantfive'
-      - name: Build plugin (wasm)
       - run: npm ci
       - run: npm run build
       - run: npm run build:rust
