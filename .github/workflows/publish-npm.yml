@@ -4,6 +4,7 @@ on:
   push:
     tags:
       - 'codepress-engine-v*'
+  workflow_dispatch:
 
 jobs:
   npm-publish:
