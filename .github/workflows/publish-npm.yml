@@ -20,10 +20,9 @@ jobs:
           registry-url: https://npm.pkg.github.com
           scope: '@quantfive'
       - name: Build plugin (wasm)
-        run: |
-          npm ci
-          npm run build:rust
-      - name: Publish to GitHub Packages
-        run: npm publish --access=restricted
+      - run: npm ci
+      - run: npm run build
+      - run: npm run build:rust
+      - run: npm publish --access=restricted
         env:
           NODE_AUTH_TOKEN: ${{ secrets.CODEPRESS_PAT }}
