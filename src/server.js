@@ -580,43 +580,6 @@ async function applyChangesAndFormat(
 }
 
 /**
- * Service: Get AI changes from backend
- * @param {Object} params Request parameters
- * @returns {Promise<Object>} Backend response
- */
-async function getAiChanges({
-  encodedLocation,
-  aiInstruction,
-  fileContent,
-  githubRepoName,
-  githubMode,
-  authHeader,
-}) {
-  console.log(
-    `\x1b[36mℹ Getting AI changes from backend for file encoded_location: ${encodedLocation}\x1b[0m`
-  );
-  console.log(`\x1b[36mℹ AI Instruction: ${aiInstruction}\x1b[0m`);
-
-  // Get project structure
-  const projectStructure = getProjectStructure();
-  console.log(`\x1b[36mℹ Including project structure in AI request\x1b[0m`);
-
-  return await callBackendApi(
-    "POST",
-    "code-sync/get-ai-changes",
-    {
-      encoded_location: encodedLocation,
-      ai_instruction: aiInstruction,
-      file_content: fileContent,
-      github_repo_name: githubRepoName,
-      github_mode: githubMode,
-      project_structure: projectStructure,
-    },
-    authHeader
-  );
-}
-
-/**
  * Service: Get changes from backend (original endpoint)
  * @param {Object} params Request parameters
  * @param {string} params.githubRepoName The GitHub repository name
@@ -654,8 +617,6 @@ async function getChanges({ githubRepoName, fileChanges, authHeader }) {
  * @returns {Promise<Object>} Backend response
  */
 async function getAgentChanges({
-  oldHtml,
-  newHtml,
   githubRepoName,
   encodedLocation,
   fileContent,
@@ -670,8 +631,6 @@ async function getAgentChanges({
     "POST",
     "code-sync/get-agent-changes",
     {
-      old_html: oldHtml,
-      new_html: newHtml,
       github_repo_name: githubRepoName,
       encoded_location: encodedLocation,
       file_content: fileContent,
@@ -986,8 +945,6 @@ function createApp() {
         github_repo_name,
         image_data,
         filename,
-        old_html,
-        new_html,
         style_changes,
         text_changes,
         additional_context,
@@ -1007,8 +964,6 @@ function createApp() {
       await saveImageData(image_data, filename);
 
       const backendResponse = await getAgentChanges({
-        oldHtml: old_html,
-        newHtml: new_html,
         githubRepoName: github_repo_name,
         encodedLocation: encoded_location,
         styleChanges: style_changes,
@@ -1096,152 +1051,6 @@ function createApp() {
     } catch (err) {
       console.error(`Error in /visual-editor-api-agent: ${err.message}`);
       return reply.code(500).send({ error: err.message });
-    }
-  });
-
-  // Visual editor API route for AI changes
-  app.post("/visual-editor-api-ai", async (request, reply) => {
-    try {
-      const data = request.body;
-      const {
-        encoded_location,
-        github_repo_name,
-        github_mode,
-        image_data,
-        filename,
-        aiInstruction,
-        ai_instruction,
-      } = data;
-
-      // Use ai_instruction if provided, otherwise use aiInstruction
-      const actualAiInstruction = ai_instruction || aiInstruction;
-      const authHeader =
-        request.headers.authorization || request.headers["authorization"];
-
-      // Debug: Log auth header info
-      console.log(
-        `\x1b[36mℹ [visual-editor-api-ai] Auth header received: ${authHeader ? "[PRESENT]" : "[MISSING]"}\x1b[0m`
-      );
-
-      // Debug logging to see what's being received
-      console.log(
-        `\x1b[36mℹ Visual Editor AI API Request data: ${JSON.stringify({
-          encoded_location,
-          aiInstruction: actualAiInstruction ? "[present]" : undefined,
-          image_data: image_data ? "[present]" : undefined,
-        })}\x1b[0m`
-      );
-
-      // Validate request data for AI mode
-      const validation = validateRequestData(data, true);
-      if (!validation.isValid) {
-        return reply.code(400).send({
-          error: validation.error,
-          ...validation.errorData,
-        });
-      }
-
-      try {
-        // Read file content
-        const { filePath, targetFile, fileContent } =
-          readFileFromEncodedLocation(encoded_location);
-
-        // Save image if present
-        await saveImageData(image_data, filename);
-
-        // Get AI changes from backend
-        const backendResponse = await getAiChanges({
-          encodedLocation: encoded_location,
-          aiInstruction: actualAiInstruction,
-          fileContent,
-          githubRepoName: github_repo_name,
-          githubMode: github_mode,
-          authHeader,
-        });
-
-        console.log(`\x1b[36mℹ Received response from backend\x1b[0m`);
-
-        // Check if the response has updated_files field (new format)
-        if (backendResponse.updated_files) {
-          console.log(`\x1b[36mℹ Processing updated_files format\x1b[0m`);
-
-          const results = [];
-
-          // Process each file in updated_files
-          for (const [filePath, newContent] of Object.entries(
-            backendResponse.updated_files
-          )) {
-            console.log(`\x1b[36mℹ Processing file: ${filePath}\x1b[0m`);
-
-            // Determine the target file path
-            const targetFilePath = toAbsolutePath(filePath);
-
-            // Apply the complete file replacement and format
-            const formattedCode = await applyFullFileReplacement(
-              newContent,
-              targetFilePath
-            );
-
-            console.log(
-              `\x1b[32m✓ Updated file ${filePath} with complete AI-generated content\x1b[0m`
-            );
-
-            results.push({
-              path: filePath,
-              modified_content: formattedCode,
-            });
-          }
-
-          return reply.code(200).send({
-            success: true,
-            message: `Applied AI changes to ${results.length} files`,
-            files: results,
-          });
-        }
-
-        // Fallback to old format if updated_files is not present
-        const responseData = backendResponse.coding_agent_output;
-        const results = [];
-
-        for (const fileData of responseData) {
-          console.log(`\x1b[36mℹ Processing file: ${fileData.path}\x1b[0m`);
-
-          // Determine the target file path
-          const targetFilePath = toAbsolutePath(fileData.path);
-
-          // Read the current file content for the target file
-          const currentFileContent = fs.readFileSync(targetFilePath, "utf8");
-
-          // Apply the changes using the existing function
-          const formattedCode = await applyChangesAndFormat(
-            currentFileContent,
-            fileData.changes,
-            targetFilePath
-          );
-
-          console.log(
-            `\x1b[32m✓ Updated file ${fileData.path} with ${fileData.changes.length} AI-generated changes\x1b[0m`
-          );
-
-          results.push({
-            path: fileData.path,
-            changes_applied: fileData.changes.length,
-            modified_content: formattedCode,
-          });
-        }
-
-        return reply.code(200).send({
-          success: true,
-          message: `Applied AI changes to ${results.length} files`,
-          files: results,
-        });
-      } catch (apiError) {
-        console.error("Error applying AI changes:", apiError);
-        return reply.code(500).send({ error: apiError.message });
-      }
-    } catch (parseError) {
-      console.error("Error parsing request data:", parseError);
-      return reply.code(400).send({ error: "Invalid JSON" });
     }
   });
 
