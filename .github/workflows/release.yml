@@ -1,0 +1,138 @@
+name: Release and Publish
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  NODE_VERSION: "20"
+  REGISTRY_URL: "https://npm.pkg.github.com"
+  SCOPE: "@quantfive"
+
+jobs:
+  check-version:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+    outputs:
+      version_changed: ${{ steps.version_check.outputs.changed }}
+      new_version: ${{ steps.version_check.outputs.version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # Scope registry to @quantfive so public deps still come from npmjs.org
+      - name: Setup Node (scoped registry)
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          registry-url: ${{ env.REGISTRY_URL }}
+          scope: ${{ env.SCOPE }}
+
+      - name: Install dependencies
+        run: npm ci
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Check if version should be published
+        id: version_check
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          CURRENT_VERSION=$(node -p "require('./package.json').version")
+          LATEST_PUBLISHED=$(npm view @quantfive/codepress-engine version 2>/dev/null || echo "0.0.0")
+          echo "current_version=$CURRENT_VERSION" >> $GITHUB_OUTPUT
+          echo "latest_published=$LATEST_PUBLISHED" >> $GITHUB_OUTPUT
+
+          if [ "$CURRENT_VERSION" != "$LATEST_PUBLISHED" ]; then
+            echo "changed=true" >> $GITHUB_OUTPUT
+            echo "version=$CURRENT_VERSION" >> $GITHUB_OUTPUT
+          else
+            echo "changed=false" >> $GITHUB_OUTPUT
+          fi
+
+  build-and-publish:
+    needs: check-version
+    if: needs.check-version.outputs.version_changed == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node (scoped registry)
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          registry-url: ${{ env.REGISTRY_URL }}
+          scope: ${{ env.SCOPE }}
+
+      - name: Setup Rust (stable + WASI)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip1
+
+      - name: Install deps
+        run: npm ci
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build JS
+        run: npm run build
+
+      - name: Build Rust WASM plugin
+        run: npm run build:rust
+
+      # Optional: verify the pack contents before publishing
+      - name: Dry-run pack
+        run: npm pack --dry-run
+
+      # Race safety: re-check just before publish
+      - name: Ensure version not yet published
+        id: recheck
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          CURRENT_VERSION=$(node -p "require('./package.json').version")
+          FOUND=$(npm view @quantfive/codepress-engine versions --json | node -e "let a=JSON.parse(require('fs').readFileSync(0,'utf8'));console.log(a.includes(process.argv[1]))" "$CURRENT_VERSION")
+          if [ "$FOUND" = "true" ]; then
+            echo "already=true" >> $GITHUB_OUTPUT
+          else
+            echo "already=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Publish to GitHub Packages
+        if: steps.recheck.outputs.already == 'false'
+        run: npm publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create Git tag (after successful publish)
+        if: steps.recheck.outputs.already == 'false'
+        run: |
+          VERSION=${{ needs.check-version.outputs.new_version }}
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          git tag -a "v$VERSION" -m "Release v$VERSION"
+          git push origin "v$VERSION"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ needs.check-version.outputs.new_version }}
+          name: Release v${{ needs.check-version.outputs.new_version }}
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

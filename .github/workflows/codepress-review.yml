@@ -3,14 +3,17 @@ name: CodePress Review
 on:
   pull_request:
     types: [opened, reopened]
+  workflow_dispatch: # Allows manual triggering from the Actions tab
 
 permissions:
   pull-requests: write
   contents: read
+  issues: read # Required to read PR comments
 
 jobs:
   ai-review:
     runs-on: ubuntu-latest
+    # Run on: PR events, manual triggers, or PR comments containing '@codepress/review'
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -22,7 +25,7 @@ jobs:
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           model_provider: "openai"
-          model_name: "gpt-5-mini"
+          model_name: "o4-mini"
           openai_api_key: ${{ secrets.OPENAI_API_KEY }}
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           gemini_api_key: ${{ secrets.GEMINI_API_KEY }}
