@@ -19,6 +19,7 @@ jobs:
         with:
           node-version: 20
           cache: "npm"
+          registry-url: "https://npm.pkg.github.com"
 
       - name: Set up Rust
         uses: actions-rs/toolchain@v1
@@ -50,6 +51,7 @@ jobs:
           cp package-lock.json publish/
           cp README.md publish/
           cp LICENSE publish/
+          cp .npmrc publish/
 
           # Copy examples for documentation
           cp -r examples/ publish/
@@ -58,6 +60,13 @@ jobs:
           ls -la publish/swc/
           ls -la publish/babel/
           ls -la publish/dist/
+
+      - name: Publish to GitHub Packages
+        run: |
+          cd publish
+          npm publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Deploy to build branch
         uses: peaceiris/actions-gh-pages@v4

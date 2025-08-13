@@ -1,6 +1,6 @@
 {
   "name": "@quantfive/codepress-engine",
-  "version": "0.3.0",
+  "version": "0.3.9",
   "description": "CodePress engine - Babel and SWC plug-ins",
   "main": "./babel/index.js",
   "exports": {
@@ -25,7 +25,10 @@
     "build": "babel src --out-dir dist --copy-files",
     "build:rust": "mkdir -p swc && cargo build --release --target wasm32-wasip1 --manifest-path codepress-swc-plugin/Cargo.toml && cp codepress-swc-plugin/target/wasm32-wasip1/release/codepress_swc_plugin.wasm swc/codepress_engine.wasm",
     "test": "jest",
-    "dev:link": "npm run build && npm run build:rust && npm link"
+    "dev:link": "npm run build && npm run build:rust && npm link",
+    "version:patch": "npm version patch",
+    "version:minor": "npm version minor",
+    "version:major": "npm version major"
   },
   "keywords": [
     "babel",
@@ -36,6 +39,13 @@
   ],
   "author": "",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/quantfive/codepress-engine.git"
+  },
+  "publishConfig": {
+    "registry": "https://npm.pkg.github.com"
+  },
   "peerDependencies": {
     "@babel/core": "^7.0.0"
   },
