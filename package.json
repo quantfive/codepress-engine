@@ -25,8 +25,13 @@
     "build": "babel src --out-dir dist --copy-files",
     "build:rust": "mkdir -p swc && cargo build --release --target wasm32-wasip1 --manifest-path codepress-swc-plugin/Cargo.toml && cp codepress-swc-plugin/target/wasm32-wasip1/release/codepress_swc_plugin.wasm swc/codepress_engine.wasm",
     "test": "jest",
+    "lint": "eslint src/ babel/ test/ tests/ --ext .js",
+    "lint:fix": "eslint src/ babel/ test/ tests/ --ext .js --fix",
+    "format": "prettier --write \"src/**/*.js\" \"babel/**/*.js\" \"test/**/*.js\" \"tests/**/*.js\" \"*.js\" \"*.md\"",
+    "format:check": "prettier --check \"src/**/*.js\" \"babel/**/*.js\" \"test/**/*.js\" \"tests/**/*.js\" \"*.js\" \"*.md\"",
+    "quality": "npm run lint && npm run format:check && npm test",
     "dev:link": "npm run build && npm run build:rust && npm link",
-    "prepublishOnly": "npm run build && npm run build:rust",
+    "prepublishOnly": "npm run quality && npm run build && npm run build:rust",
     "version:patch": "npm version patch",
     "version:minor": "npm version minor",
     "version:major": "npm version major"
@@ -59,6 +64,7 @@
     "@babel/preset-react": "^7.26.3",
     "@swc/core": "^1.11.31",
     "@swc/wasm": "^1",
+    "eslint": "^8.57.0",
     "jest": "^29.7.0"
   },
   "dependencies": {

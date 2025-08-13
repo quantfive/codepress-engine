@@ -1,119 +1,11 @@
-// babel-plugin-codepress-html
+/**
+ * @fileoverview Babel plugin for CodePress HTML attribute injection (babel/ directory)
+ * This is the production-ready babel plugin copy that uses shared utilities
+ */
+
 const path = require("path");
-const { execSync } = require("child_process");
-
-// encoder (build time)
-const SECRET = Buffer.from("codepress-file-obfuscation"); // Use a slightly more descriptive key
-function encode(relPath) {
-  if (!relPath) return "";
-  const xored = Buffer.from(relPath).map(
-    (b, i) => b ^ SECRET[i % SECRET.length]
-  );
-  return xored
-    .toString("base64") // 1.2× length of path
-    .replace(/[+/=]/g, (c) => ({ "+": "-", "/": "_", "=": "" })[c]); // URL-safe
-}
-
-// decoder (potentially for testing or external use)
-function decode(attr) {
-  if (!attr) return "";
-  const buf = Buffer.from(
-    attr.replace(/[-_]/g, (c) => ({ "-": "+", _: "/" })[c]),
-    "base64"
-  );
-  return buf.map((b, i) => b ^ SECRET[i % SECRET.length]).toString();
-}
-
-/**
- * Detects the current git branch
- * @returns {string} The current branch name or 'main' if detection fails
- */
-function detectGitBranch() {
-  const fromEnv =
-    process.env.GIT_BRANCH ||
-    // Vercel
-    process.env.VERCEL_GIT_COMMIT_REF ||
-    // GitHub Actions (PRs use GITHUB_HEAD_REF, pushes use GITHUB_REF_NAME)
-    process.env.GITHUB_HEAD_REF ||
-    process.env.GITHUB_REF_NAME ||
-    // GitLab CI
-    process.env.CI_COMMIT_REF_NAME ||
-    // CircleCI
-    process.env.CIRCLE_BRANCH ||
-    // Bitbucket Pipelines
-    process.env.BITBUCKET_BRANCH ||
-    // Netlify
-    process.env.BRANCH;
-  if (fromEnv) {
-    return fromEnv;
-  }
-
-  try {
-    // Run git command to get current branch
-    const branch = execSync("git rev-parse --abbrev-ref HEAD", {
-      encoding: "utf8",
-    }).trim();
-    return branch || "main";
-  } catch (error) {
-    console.log(
-      "\x1b[33m⚠ Could not detect git branch, using default: main\x1b[0m"
-    );
-    return "main";
-  }
-}
-
-/**
- * Extracts repository ID from GitHub remote URL
- * Supports formats like:
- * - https://github.com/owner/repo.git
- * - git@github.com:owner/repo.git
- * @returns {string|null} Repository ID if detected, null otherwise
- */
-function detectGitRepoName() {
-  try {
-    // Get the remote URL for the 'origin' remote
-    const remoteUrl = execSync("git config --get remote.origin.url", {
-      encoding: "utf8",
-    }).trim();
-
-    if (!remoteUrl) {
-      return null;
-    }
-
-    let owner, repo;
-
-    // Parse HTTPS URL format: https://github.com/owner/repo.git
-    const httpsMatch = remoteUrl.match(
-      /https:\/\/github\.com\/([^\/]+)\/([^\/\.]+)(?:\.git)?$/
-    );
-    if (httpsMatch) {
-      [, owner, repo] = httpsMatch;
-    }
-
-    // Parse SSH URL format: git@github.com:owner/repo.git
-    const sshMatch = remoteUrl.match(
-      /git@github\.com:([^\/]+)\/([^\/\.]+)(?:\.git)?$/
-    );
-    if (sshMatch) {
-      [, owner, repo] = sshMatch;
-    }
-
-    if (owner && repo) {
-      // For CodePress, we'll assume the repo ID is in format "owner/repo"
-      const repoId = `${owner}/${repo}`;
-      console.log(`\x1b[32m✓ Detected GitHub repository: ${repoId}\x1b[0m`);
-      return repoId;
-    }
-
-    console.log(
-      "\x1b[33m⚠ Could not parse GitHub repository from remote URL\x1b[0m"
-    );
-    return null;
-  } catch (error) {
-    console.log("\x1b[33m⚠ Could not detect git repository\x1b[0m");
-    return null;
-  }
-}
+const { encode, decode } = require("../src/utils/encoding");
+const { detectGitBranch, detectGitRepoName } = require("../src/utils/git");
 
 /**
  * Babel plugin that adds unique file identifiers to JSX elements
@@ -132,7 +24,7 @@ const plugin = function (babel, options = {}) {
   const currentRepoName = detectGitRepoName(); // Renamed from currentRepoId
 
   // Determine environment
-  const isProduction = process.env.NODE_ENV === "production";
+  const _isProduction = process.env.NODE_ENV === "production";
 
   // Flag to ensure repo/branch attributes are added only once globally
   let globalAttributesAdded = false;
@@ -162,7 +54,9 @@ const plugin = function (babel, options = {}) {
           const relFilePath = path.relative(process.cwd(), fullFilePath);
 
           // Skip node_modules files
-          if (relFilePath.includes("node_modules") || !relFilePath) return;
+          if (relFilePath.includes("node_modules") || !relFilePath) {
+            return;
+          }
 
           // Encode the relative path
           const encodedPath = encode(relFilePath);
@@ -177,10 +71,12 @@ const plugin = function (babel, options = {}) {
 
       JSXOpeningElement(nodePath, state) {
         const encodedPath = state.file.encodedPath;
-        if (!encodedPath) return; // Skip if no path (e.g., node_modules, empty path)
+        if (!encodedPath) {
+          return;
+        } // Skip if no path (e.g., node_modules, empty path)
 
         const { node } = nodePath;
-        const t = babel.types; // Ensure babel types are available
+        const _t = babel.types; // Ensure babel types are available
 
         // --- Add/Update encoded file path attribute (codepress-data-fp) ---
         const startLine = nodePath.node.loc.start.line;
@@ -261,7 +157,7 @@ const plugin = function (babel, options = {}) {
             // Mark that we've added attributes globally
             globalAttributesAdded = true;
             console.log(
-              `\x1b[36mℹ Repo/branch attributes added globally. Won't add again.\x1b[0m`
+              "\x1b[36mℹ Repo/branch attributes added globally. Won't add again.\x1b[0m"
             );
           }
         }

@@ -451,8 +451,12 @@ line 4`;
       // Mock the file reading behavior
       const mockReadFile = (encodedLocation) => {
         const encodedFilePath = encodedLocation.split(":")[0];
-        if (encodedFilePath === "encoded123") return "content for file 1";
-        if (encodedFilePath === "encoded456") return "content for file 2";
+        if (encodedFilePath === "encoded123") {
+          return "content for file 1";
+        }
+        if (encodedFilePath === "encoded456") {
+          return "content for file 2";
+        }
         return "default content";
       };
 

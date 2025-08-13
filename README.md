@@ -60,9 +60,7 @@ module.exports = {
 
 ```javascript
 // Build script or webpack loader
-const {
-  transformWithCodePress,
-} = require("@quantfive/codepress-engine/swc-plugin");
+const { transformWithCodePress } = require("@quantfive/codepress-engine/swc-plugin");
 
 async function transformFile(code, filePath) {
   const result = await transformWithCodePress(code, filePath, {
@@ -82,9 +80,7 @@ async function transformFile(code, filePath) {
 
 ```javascript
 // webpack.config.js
-const {
-  transformWithCodePress,
-} = require("@quantfive/codepress-engine/swc-plugin");
+const { transformWithCodePress } = require("@quantfive/codepress-engine/swc-plugin");
 
 module.exports = {
   module: {
@@ -123,9 +119,7 @@ module.exports = function (source) {
 
 ```javascript
 // next.config.js
-const {
-  transformWithCodePress,
-} = require("@quantfive/codepress-engine/swc-plugin");
+const { transformWithCodePress } = require("@quantfive/codepress-engine/swc-plugin");
 
 module.exports = {
   webpack: (config) => {
@@ -347,9 +341,7 @@ The plugin includes a utility module for extracting repository and branch inform
 
 ```javascript
 // In your browser extension
-const {
-  extractRepositoryInfo,
-} = require("@quantfive/codepress-engine/hash-util");
+const { extractRepositoryInfo } = require("@quantfive/codepress-engine/hash-util");
 
 // Automatically detect repository info from the DOM
 function detectRepositoryInfo() {

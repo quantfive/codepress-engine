@@ -111,51 +111,53 @@ if (args.length > 0) {
   const command = args[0];
 
   switch (command) {
-    case "server":
-      runServer();
-      break;
+  case "server":
+    runServer();
+    break;
 
-    case "setup":
-      setupDependencies();
-      break;
+  case "setup":
+    setupDependencies();
+    break;
 
-    case "help":
-      showHelp();
-      break;
+  case "help":
+    showHelp();
+    break;
 
-    default:
-      // Start server and pass through all arguments to child process
-      const server = startServer();
+  default: {
+    // Start server and pass through all arguments to child process
+    const server = startServer();
 
-      const childProcess = spawn(args[0], args.slice(1), {
-        stdio: "inherit",
-        shell: true,
-      });
+    const childProcess = spawn(args[0], args.slice(1), {
+      stdio: "inherit",
+      shell: true,
+    });
 
-      childProcess.on("error", (error) => {
-        console.error(
-          `\x1b[31m✗ Failed to start process: ${error.message}\x1b[0m`
-        );
-        process.exit(1);
-      });
+    childProcess.on("error", (error) => {
+      console.error(
+        `\x1b[31m✗ Failed to start process: ${error.message}\x1b[0m`
+      );
+      process.exit(1);
+    });
 
-      childProcess.on("close", (code) => {
-        console.log(`\x1b[33mℹ Child process exited with code ${code}\x1b[0m`);
-        // Keep the server running even if the child process exits
-      });
+    childProcess.on("close", (code) => {
+      console.log(`\x1b[33mℹ Child process exited with code ${code}\x1b[0m`);
+      // Keep the server running even if the child process exits
+    });
 
-      // Handle process signals
-      process.on("SIGINT", () => {
-        console.log("\n\x1b[33mℹ Shutting down Codepress server...\x1b[0m");
-        if (server) {
-          server.close(() => {
-            console.log("\x1b[32m✓ Codepress server stopped\x1b[0m");
-            process.exit(0);
-          });
-        } else {
+    // Handle process signals
+    process.on("SIGINT", () => {
+      console.log("\n\x1b[33mℹ Shutting down Codepress server...\x1b[0m");
+      if (server) {
+        server.close(() => {
+          console.log("\x1b[32m✓ Codepress server stopped\x1b[0m");
           process.exit(0);
-        }
-      });
+        });
+      } else {
+        process.exit(0);
+      }
+    });
+    break;
+  }
   }
 } else {
   // No arguments provided, show help

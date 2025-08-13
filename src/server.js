@@ -1,21 +1,27 @@
-// Codepress Dev Server
+/**
+ * @fileoverview Codepress Development Server
+ * Provides API endpoints for visual editing and file modification
+ */
+
 const fastify = require("fastify");
 const os = require("os");
 const fs = require("fs");
 const path = require("path");
 const prettier = require("prettier");
 const fetch = require("node-fetch");
-const { decode } = require("./index");
+const { decode } = require("./utils/encoding");
 
 /**
  * Normalizes a possibly-relative or malformed absolute path into an absolute path.
  * - Uses CWD for relative paths
  * - Fixes common case where macOS absolute paths lose their leading slash (e.g., "Users/...")
- * @param {string} inputPath
- * @returns {string}
+ * @param {string} inputPath - The input file path to normalize
+ * @returns {string} The normalized absolute path
  */
 function toAbsolutePath(inputPath) {
-  if (!inputPath) return inputPath;
+  if (!inputPath) {
+    return inputPath;
+  }
   const trimmedPath = String(inputPath).trim();
 
   // Fix macOS-like absolute paths missing the leading slash, e.g. "Users/..."
@@ -34,8 +40,8 @@ function toAbsolutePath(inputPath) {
 }
 
 /**
- * Gets the port to use for the server
- * @returns {number} The configured port
+ * Gets the port to use for the server from environment variables
+ * @returns {number} The configured port (default: 4321)
  */
 function getServerPort() {
   // Use environment variable or default to 4321
@@ -43,8 +49,9 @@ function getServerPort() {
 }
 
 /**
- * Create a lock file to ensure only one instance runs
- * @returns {boolean} True if lock was acquired, false otherwise
+ * Create a lock file to ensure only one server instance runs system-wide
+ * Uses process PID to detect stale locks from crashed processes
+ * @returns {boolean} True if lock was acquired, false if another instance is running
  */
 function acquireLock() {
   try {
@@ -88,14 +95,16 @@ function acquireLock() {
 let serverInstance = null;
 
 /**
- * Apply text-based changes to the file content directly based on the new format.
- * @param {string} fileContent The original file content
- * @param {Array<Object>} changes The changes to apply in the new format.
- *        Each change object can have:
- *        - { type: "insert", line: number, codeChange: string }
- *        - { type: "delete", startLine: number, endLine: number }
- *        - { type: "replace", startLine: number, endLine: number, codeChange: string }
- * @returns {string} The modified file content
+ * Apply text-based changes to file content using line-based operations
+ * Changes are processed in reverse order to prevent line number shifts
+ * @param {string} fileContent - The original file content
+ * @param {Array<Object>} changes - Array of change objects to apply
+ * @param {('insert'|'delete'|'replace')} changes[].type - Type of change operation
+ * @param {number} [changes[].line] - Target line for insert operations (1-indexed)
+ * @param {number} [changes[].startLine] - Start line for delete/replace operations (1-indexed)
+ * @param {number} [changes[].endLine] - End line for delete/replace operations (1-indexed)
+ * @param {string} [changes[].codeChange] - New code content for insert/replace operations
+ * @returns {string} The modified file content with changes applied
  */
 function applyTextChanges(fileContent, changes) {
   const lines = fileContent.split("\n");
@@ -117,43 +126,43 @@ function applyTextChanges(fileContent, changes) {
     const lineIdx = change.line ? change.line - 1 : undefined; // For insert
 
     switch (type) {
-      case "replace":
-        if (
-          startIdx !== undefined &&
+    case "replace":
+      if (
+        startIdx !== undefined &&
           endIdx !== undefined &&
           change.codeChange !== undefined
-        ) {
-          // Decode newline characters within the codeChange string
-          const decodedCodeChange = change.codeChange.replace(/\\n/g, "\n");
-          const replacementLines = decodedCodeChange.split("\n");
-          lines.splice(startIdx, endIdx - startIdx + 1, ...replacementLines);
-        } else {
-          console.warn("Invalid 'replace' change object:", change);
-        }
-        break;
+      ) {
+        // Decode newline characters within the codeChange string
+        const decodedCodeChange = change.codeChange.replace(/\\n/g, "\n");
+        const replacementLines = decodedCodeChange.split("\n");
+        lines.splice(startIdx, endIdx - startIdx + 1, ...replacementLines);
+      } else {
+        console.warn("Invalid 'replace' change object:", change);
+      }
+      break;
 
-      case "delete":
-        if (startIdx !== undefined && endIdx !== undefined) {
-          lines.splice(startIdx, endIdx - startIdx + 1);
-        } else {
-          console.warn("Invalid 'delete' change object:", change);
-        }
-        break;
+    case "delete":
+      if (startIdx !== undefined && endIdx !== undefined) {
+        lines.splice(startIdx, endIdx - startIdx + 1);
+      } else {
+        console.warn("Invalid 'delete' change object:", change);
+      }
+      break;
 
-      case "insert":
-        if (lineIdx !== undefined && change.codeChange !== undefined) {
-          // Decode newline characters within the codeChange string
-          const decodedCodeChange = change.codeChange.replace(/\\n/g, "\n");
-          // Insert *after* the specified line index
-          const insertionLines = decodedCodeChange.split("\n");
-          lines.splice(lineIdx + 1, 0, ...insertionLines);
-        } else {
-          console.warn("Invalid 'insert' change object:", change);
-        }
-        break;
+    case "insert":
+      if (lineIdx !== undefined && change.codeChange !== undefined) {
+        // Decode newline characters within the codeChange string
+        const decodedCodeChange = change.codeChange.replace(/\\n/g, "\n");
+        // Insert *after* the specified line index
+        const insertionLines = decodedCodeChange.split("\n");
+        lines.splice(lineIdx + 1, 0, ...insertionLines);
+      } else {
+        console.warn("Invalid 'insert' change object:", change);
+      }
+      break;
 
-      default:
-        console.warn(`Unknown change type: ${type}`);
+    default:
+      console.warn(`Unknown change type: ${type}`);
     }
   }
 
@@ -181,7 +190,7 @@ function applyPatternChanges(fileContent, changes) {
       if (findPatterns.has(change.find)) {
         const existingIndex = findPatterns.get(change.find);
         console.warn(
-          `\x1b[33m⚠ CONFLICT DETECTED: Multiple changes target the same pattern\x1b[0m`
+          "\x1b[33m⚠ CONFLICT DETECTED: Multiple changes target the same pattern\x1b[0m"
         );
         console.warn(
           `  Change ${existingIndex + 1}: ${changes[existingIndex].explanation}`
@@ -189,7 +198,7 @@ function applyPatternChanges(fileContent, changes) {
         console.warn(`  Change ${index + 1}: ${change.explanation}`);
         console.warn(`  Pattern: ${change.find.substring(0, 100)}...`);
         console.warn(
-          `\x1b[33m  → Only the first change will be applied\x1b[0m`
+          "\x1b[33m  → Only the first change will be applied\x1b[0m"
         );
       } else {
         findPatterns.set(change.find, index);
@@ -203,91 +212,91 @@ function applyPatternChanges(fileContent, changes) {
     console.log(`\x1b[36mℹ Applying ${type} change: ${explanation}\x1b[0m`);
 
     switch (type) {
-      case "replace":
-        if (find && replaceWith !== undefined) {
-          if (modifiedContent.includes(find)) {
-            // Check if replaceWith contains malformed JSX
-            const openTags = (replaceWith.match(/<[^\/][^>]*>/g) || []).length;
-            const closeTags = (replaceWith.match(/<\/[^>]*>/g) || []).length;
+    case "replace":
+      if (find && replaceWith !== undefined) {
+        if (modifiedContent.includes(find)) {
+          // Check if replaceWith contains malformed JSX
+          const openTags = (replaceWith.match(/<[^\/][^>]*>/g) || []).length;
+          const closeTags = (replaceWith.match(/<\/[^>]*>/g) || []).length;
 
-            if (openTags !== closeTags) {
-              console.warn(
-                `\x1b[33m⚠ POTENTIAL JSX MALFORMATION: Unmatched tags in replacement\x1b[0m`
-              );
-              console.warn(
-                `  Open tags: ${openTags}, Close tags: ${closeTags}`
-              );
-              console.warn(
-                `  Replacement: ${replaceWith.substring(0, 200)}...`
-              );
-            }
-
-            modifiedContent = modifiedContent.replace(find, replaceWith);
-            console.log(`\x1b[32m✓ Replaced pattern successfully\x1b[0m`);
-          } else {
+          if (openTags !== closeTags) {
             console.warn(
-              `\x1b[33m⚠ Pattern not found for replace: ${find.substring(0, 50)}...\x1b[0m`
+              "\x1b[33m⚠ POTENTIAL JSX MALFORMATION: Unmatched tags in replacement\x1b[0m"
             );
             console.warn(
-              `\x1b[33m  This might be due to a previous change modifying the content\x1b[0m`
+              `  Open tags: ${openTags}, Close tags: ${closeTags}`
+            );
+            console.warn(
+              `  Replacement: ${replaceWith.substring(0, 200)}...`
             );
           }
-        } else {
-          console.warn("Invalid 'replace' change object:", change);
-        }
-        break;
 
-      case "insertAfter":
-        if (find && insert !== undefined) {
-          if (modifiedContent.includes(find)) {
-            modifiedContent = modifiedContent.replace(find, find + insert);
-            console.log(
-              `\x1b[32m✓ Inserted content after pattern successfully\x1b[0m`
-            );
-          } else {
-            console.warn(
-              `\x1b[33m⚠ Pattern not found for insertAfter: ${find.substring(0, 50)}...\x1b[0m`
-            );
-          }
+          modifiedContent = modifiedContent.replace(find, replaceWith);
+          console.log("\x1b[32m✓ Replaced pattern successfully\x1b[0m");
         } else {
-          console.warn("Invalid 'insertAfter' change object:", change);
+          console.warn(
+            `\x1b[33m⚠ Pattern not found for replace: ${find.substring(0, 50)}...\x1b[0m`
+          );
+          console.warn(
+            "\x1b[33m  This might be due to a previous change modifying the content\x1b[0m"
+          );
         }
-        break;
+      } else {
+        console.warn("Invalid 'replace' change object:", change);
+      }
+      break;
 
-      case "insertBefore":
-        if (find && insert !== undefined) {
-          if (modifiedContent.includes(find)) {
-            modifiedContent = modifiedContent.replace(find, insert + find);
-            console.log(
-              `\x1b[32m✓ Inserted content before pattern successfully\x1b[0m`
-            );
-          } else {
-            console.warn(
-              `\x1b[33m⚠ Pattern not found for insertBefore: ${find.substring(0, 50)}...\x1b[0m`
-            );
-          }
+    case "insertAfter":
+      if (find && insert !== undefined) {
+        if (modifiedContent.includes(find)) {
+          modifiedContent = modifiedContent.replace(find, find + insert);
+          console.log(
+            "\x1b[32m✓ Inserted content after pattern successfully\x1b[0m"
+          );
         } else {
-          console.warn("Invalid 'insertBefore' change object:", change);
+          console.warn(
+            `\x1b[33m⚠ Pattern not found for insertAfter: ${find.substring(0, 50)}...\x1b[0m`
+          );
         }
-        break;
+      } else {
+        console.warn("Invalid 'insertAfter' change object:", change);
+      }
+      break;
 
-      case "delete":
-        if (find) {
-          if (modifiedContent.includes(find)) {
-            modifiedContent = modifiedContent.replace(find, "");
-            console.log(`\x1b[32m✓ Deleted pattern successfully\x1b[0m`);
-          } else {
-            console.warn(
-              `\x1b[33m⚠ Pattern not found for delete: ${find.substring(0, 50)}...\x1b[0m`
-            );
-          }
+    case "insertBefore":
+      if (find && insert !== undefined) {
+        if (modifiedContent.includes(find)) {
+          modifiedContent = modifiedContent.replace(find, insert + find);
+          console.log(
+            "\x1b[32m✓ Inserted content before pattern successfully\x1b[0m"
+          );
         } else {
-          console.warn("Invalid 'delete' change object:", change);
+          console.warn(
+            `\x1b[33m⚠ Pattern not found for insertBefore: ${find.substring(0, 50)}...\x1b[0m`
+          );
         }
-        break;
+      } else {
+        console.warn("Invalid 'insertBefore' change object:", change);
+      }
+      break;
 
-      default:
-        console.warn(`Unknown change type: ${type}`);
+    case "delete":
+      if (find) {
+        if (modifiedContent.includes(find)) {
+          modifiedContent = modifiedContent.replace(find, "");
+          console.log("\x1b[32m✓ Deleted pattern successfully\x1b[0m");
+        } else {
+          console.warn(
+            `\x1b[33m⚠ Pattern not found for delete: ${find.substring(0, 50)}...\x1b[0m`
+          );
+        }
+      } else {
+        console.warn("Invalid 'delete' change object:", change);
+      }
+      break;
+
+    default:
+      console.warn(`Unknown change type: ${type}`);
     }
   }
 
@@ -335,7 +344,7 @@ async function callBackendApi(method, endpoint, data, incomingAuthHeader) {
     if (!authToken && incomingAuthHeader) {
       authToken = incomingAuthHeader.split(" ")[1]; // Extract token part
       console.log(
-        `\x1b[36mℹ Using incoming Authorization header for authentication\x1b[0m`
+        "\x1b[36mℹ Using incoming Authorization header for authentication\x1b[0m"
       );
     }
 
@@ -434,8 +443,12 @@ function validateRequestData(data, isAiMode) {
   } else {
     // Regular mode validation
     const missingFields = [];
-    if (!old_html) missingFields.push("old_html");
-    if (!new_html) missingFields.push("new_html");
+    if (!old_html) {
+      missingFields.push("old_html");
+    }
+    if (!new_html) {
+      missingFields.push("new_html");
+    }
 
     if (missingFields.length > 0) {
       return {
@@ -456,7 +469,9 @@ function validateRequestData(data, isAiMode) {
  * @returns {Promise<string|null>} The saved image path or null if failed
  */
 async function saveImageData(imageData, filename) {
-  if (!imageData) return null;
+  if (!imageData) {
+    return null;
+  }
 
   try {
     const imageDir = path.join(process.cwd(), "public");
@@ -494,8 +509,12 @@ async function saveImageData(imageData, filename) {
         );
       }
 
-      if (imageExtension === "jpeg") imageExtension = "jpg";
-      if (imageExtension === "svg+xml") imageExtension = "svg";
+      if (imageExtension === "jpeg") {
+        imageExtension = "jpg";
+      }
+      if (imageExtension === "svg+xml") {
+        imageExtension = "svg";
+      }
 
       const imageName = `image_${Date.now()}.${imageExtension}`;
       imagePath = path.join(imageDir, imageName);
@@ -647,7 +666,7 @@ async function getAgentChanges({
  * @returns {Promise<string>} Formatted code
  */
 async function applyFullFileReplacement(modifiedContent, targetFile) {
-  console.log(`\x1b[36mℹ Applying full file replacement\x1b[0m`);
+  console.log("\x1b[36mℹ Applying full file replacement\x1b[0m");
 
   // Format with Prettier
   let formattedCode;
@@ -764,7 +783,7 @@ function createApp() {
           `\x1b[36mℹ Browser dimensions detected: ${sampleChange.browser_width}x${sampleChange.browser_height}\x1b[0m`
         );
       } else {
-        console.log(`\x1b[33m⚠ No browser dimensions found in changes\x1b[0m`);
+        console.log("\x1b[33m⚠ No browser dimensions found in changes\x1b[0m");
       }
 
       // Optimize file reading by pre-fetching unique file contents
@@ -778,7 +797,7 @@ function createApp() {
         try {
           if (!change.encoded_location) {
             console.warn(
-              `\x1b[33m⚠ Skipping change with missing encoded_location.\x1b[0m`
+              "\x1b[33m⚠ Skipping change with missing encoded_location.\x1b[0m"
             );
             continue;
           }
@@ -800,7 +819,7 @@ function createApp() {
 
           if (!hasStyleChanges && !hasTextChanges) {
             console.warn(
-              `\x1b[33m⚠ Skipping change with no style or text changes.\x1b[0m`
+              "\x1b[33m⚠ Skipping change with no style or text changes.\x1b[0m"
             );
             continue;
           }
@@ -901,7 +920,7 @@ function createApp() {
 
       const updatedFiles = new Set();
       if (backendResponse && backendResponse.updated_files) {
-        console.log(`\x1b[36mℹ Processing updated_files format\x1b[0m`);
+        console.log("\x1b[36mℹ Processing updated_files format\x1b[0m");
         for (const [filePath, newContent] of Object.entries(
           backendResponse.updated_files
         )) {
@@ -993,7 +1012,7 @@ function createApp() {
       }
 
       // Legacy fallback: maintain previous handling
-      if (backendResponse && backendResponse.modified_content != null) {
+      if (backendResponse && backendResponse.modified_content !== null) {
         const modifiedContentStr = String(backendResponse.modified_content);
         const formattedCode = await applyFullFileReplacement(
           modifiedContentStr,
@@ -1195,7 +1214,7 @@ function getProjectStructure() {
       );
     } else {
       console.log(
-        `\x1b[33m⚠ No .gitignore file found, no exclusions applied\x1b[0m`
+        "\x1b[33m⚠ No .gitignore file found, no exclusions applied\x1b[0m"
       );
     }
 

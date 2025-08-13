@@ -450,8 +450,8 @@ describe("codepress-html-babel-plugin", () => {
       });
 
       // Should preserve existing attributes and add new ones (compiled format)
-      expect(code).toContain('className: "existing"');
-      expect(code).toContain('id: "test"');
+      expect(code).toContain("className: \"existing\"");
+      expect(code).toContain("id: \"test\"");
       expect(code).toContain("codepress-data-fp");
     });
 

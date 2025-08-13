@@ -6,7 +6,9 @@
 - **Test (All)**: `npm test`
 - **Test (Single)**: `npx jest test/index.test.js -t "test description"`
 - **Test Server**: `npx jest test/server.test.js`
-- **Lint**: `npx eslint src/` (add eslint with: `npm i -D eslint`)
+- **Lint**: `npm run lint` (or `npm run lint:fix` to auto-fix)
+- **Format**: `npm run format` (or `npm run format:check` to check only)
+- **Quality**: `npm run quality` (runs lint, format check, and tests)
 
 ## Code Style Guidelines
 
