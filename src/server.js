@@ -620,6 +620,7 @@ async function getAgentChanges({
   githubRepoName,
   encodedLocation,
   fileContent,
+  branchName,
   additionalContext,
   authHeader,
 }) {
@@ -634,6 +635,7 @@ async function getAgentChanges({
       github_repo_name: githubRepoName,
       encoded_location: encodedLocation,
       file_content: fileContent,
+      branch_name: branchName,
       additional_context: additionalContext,
     },
     authHeader
@@ -949,6 +951,7 @@ function createApp() {
         text_changes,
         additional_context,
         additionalContext,
+        branchName,
       } = data;
       const authHeader =
         request.headers.authorization || request.headers["authorization"];
@@ -969,6 +972,7 @@ function createApp() {
         styleChanges: style_changes,
         textChanges: text_changes,
         fileContent,
+        branchName,
         additionalContext: additional_context || additionalContext,
         authHeader,
       });
