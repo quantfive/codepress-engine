@@ -676,6 +676,132 @@ async function applyFullFileReplacement(modifiedContent, targetFile) {
 }
 
 /**
+ * Handle streaming agent requests with Server-Sent Events
+ * @param {Object} request - Fastify request object
+ * @param {Object} reply - Fastify reply object
+ * @param {Object} data - Request body data
+ * @param {string} authHeader - Authorization header
+ */
+async function handleStreamingAgentRequest(request, reply, data, authHeader) {
+  const {
+    encoded_location,
+    github_repo_name,
+    additional_context,
+    additionalContext,
+    branchName,
+  } = data;
+
+  // Set up Server-Sent Events headers
+  reply.raw.writeHead(200, {
+    'Content-Type': 'text/event-stream',
+    'Cache-Control': 'no-cache',
+    'Connection': 'keep-alive',
+    'Access-Control-Allow-Origin': '*',
+    'Access-Control-Allow-Headers': 'Cache-Control'
+  });
+
+  // Function to send SSE data
+  function sendEvent(eventData) {
+    const data = JSON.stringify(eventData);
+    reply.raw.write(`data: ${data}\n\n`);
+  }
+
+  try {
+    // Send initial start event
+    sendEvent({
+      type: "agent_start",
+      message: "🤖 Starting local agent analysis...",
+      ephemeral: true
+    });
+
+    const { targetFile, fileContent } = readFileFromEncodedLocation(encoded_location);
+
+    // Send file reading event
+    sendEvent({
+      type: "tool_start",
+      message: `📖 Reading file: ${targetFile}...`,
+      ephemeral: true
+    });
+
+    sendEvent({
+      type: "tool_end",
+      message: `✅ File read successfully (${fileContent.length} chars)`,
+      ephemeral: true
+    });
+
+    // Send processing event
+    sendEvent({
+      type: "agent_thinking",
+      message: "🧠 Processing changes with backend...",
+      ephemeral: true
+    });
+
+    // Call the backend for agent changes
+    const backendResponse = await getAgentChanges({
+      githubRepoName: github_repo_name,
+      encodedLocation: encoded_location,
+      fileContent,
+      branchName,
+      additionalContext: additional_context || additionalContext,
+      authHeader,
+    });
+
+    // Send final processing event
+    sendEvent({
+      type: "agent_processing",
+      message: "⚙️ Applying changes to local files...",
+      ephemeral: true
+    });
+
+    // Handle the response and apply changes
+    if (backendResponse && backendResponse.updated_files) {
+      const results = [];
+      for (const [filePath, newContent] of Object.entries(backendResponse.updated_files)) {
+        const targetFilePath = toAbsolutePath(filePath);
+        const formattedCode = await applyFullFileReplacement(newContent, targetFilePath);
+        results.push({ path: filePath, modified_content: formattedCode });
+      }
+      
+      // Send final success event
+      sendEvent({
+        type: "final_result",
+        success: true,
+        message: `✅ Changes applied successfully to ${results.length} file(s)!`,
+        files: results,
+        ephemeral: false
+      });
+    } else if (backendResponse && backendResponse.modified_content != null) {
+      // Legacy fallback
+      const modifiedContentStr = String(backendResponse.modified_content);
+      const formattedCode = await applyFullFileReplacement(modifiedContentStr, targetFile);
+      
+      sendEvent({
+        type: "final_result",
+        success: true,
+        message: "✅ Local agent changes applied successfully!",
+        modified_content: formattedCode,
+        ephemeral: false
+      });
+    } else {
+      throw new Error("No valid response from backend");
+    }
+
+    // Send completion event
+    sendEvent({ type: "complete" });
+
+  } catch (error) {
+    console.error(`\x1b[31m✗ Error in streaming agent: ${error.message}\x1b[0m`);
+    sendEvent({
+      type: "error",
+      error: error.message,
+      ephemeral: false
+    });
+  }
+
+  reply.raw.end();
+}
+
+/**
  * Create and configure the Fastify app
  * @returns {Object} The configured Fastify instance
  */
@@ -955,11 +1081,19 @@ function createApp() {
       } = data;
       const authHeader =
         request.headers.authorization || request.headers["authorization"];
+      const acceptHeader = request.headers.accept || "application/json";
 
-      // Debug: Log auth header info
+      // Check if client wants streaming
+      const isStreaming = acceptHeader.includes("text/event-stream");
+      
       console.log(
-        `\x1b[36mℹ [visual-editor-api-agent] Auth header received: ${authHeader ? "[PRESENT]" : "[MISSING]"}\x1b[0m`
+        `\x1b[36mℹ [visual-editor-api-agent] Auth header received: ${authHeader ? "[PRESENT]" : "[MISSING]"}, Streaming: ${isStreaming}\x1b[0m`
       );
+
+      // If streaming requested, handle differently
+      if (isStreaming) {
+        return await handleStreamingAgentRequest(request, reply, data, authHeader);
+      }
 
       const { targetFile, fileContent } =
         readFileFromEncodedLocation(encoded_location);
