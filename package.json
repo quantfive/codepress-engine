@@ -1,6 +1,6 @@
 {
   "name": "@quantfive/codepress-engine",
-  "version": "0.3.9",
+  "version": "0.3.10-beta.5",
   "description": "CodePress engine - Babel and SWC plug-ins",
   "main": "./babel/index.js",
   "exports": {
@@ -59,7 +59,8 @@
     "@babel/preset-react": "^7.26.3",
     "@swc/core": "^1.11.31",
     "@swc/wasm": "^1",
-    "jest": "^29.7.0"
+    "jest": "^29.7.0",
+    "supertest": "^7.1.4"
   },
   "dependencies": {
     "@fastify/cors": "^11.0.1",

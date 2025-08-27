@@ -466,4 +466,364 @@ line 4`;
       expect(fileContentMap.get("encoded456:5-15")).toBe("content for file 2");
     });
   });
+
+  describe("API Endpoints", () => {
+    let app;
+
+    beforeEach(() => {
+      // Clear the require cache to get fresh server instance
+      delete require.cache[require.resolve("../src/server.js")];
+
+      // Mock the file system and external dependencies
+      fs.existsSync.mockReturnValue(true);
+      fs.readFileSync.mockReturnValue("const test = 'mock content';");
+    });
+
+    afterEach(async () => {
+      if (app) {
+        await app.close();
+      }
+    });
+
+    describe("GET /ping", () => {
+      it("should respond with pong", async () => {
+        const serverModule = require("../src/server.js");
+        app = await serverModule.startServer({ port: 0 }); // Use random port
+
+        if (!app) {
+          // In production mode, startServer returns null - skip test
+          return;
+        }
+
+        const response = await app.inject({
+          method: "GET",
+          url: "/ping",
+        });
+
+        expect(response.statusCode).toBe(200);
+        expect(response.body).toBe("pong");
+      });
+    });
+
+    describe("GET /meta", () => {
+      it("should return server metadata", async () => {
+        const serverModule = require("../src/server.js");
+        app = await serverModule.startServer({ port: 0 });
+
+        if (!app) return; // Skip in production mode
+
+        const response = await app.inject({
+          method: "GET",
+          url: "/meta",
+        });
+
+        expect(response.statusCode).toBe(200);
+        const data = JSON.parse(response.body);
+        expect(data).toHaveProperty("name");
+        expect(data).toHaveProperty("version");
+        expect(data).toHaveProperty("environment");
+        expect(data).toHaveProperty("uptime");
+      });
+    });
+
+    describe("POST /visual-editor-api-agent", () => {
+      beforeEach(() => {
+        // Mock fetch for streaming backend API calls
+        global.fetch = jest.fn().mockResolvedValue({
+          ok: true,
+          headers: {
+            get: jest.fn().mockReturnValue("text/event-stream"),
+          },
+          body: {
+            getReader: () => ({
+              read: jest
+                .fn()
+                .mockResolvedValueOnce({
+                  done: false,
+                  value: new TextEncoder().encode(
+                    'data: {"type":"tool_start"}\n\n'
+                  ),
+                })
+                .mockResolvedValueOnce({
+                  done: false,
+                  value: new TextEncoder().encode(
+                    'data: {"type":"final_result","result":{"updated_files":{"test.js":"new content"}}}\n\n'
+                  ),
+                })
+                .mockResolvedValueOnce({ done: true }),
+            }),
+          },
+        });
+      });
+
+      afterEach(() => {
+        if (global.fetch && global.fetch.mockRestore) {
+          global.fetch.mockRestore();
+        }
+      });
+
+      it("should reject requests without encoded_location", async () => {
+        const serverModule = require("../src/server.js");
+        app = await serverModule.startServer({ port: 0 });
+
+        if (!app) return;
+
+        const response = await app.inject({
+          method: "POST",
+          url: "/visual-editor-api-agent",
+          payload: {
+            user_instruction: "Make this better",
+            // missing encoded_location
+          },
+        });
+
+        expect(response.statusCode).toBe(500);
+        expect(response.body).toContain("error");
+
+        // Verify no backend calls were made for invalid request
+        expect(global.fetch).not.toHaveBeenCalled();
+      });
+
+      it("should accept valid requests and make streaming backend fetch call", async () => {
+        const serverModule = require("../src/server.js");
+        app = await serverModule.startServer({ port: 0 });
+
+        if (!app) return;
+
+        const response = await app.inject({
+          method: "POST",
+          url: "/visual-editor-api-agent",
+          payload: {
+            encoded_location: "dGVzdC5qcw:1-10", // base64 encoded "test.js"
+            user_instruction: "Make this better",
+            github_repo_name: "owner/repo",
+          },
+        });
+
+        // Should not be a client error (4xx) - might be 200 or other success code
+        expect(response.statusCode).toBeLessThan(400);
+
+        // Verify streaming backend fetch was called
+        expect(global.fetch).toHaveBeenCalledWith(
+          expect.stringContaining("v1/code-sync/get-agent-changes"),
+          expect.objectContaining({
+            method: "POST",
+            headers: expect.objectContaining({
+              "Content-Type": "application/json",
+              Accept: "text/event-stream",
+            }),
+            body: expect.any(String),
+          })
+        );
+      });
+
+      it("should handle requests with all optional fields", async () => {
+        const serverModule = require("../src/server.js");
+        app = await serverModule.startServer({ port: 0 });
+
+        if (!app) return;
+
+        const response = await app.inject({
+          method: "POST",
+          url: "/visual-editor-api-agent",
+          payload: {
+            encoded_location: "dGVzdC5qcw:1-10",
+            user_instruction: "Make this better",
+            github_repo_name: "owner/repo",
+            branch_name: "feature-branch",
+            image_data:
+              "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8/5+hHgAHggJ/PchI7wAAAABJRU5ErkJggg==",
+            filename: "screenshot.png",
+          },
+        });
+
+        expect(response.statusCode).toBeLessThan(400);
+
+        // Verify backend fetch was called
+        expect(global.fetch).toHaveBeenCalled();
+      });
+
+      it("should handle malformed encoded_location", async () => {
+        const serverModule = require("../src/server.js");
+        app = await serverModule.startServer({ port: 0 });
+
+        if (!app) return;
+
+        const response = await app.inject({
+          method: "POST",
+          url: "/visual-editor-api-agent",
+          payload: {
+            encoded_location: "invalid-format", // Invalid base64 or format
+            user_instruction: "Make this better",
+          },
+        });
+
+        // Should handle gracefully with error response
+        expect(response.statusCode).toBeGreaterThanOrEqual(400);
+
+        // Verify fetch was not called for malformed input
+        expect(global.fetch).not.toHaveBeenCalled();
+      });
+
+      it("should handle backend fetch errors gracefully", async () => {
+        // Mock fetch to simulate network error
+        global.fetch.mockRejectedValue(new Error("Network error"));
+
+        const serverModule = require("../src/server.js");
+        app = await serverModule.startServer({ port: 0 });
+
+        if (!app) return;
+
+        const response = await app.inject({
+          method: "POST",
+          url: "/visual-editor-api-agent",
+          payload: {
+            encoded_location: "dGVzdC5qcw:1-10",
+            user_instruction: "Make this better",
+            github_repo_name: "owner/repo",
+          },
+        });
+
+        // Should handle error gracefully, likely with 500 status
+        expect(response.statusCode).toBeGreaterThanOrEqual(500);
+
+        // Verify fetch was attempted
+        expect(global.fetch).toHaveBeenCalled();
+      });
+    });
+
+    describe("POST /visual-editor-api", () => {
+      beforeEach(() => {
+        // Mock fetch for regular backend API calls
+        global.fetch = jest.fn().mockResolvedValue({
+          ok: true,
+          headers: {
+            get: jest.fn().mockReturnValue("application/json"),
+          },
+          text: jest.fn().mockResolvedValue(
+            JSON.stringify({
+              updated_files: { "test.js": "updated content" },
+            })
+          ),
+          json: jest.fn().mockResolvedValue({
+            updated_files: { "test.js": "updated content" },
+          }),
+        });
+      });
+
+      afterEach(() => {
+        if (global.fetch && global.fetch.mockRestore) {
+          global.fetch.mockRestore();
+        }
+      });
+
+      it("should reject requests without changes array", async () => {
+        const serverModule = require("../src/server.js");
+        app = await serverModule.startServer({ port: 0 });
+
+        if (!app) return;
+
+        const response = await app.inject({
+          method: "POST",
+          url: "/visual-editor-api",
+          payload: {
+            github_repo_name: "owner/repo",
+            // missing changes array
+          },
+        });
+
+        expect(response.statusCode).toBe(400);
+        expect(response.body).toContain("changes");
+
+        // Verify no backend calls were made for invalid request
+        expect(global.fetch).not.toHaveBeenCalled();
+      });
+
+      it("should accept valid requests and make backend fetch call", async () => {
+        const serverModule = require("../src/server.js");
+        app = await serverModule.startServer({ port: 0 });
+
+        if (!app) return;
+
+        const response = await app.inject({
+          method: "POST",
+          url: "/visual-editor-api",
+          payload: {
+            changes: [
+              {
+                encoded_location: "dGVzdC5qcw:1-10",
+                style_changes: [{ property: "color", value: "red" }],
+              },
+            ],
+            github_repo_name: "owner/repo",
+          },
+        });
+
+        expect(response.statusCode).toBeLessThan(400);
+
+        // Verify backend fetch was called
+        expect(global.fetch).toHaveBeenCalledWith(
+          expect.stringContaining("code-sync/get-changes"),
+          expect.objectContaining({
+            method: "POST",
+            headers: expect.objectContaining({
+              "Content-Type": "application/json",
+            }),
+            body: expect.any(String),
+          })
+        );
+      });
+
+      it("should handle empty changes array", async () => {
+        const serverModule = require("../src/server.js");
+        app = await serverModule.startServer({ port: 0 });
+
+        if (!app) return;
+
+        const response = await app.inject({
+          method: "POST",
+          url: "/visual-editor-api",
+          payload: {
+            changes: [], // Empty array
+            github_repo_name: "owner/repo",
+          },
+        });
+
+        expect(response.statusCode).toBeLessThan(400);
+
+        // Empty changes should still make backend call
+        expect(global.fetch).toHaveBeenCalled();
+      });
+
+      it("should handle backend fetch errors gracefully", async () => {
+        // Mock fetch to simulate network error
+        global.fetch.mockRejectedValue(new Error("Backend unavailable"));
+
+        const serverModule = require("../src/server.js");
+        app = await serverModule.startServer({ port: 0 });
+
+        if (!app) return;
+
+        const response = await app.inject({
+          method: "POST",
+          url: "/visual-editor-api",
+          payload: {
+            changes: [
+              {
+                encoded_location: "dGVzdC5qcw:1-10",
+                style_changes: [{ property: "color", value: "red" }],
+              },
+            ],
+            github_repo_name: "owner/repo",
+          },
+        });
+
+        // Should handle error gracefully
+        expect(response.statusCode).toBeGreaterThanOrEqual(500);
+
+        // Verify fetch was attempted
+        expect(global.fetch).toHaveBeenCalled();
+      });
+    });
+  });
 });

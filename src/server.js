@@ -4,7 +4,7 @@ const os = require("os");
 const fs = require("fs");
 const path = require("path");
 const prettier = require("prettier");
-const fetch = require("node-fetch");
+// Use built-in fetch in Node.js 18+ which supports streaming
 const { decode } = require("./index");
 
 /**
@@ -302,6 +302,122 @@ function applyPatternChanges(fileContent, changes) {
  * @param {string} incomingAuthHeader The incoming Authorization header
  * @returns {Promise<Object>} The response data
  */
+
+/**
+ * Call backend API with streaming support
+ * @param {string} method HTTP method
+ * @param {string} endpoint API endpoint
+ * @param {Object} data Request data
+ * @param {string} incomingAuthHeader Authorization header
+ * @param {Function} onStreamEvent Callback for stream events
+ * @returns {Promise<Object>} Final API response
+ */
+async function callBackendApiStreaming(
+  method,
+  endpoint,
+  data,
+  incomingAuthHeader,
+  onStreamEvent
+) {
+  // Backend API settings
+  const apiHost = process.env.CODEPRESS_BACKEND_HOST || "localhost";
+  const apiPort = parseInt(process.env.CODEPRESS_BACKEND_PORT || "8007", 10);
+  const apiPath = endpoint.startsWith("/")
+    ? endpoint.replace("/", "")
+    : endpoint;
+  const protocol =
+    apiHost === "localhost" || apiHost === "127.0.0.1" ? "http" : "https";
+  const url = `${protocol}://${apiHost}:${apiPort}/${apiPath}`;
+
+  const requestOptions = {
+    method,
+    headers: {
+      "Content-Type": "application/json",
+      Accept: "text/event-stream", // Request streaming
+    },
+  };
+
+  if (incomingAuthHeader) {
+    requestOptions.headers.Authorization = incomingAuthHeader;
+  }
+
+  if (data) {
+    requestOptions.body = JSON.stringify(data);
+  }
+
+  try {
+    console.log(
+      `\x1b[36mℹ Calling backend streaming API: ${method} ${url}\x1b[0m`
+    );
+    const response = await fetch(url, requestOptions);
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(`Backend API error (${response.status}): ${errorText}`);
+    }
+
+    // Handle streaming response
+    if (
+      response.headers.get("content-type")?.includes("text/event-stream") &&
+      onStreamEvent
+    ) {
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let finalResult = null;
+
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+
+          const chunk = decoder.decode(value, { stream: true });
+          const lines = chunk.split("\n");
+
+          for (const line of lines) {
+            if (line.startsWith("data: ")) {
+              try {
+                const eventData = JSON.parse(line.slice(6));
+
+                // Forward the event to the client
+                if (onStreamEvent) {
+                  onStreamEvent(eventData);
+                }
+
+                // Capture final result if this is a completion event
+                if (eventData.type === "final_result") {
+                  finalResult = eventData.result;
+                } else if (eventData.type === "complete") {
+                  // Use the last result we captured
+                  break;
+                }
+              } catch (parseError) {
+                console.error(
+                  "Error parsing SSE data:",
+                  parseError,
+                  "Line:",
+                  line
+                );
+              }
+            }
+          }
+        }
+      } finally {
+        reader.releaseLock();
+      }
+
+      return finalResult || { message: "Streaming completed successfully" };
+    } else {
+      // Fallback to regular JSON response
+      return await response.json();
+    }
+  } catch (error) {
+    console.error(
+      `\x1b[31m✗ Backend streaming API call failed: ${error.message}\x1b[0m`
+    );
+    throw error;
+  }
+}
+
 async function callBackendApi(method, endpoint, data, incomingAuthHeader) {
   // Backend API settings
   const apiHost = process.env.CODEPRESS_BACKEND_HOST || "localhost";
@@ -451,11 +567,12 @@ function validateRequestData(data, isAiMode) {
 
 /**
  * Service: Save image data to file system
- * @param {string} imageData Base64 image data
- * @param {string} filename Optional filename
+ * @param {Object} params - Function parameters
+ * @param {string} params.imageData - Base64 image data
+ * @param {string} params.filename - Optional filename
  * @returns {Promise<string|null>} The saved image path or null if failed
  */
-async function saveImageData(imageData, filename) {
+async function saveImageData({ imageData, filename }) {
   if (!imageData) return null;
 
   try {
@@ -612,37 +729,6 @@ async function getChanges({ githubRepoName, fileChanges, authHeader }) {
 }
 
 /**
- * Service: Get agent changes from backend
- * @param {Object} params Request parameters
- * @returns {Promise<Object>} Backend response
- */
-async function getAgentChanges({
-  githubRepoName,
-  encodedLocation,
-  fileContent,
-  branchName,
-  additionalContext,
-  authHeader,
-}) {
-  console.log(
-    `\x1b[36mℹ Getting agent changes from backend for file encoded_location: ${encodedLocation}\x1b[0m`
-  );
-
-  return await callBackendApi(
-    "POST",
-    "code-sync/get-agent-changes",
-    {
-      github_repo_name: githubRepoName,
-      encoded_location: encodedLocation,
-      file_content: fileContent,
-      branch_name: branchName,
-      additional_context: additionalContext,
-    },
-    authHeader
-  );
-}
-
-/**
  * Service: Apply full file replacement and format code
  * @param {string} modifiedContent The complete new file content
  * @param {string} targetFile Target file path
@@ -676,6 +762,103 @@ async function applyFullFileReplacement(modifiedContent, targetFile) {
 }
 
 /**
+ * Handle streaming agent requests with Server-Sent Events
+ * @param {Object} params - Function parameters
+ * @param {Object} params.request - Fastify request object
+ * @param {Object} params.reply - Fastify reply object
+ * @param {Object} params.data - Request body data
+ * @param {string} params.authHeader - Authorization header
+ * @param {string} params.fileContent - The file content to process
+ */
+async function handleStreamingAgentRequest({
+  reply,
+  data,
+  authHeader,
+  fileContent,
+}) {
+  const { encoded_location, github_repo_name, user_instruction, branch_name } =
+    data;
+
+  // Set up Server-Sent Events headers
+  reply.raw.writeHead(200, {
+    "Content-Type": "text/event-stream",
+    "Cache-Control": "no-cache",
+    Connection: "keep-alive",
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Headers": "Cache-Control",
+  });
+
+  // Function to send SSE data
+  function sendEvent(eventData) {
+    const data = JSON.stringify(eventData);
+    reply.raw.write(`data: ${data}\n\n`);
+  }
+
+  try {
+    // Call the backend for agent changes with streaming
+    // The backend will handle all streaming events from the agent
+    const backendResponse = await callBackendApiStreaming(
+      "POST",
+      "v1/code-sync/get-agent-changes",
+      {
+        github_repo_name: github_repo_name,
+        encoded_location: encoded_location,
+        file_content: fileContent,
+        branch_name: branch_name,
+        user_instruction: user_instruction,
+      },
+      authHeader,
+      sendEvent
+    );
+
+    console.log(
+      `\x1b[36mℹ backendResponse to agent: ${JSON.stringify(backendResponse)}\x1b[0m`
+    );
+
+    // Handle the response and apply changes
+    if (backendResponse && backendResponse.updated_files) {
+      const updatedFilePaths = [];
+      for (const [filePath, newContent] of Object.entries(
+        backendResponse.updated_files
+      )) {
+        const targetFilePath = toAbsolutePath(filePath);
+        await applyFullFileReplacement(newContent, targetFilePath);
+        updatedFilePaths.push(filePath);
+      }
+
+      // Send final success event
+      sendEvent({
+        type: "final_result",
+        result: {
+          success: true,
+          updated_file_paths: updatedFilePaths,
+        },
+        success: true,
+        message: `✅ Changes applied successfully to ${updatedFilePaths.length} file(s)!`,
+        ephemeral: false,
+      });
+    } else {
+      console.log(backendResponse);
+      throw new Error("No valid response from backend");
+    }
+
+    // Send completion event
+    sendEvent({ type: "complete" });
+  } catch (error) {
+    console.error(
+      `\x1b[31m✗ Error in streaming agent: ${error.message}\x1b[0m`
+    );
+    sendEvent({
+      type: "error",
+      error: error.message,
+      ephemeral: false,
+    });
+  }
+
+  reply.raw.end();
+}
+
+/**
  * Create and configure the Fastify app
  * @returns {Object} The configured Fastify instance
  */
@@ -688,7 +871,13 @@ function createApp() {
   app.register(require("@fastify/cors"), {
     origin: "*",
     methods: ["GET", "POST", "OPTIONS", "PUT", "PATCH", "DELETE"],
-    allowedHeaders: ["X-Requested-With", "content-type", "Authorization"],
+    allowedHeaders: [
+      "X-Requested-With",
+      "content-type",
+      "Authorization",
+      "Cache-Control",
+      "Accept",
+    ],
     credentials: true,
   });
 
@@ -870,7 +1059,10 @@ function createApp() {
       // Process image uploads first across all files
       for (const change of changes) {
         if (change.image_data && change.filename) {
-          await saveImageData(change.image_data, change.filename);
+          await saveImageData({
+            imageData: change.image_data,
+            filename: change.filename,
+          });
         }
       }
 
@@ -942,116 +1134,27 @@ function createApp() {
   app.post("/visual-editor-api-agent", async (request, reply) => {
     try {
       const data = request.body;
-      const {
-        encoded_location,
-        github_repo_name,
-        image_data,
-        filename,
-        style_changes,
-        text_changes,
-        additional_context,
-        additionalContext,
-        branchName,
-      } = data;
+      const { encoded_location, image_data, filename } = data;
       const authHeader =
         request.headers.authorization || request.headers["authorization"];
 
-      // Debug: Log auth header info
       console.log(
-        `\x1b[36mℹ [visual-editor-api-agent] Auth header received: ${authHeader ? "[PRESENT]" : "[MISSING]"}\x1b[0m`
+        `\x1b[36mℹ [visual-editor-api-agent] Auth header received: ${authHeader ? "[PRESENT]" : "[MISSING]"}, Always streaming\x1b[0m`
       );
 
       const { targetFile, fileContent } =
         readFileFromEncodedLocation(encoded_location);
 
-      await saveImageData(image_data, filename);
+      // Save image data before processing
+      await saveImageData({ imageData: image_data, filename });
 
-      const backendResponse = await getAgentChanges({
-        githubRepoName: github_repo_name,
-        encodedLocation: encoded_location,
-        styleChanges: style_changes,
-        textChanges: text_changes,
-        fileContent,
-        branchName,
-        additionalContext: additional_context || additionalContext,
+      // Always use streaming for agent requests
+      return await handleStreamingAgentRequest({
+        reply,
+        data,
         authHeader,
+        fileContent,
       });
-      // New shape: updated_files dict of path -> content. Replace all files present
-      if (backendResponse && backendResponse.updated_files) {
-        const results = [];
-        for (const [filePath, newContent] of Object.entries(
-          backendResponse.updated_files
-        )) {
-          const targetFilePath = toAbsolutePath(filePath);
-          const formattedCode = await applyFullFileReplacement(
-            newContent,
-            targetFilePath
-          );
-          results.push({ path: filePath, modified_content: formattedCode });
-        }
-        return reply.code(200).send({
-          success: true,
-          message: `Agent changes applied to ${results.length} file(s).`,
-          files: results,
-        });
-      }
-
-      // Legacy fallback: maintain previous handling
-      if (backendResponse && backendResponse.modified_content != null) {
-        const modifiedContentStr = String(backendResponse.modified_content);
-        const formattedCode = await applyFullFileReplacement(
-          modifiedContentStr,
-          targetFile
-        );
-        return reply.code(200).send({
-          success: true,
-          message: "Agent changes applied successfully.",
-          modified_content: formattedCode,
-        });
-      }
-
-      if (
-        backendResponse &&
-        backendResponse.coding_agent_output &&
-        Array.isArray(backendResponse.coding_agent_output)
-      ) {
-        const fileData =
-          backendResponse.coding_agent_output.find(
-            (f) =>
-              f.path &&
-              (f.path === targetFile ||
-                f.path.endsWith(path.basename(targetFile)))
-          ) || backendResponse.coding_agent_output[0];
-
-        const currentContent = fs.readFileSync(targetFile, "utf8");
-        const formattedCode = await applyChangesAndFormat(
-          currentContent,
-          fileData.changes,
-          targetFile,
-          false
-        );
-        return reply.code(200).send({
-          success: true,
-          message: "Agent changes applied successfully.",
-          modified_content: formattedCode,
-        });
-      }
-
-      if (backendResponse && Array.isArray(backendResponse.changes)) {
-        const formattedCode = await applyChangesAndFormat(
-          fileContent,
-          backendResponse.changes,
-          targetFile,
-          false
-        );
-        return reply.code(200).send({
-          success: true,
-          message: "Agent changes applied successfully.",
-          modified_content: formattedCode,
-        });
-      }
-
-      throw new Error("Invalid response format from backend");
     } catch (err) {
       console.error(`Error in /visual-editor-api-agent: ${err.message}`);
       return reply.code(500).send({ error: err.message });
