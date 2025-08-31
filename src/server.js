@@ -988,10 +988,12 @@ function createApp() {
             change.style_changes && change.style_changes.length > 0;
           const hasTextChanges =
             change.text_changes && change.text_changes.length > 0;
+          const hasMoveChanges =
+            change.move_changes && change.move_changes.length > 0;
 
-          if (!hasStyleChanges && !hasTextChanges) {
+          if (!hasStyleChanges && !hasTextChanges && !hasMoveChanges) {
             console.warn(
-              `\x1b[33m⚠ Skipping change with no style or text changes.\x1b[0m`
+              `\x1b[33m⚠ Skipping change with no style, text, or move changes.\x1b[0m`
             );
             continue;
           }
@@ -1044,6 +1046,7 @@ function createApp() {
               {
                 style_changes: change.style_changes || [],
                 text_changes: change.text_changes || [],
+                move_changes: change.move_changes || [],
               },
             ],
             browser_width: change.browser_width,
