@@ -28,6 +28,35 @@ pub struct CodePressTransform {
     source_map: Option<std::sync::Arc<dyn SourceMapper>>,
 }
 
+/// Normalizes incoming filenames from bundlers (e.g., Turbopack) before encoding
+/// - Converts backslashes to forward slashes
+/// - Strips a leading "[project]/" prefix if present (Turbopack virtual paths)
+fn normalize_filename(filename: &str) -> String {
+    // 1) Posix-ify
+    let mut s = filename.replace('\\', "/");
+
+    // 2) De-URL-encode the common bracket encoding if present
+    // Support both uppercase and lowercase percent-encoding
+    s = s.replace("%5Bproject%5D", "[project]");
+    s = s.replace("%5bproject%5d", "[project]");
+
+    // 3) Strip an optional 'file://', 'file:///' prefix used by some debuggers
+    if let Some(rest) = s.strip_prefix("file:///") {
+        s = rest.to_string();
+    } else if let Some(rest) = s.strip_prefix("file://") {
+        s = rest.to_string();
+    }
+
+    // 4) Strip Turbopack's virtual prefix variants
+    for prefix in &["turbopack/[project]/", "/turbopack/[project]/", "[project]/"] {
+        if let Some(rest) = s.strip_prefix(prefix) {
+            return rest.to_string();
+        }
+    }
+
+    s
+}
+
 impl CodePressTransform {
     pub fn new(config: HashMap<String, serde_json::Value>, source_map: Option<std::sync::Arc<dyn SourceMapper>>) -> Self {
         let repo_name = config
@@ -62,7 +91,8 @@ impl CodePressTransform {
     }
 
     fn create_encoded_path_attr(&self, filename: &str, opening_span: swc_core::common::Span, parent_span: Option<swc_core::common::Span>) -> JSXAttrOrSpread {
-        let encoded_path = xor_encode(filename);
+        let normalized = normalize_filename(filename);
+        let encoded_path = xor_encode(&normalized);
         
         let attr_value = if let Some(line_info) = self.get_line_info(opening_span, parent_span) {
             format!("{}:{}", encoded_path, line_info)
