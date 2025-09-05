@@ -94,7 +94,7 @@ function createSWCPlugin(userConfig = {}) {
   };
 
   // Return the plugin configuration array
-  return [path.resolve(__dirname, "codepress_engine.wasm"), config];
+  return ["@quantfive/codepress-engine/swc/wasm", config];
 }
 
 // Support both CommonJS and ES6 imports

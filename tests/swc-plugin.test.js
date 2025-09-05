@@ -149,8 +149,13 @@ export default App;
       expect(Array.isArray(pluginConfig)).toBe(true);
       expect(pluginConfig).toHaveLength(2);
 
-      const [wasmPath, config] = pluginConfig;
-      expect(wasmPath.endsWith("codepress_engine.wasm")).toBe(true);
+      const [wasmRef, config] = pluginConfig;
+      expect(typeof wasmRef).toBe("string");
+      // Accept module specifier (preferred) or absolute path for backward-compat
+      const isSpecifierOrPath =
+        wasmRef === "@quantfive/codepress-engine/swc/wasm" ||
+        wasmRef.endsWith("codepress_engine.wasm");
+      expect(isSpecifierOrPath).toBe(true);
       expect(typeof config).toBe("object");
 
       // Should have auto-detected git info (or null if not in git repo)
