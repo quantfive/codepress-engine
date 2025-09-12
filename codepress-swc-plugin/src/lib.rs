@@ -128,12 +128,26 @@ impl CodePressTransform {
 
     fn is_synthetic_element(&self, name: &JSXElementName) -> bool {
         match name {
+            // <codepress-marker> / <__CPProvider> / <__CPX>
             JSXElementName::Ident(id) => {
                 let n = id.sym.as_ref();
-                n == self.wrapper_tag || n == self.provider_ident || n == "__CPX" // safety: in case
+                n == self.wrapper_tag || n == self.provider_ident || n == "__CPX"
             }
-            // We only synthesize idents, not member/namespaced for our markers.
-            _ => false,
+            // <__CPX.Provider> or anything under __CPProvider/__CPX
+            JSXElementName::JSXMemberExpr(m) => {
+                // Walk to the root object of the member chain
+                let mut obj = &m.obj;
+                while let JSXObject::JSXMemberExpr(inner) = obj {
+                    obj = &inner.obj;
+                }
+                if let JSXObject::Ident(root) = obj {
+                    let n = root.sym.as_ref();
+                    n == "__CPX" || n == self.provider_ident
+                } else {
+                    false
+                }
+            }
+            JSXElementName::JSXNamespacedName(_) => false,
         }
     }
 
@@ -1072,9 +1086,10 @@ impl VisitMut for CodePressTransform {
     }
 
     fn visit_mut_jsx_element(&mut self, node: &mut JSXElement) {
+        node.visit_mut_children_with(self);
+
         // Skip our synthetic elements to avoid computing spans on DUMMY_SP, but still visit inside.
         if self.is_synthetic_element(&node.opening.name) {
-            node.visit_mut_children_with(self);
             return;
         }
 
@@ -1184,9 +1199,6 @@ impl VisitMut for CodePressTransform {
         // Always-on behavior for custom component callsites:
         let is_custom_call = !is_host && Self::is_custom_component_name(&node.opening.name);
 
-        // Attach targets/kinds & callsite
-        let mut attach_target_attrs: *mut Vec<JSXAttrOrSpread> = &mut node.opening.attrs;
-
         if is_custom_call {
             // DOM wrapper (display: contents) carrying callsite; we also duplicate metadata on the invocation
             let mut wrapper =
@@ -1236,7 +1248,6 @@ impl VisitMut for CodePressTransform {
                 .children
                 .push(JSXElementChild::JSXElement(Box::new(original)));
             *node = wrapper;
-            attach_target_attrs = &mut node.opening.attrs;
 
             // Also wrap with non-DOM Provider carrying same payload (context crosses portals, no DOM added)
             let cs_enc = if let JSXAttrOrSpread::JSXAttr(a) =
@@ -1270,6 +1281,10 @@ impl VisitMut for CodePressTransform {
                 fp: fp_enc,
             };
             self.wrap_with_provider(node, meta);
+
+            let attrs = &mut node.opening.attrs;
+            CodePressTransform::attach_attr_string(attrs, "data-codepress-edit-candidates", cands_enc.clone());
+            CodePressTransform::attach_attr_string(attrs, "data-codepress-source-kinds",  kinds_enc.clone());
         } else {
             // Host element → tag directly
             CodePressTransform::attach_attr_string(
@@ -1294,24 +1309,10 @@ impl VisitMut for CodePressTransform {
                     value: a.value,
                 }));
             }
+            CodePressTransform::attach_attr_string(&mut node.opening.attrs, "data-codepress-edit-candidates", cands_enc.clone());
+            CodePressTransform::attach_attr_string(&mut node.opening.attrs, "data-codepress-source-kinds",  kinds_enc.clone());
         }
 
-        // Also attach the candidates/kinds to the wrapper/opening for completeness
-        unsafe {
-            CodePressTransform::attach_attr_string(
-                &mut *attach_target_attrs,
-                "data-codepress-edit-candidates",
-                cands_enc,
-            );
-            CodePressTransform::attach_attr_string(
-                &mut *attach_target_attrs,
-                "data-codepress-source-kinds",
-                kinds_enc,
-            );
-        }
-
-        // Continue visiting children
-        node.visit_mut_children_with(self);
     }
 }
 
