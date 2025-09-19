@@ -66,6 +66,10 @@ pub struct CodePressTransform {
     wrapper_tag: String,        // DOM wrapper tag (display: contents)
     provider_ident: String,     // __CPProvider (inline injected)
     inserted_provider_import: bool,
+
+    // -------- module graph (this module only) --------
+    module_file: Option<String>,
+    graph: ModuleGraph,
 }
 
 impl CodePressTransform {
@@ -91,6 +95,15 @@ impl CodePressTransform {
             wrapper_tag,
             provider_ident,
             inserted_provider_import: false,
+            module_file: None,
+            graph: ModuleGraph {
+                imports: vec![],
+                exports: vec![],
+                reexports: vec![],
+                defs: vec![],
+                mutations: vec![],
+                literal_index: vec![],
+            },
         }
     }
 
@@ -111,6 +124,21 @@ impl CodePressTransform {
             );
         }
         "unknown:0-0".to_string()
+    }
+
+    fn file_from_span(&mut self, s: swc_core::common::Span) -> Option<String> {
+        if s.is_dummy() { return None; }
+        if let Some(ref cm) = self.source_map {
+            let lo = cm.lookup_char_pos(s.lo());
+            let f = normalize_filename(&lo.file.name.to_string());
+            self.module_file.get_or_insert(f.clone());
+            return Some(f);
+        }
+        None
+    }
+
+    fn current_file(&self) -> String {
+        self.module_file.clone().unwrap_or_else(|| "unknown".to_string())
     }
 
     fn is_custom_component_name(name: &JSXElementName) -> bool {
@@ -161,6 +189,85 @@ impl CodePressTransform {
                 raw: None,
             }))),
         }));
+    }
+    // Build "root.path" for MemberExpr where the path is statically known.
+    fn static_member_path(&self, expr: &Expr) -> Option<(String, String)> {
+        fn push_seg(out: &mut String, seg: &str) {
+            if seg.starts_with('[') { out.push_str(seg); } else { out.push('.'); out.push_str(seg); }
+        }
+        fn walk<'a>(e: &'a Expr, root: &mut Option<String>, path: &mut String) -> bool {
+            match e {
+                Expr::Ident(i) => { *root = Some(i.sym.to_string()); true }
+                Expr::Member(m) => {
+                    if !walk(&m.obj, root, path) { return false; }
+                    match &m.prop {
+                        MemberProp::Ident(p) => { push_seg(path, &p.sym.to_string()); true }
+                        MemberProp::PrivateName(_) => false,
+                        MemberProp::Computed(c) => {
+                            match &*c.expr {
+                                Expr::Lit(Lit::Str(s)) => { push_seg(path, &format!(r#"["{}"]"#, s.value)); true }
+                                Expr::Lit(Lit::Num(n)) => { push_seg(path, &format!("[{}]", n.value)); true }
+                                _ => false
+                            }
+                        }
+                    }
+                }
+                _ => false
+            }
+        }
+        let mut root = None;
+        let mut path = String::new();
+        if walk(expr, &mut root, &mut path) {
+            Some((root.unwrap_or_default(), path))
+        } else {
+            None
+        }
+    }
+
+    fn push_mutation_row(&mut self, root: String, path: String, kind: &'static str, span: swc_core::common::Span) {
+        let _ = self.file_from_span(span);
+        self.graph.mutations.push(MutationRow {
+            root, path, kind,
+            span: self.span_file_lines(span),
+        });
+    }
+
+    // Inject `globalThis.__CPX_GRAPH[file] = JSON.parse("<json>")` via new Function to avoid big AST building.
+    fn inject_graph_stmt(&self, m: &mut Module) {
+        let file_key = xor_encode(&self.current_file());
+        let file_key_json = serde_json::to_string(&file_key).unwrap_or("\"unknown\"".into());
+        // graph as JSON string literal passed into JSON.parse
+        let graph_json = serde_json::to_string(&self.graph).unwrap_or("{}".into());
+        let graph_json_str = serde_json::to_string(&graph_json).unwrap_or("\"{}\"".into());
+        let js = format!(
+            "try{{var g=(typeof globalThis!=='undefined'?globalThis:window);g.__CPX_GRAPH=g.__CPX_GRAPH||{{}};g.__CPX_GRAPH[{file}]=JSON.parse({graph});}}catch(_e){{}}",
+            file = file_key_json,
+            graph = graph_json_str
+        );
+        let stmt = ModuleItem::Stmt(Stmt::Expr(ExprStmt {
+            span: DUMMY_SP,
+            expr: Box::new(Expr::Call(CallExpr {
+                span: DUMMY_SP,
+                callee: Callee::Expr(Box::new(Expr::New(NewExpr {
+                    span: DUMMY_SP,
+                    callee: Box::new(Expr::Ident(Ident::new("Function".into(), DUMMY_SP, SyntaxContext::empty()))),
+                    args: Some(vec![ExprOrSpread {
+                        spread: None,
+                        expr: Box::new(Expr::Lit(Lit::Str(Str {
+                            span: DUMMY_SP,
+                            value: js.into(),
+                            raw: None,
+                        }))),
+                    }]),
+                    type_args: None,
+                    ctxt: SyntaxContext::empty(),
+                }))),
+                args: vec![],
+                type_args: None,
+                ctxt: SyntaxContext::empty(),
+            })),
+        }));
+        m.body.insert(0, stmt);
     }
 
     fn get_line_info(
@@ -517,6 +624,46 @@ impl CodePressTransform {
             .filter(|c| seen.insert(format!("{}#{}", c.reason, c.target)))
             .collect()
     }
+    fn collect_symbol_refs_from_expr(&mut self, expr: &Expr, out: &mut Vec<SymbolRef>) {
+        // Remember file as soon as we can
+        let _ = self.file_from_span(expr.span());
+        match expr {
+            Expr::Ident(i) => {
+                out.push(SymbolRef {
+                    file: self.current_file(),
+                    local: i.sym.to_string(),
+                    path: "".to_string(),
+                    span: self.span_file_lines(i.span),
+                });
+           }
+            Expr::Member(m) => {
+               if let Some((root, path)) = self.static_member_path(&Expr::Member(m.clone())) {
+                    out.push(SymbolRef {
+                       file: self.current_file(),
+                        local: root,
+                        path,
+                        span: self.span_file_lines(m.span),
+                    });
+                }
+                // also descend into obj/prop expr for nested refs
+                self.collect_symbol_refs_from_expr(&m.obj, out);
+                if let MemberProp::Computed(c) = &m.prop {
+                    self.collect_symbol_refs_from_expr(&c.expr, out);
+               }
+            }
+            Expr::Call(c) => {
+                if let Callee::Expr(e) = &c.callee {
+                    self.collect_symbol_refs_from_expr(e, out);
+                }
+                for a in &c.args {
+                    if a.spread.is_none() {
+                        self.collect_symbol_refs_from_expr(&a.expr, out);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
 
     fn aggregate_kinds(chain: &[ProvNode]) -> Vec<&'static str> {
         let mut kinds = BTreeSet::new();
@@ -775,6 +922,66 @@ impl CodePressTransform {
         m.body.insert(0, import_decl);
         self.inserted_provider_import = true;
     }
+}
+
+// -----------------------------------------------------------------------------
+// Module Graph info
+// -----------------------------------------------------------------------------
+
+#[derive(serde::Serialize)]
+struct ImportRow {
+    local: String,              // local alias in this module
+    imported: String,           // 'default' | named | '*' (namespace)
+    source: String,             // "…/module"
+    span: String,               // "file:start-end"
+}
+
+#[derive(serde::Serialize)]
+struct ExportRow {
+    exported: String,           // name visible to other modules ('default' is ok)
+    local: String,              // local symbol bound in this module
+    span: String,
+}
+
+#[derive(serde::Serialize)]
+struct ReexportRow {
+    exported: String,           // name re-exported by this module
+    imported: String,           // name imported from source
+    source: String,             // "…/module"
+    span: String,
+}
+
+#[derive(serde::Serialize)]
+struct DefRow {
+    local: String,              // local binding in this module
+    kind: &'static str,         // var|let|const|func|class
+    span: String,
+}
+
+#[derive(serde::Serialize)]
+struct MutationRow {
+    root: String,               // root local ident being mutated (teams)
+    path: String,               // dotted/index path if static: ".new_key" or '["k"]' or "[2]"
+    kind: &'static str,         // assign|update|call:Object.assign|call:push|call:set|spread-merge
+    span: String,
+}
+
+#[derive(serde::Serialize)]
+struct LiteralIxRow {
+    export_name: String,        // e.g. PRINCIPALS
+    path: String,               // e.g. [1].specialty
+    text: String,
+    span: String,
+}
+
+#[derive(serde::Serialize)]
+struct ModuleGraph {
+    imports: Vec<ImportRow>,
+    exports: Vec<ExportRow>,
+    reexports: Vec<ReexportRow>,
+    defs: Vec<DefRow>,
+    mutations: Vec<MutationRow>,
+    literal_index: Vec<LiteralIxRow>,
 }
 
 // -----------------------------------------------------------------------------
@@ -1083,6 +1290,256 @@ impl VisitMut for CodePressTransform {
         // Inject inline provider once per module
         self.ensure_provider_inline(m);
         m.visit_mut_children_with(self);
+        self.inject_graph_stmt(m);
+    }
+    fn visit_mut_import_decl(&mut self, n: &mut ImportDecl) {
+        let _ = self.file_from_span(n.span);
+        for s in &n.specifiers {
+            match s {
+                ImportSpecifier::Named(named) => {
+                    self.graph.imports.push(ImportRow {
+                        local: named.local.sym.to_string(),
+                        imported: named
+                            .imported
+                            .as_ref()
+                            .and_then(|i| if let ModuleExportName::Ident(i) = i { Some(i.sym.to_string()) } else { None })
+                            .unwrap_or_else(|| named.local.sym.to_string()),
+                        source: n.src.value.to_string(),
+                        span: self.span_file_lines(named.local.span),
+                    });
+                }
+                ImportSpecifier::Default(def) => {
+                    self.graph.imports.push(ImportRow {
+                        local: def.local.sym.to_string(),
+                        imported: "default".into(),
+                        source: n.src.value.to_string(),
+                        span: self.span_file_lines(def.local.span),
+                    });
+                }
+                ImportSpecifier::Namespace(ns) => {
+                    self.graph.imports.push(ImportRow {
+                        local: ns.local.sym.to_string(),
+                        imported: "*".into(),
+                        source: n.src.value.to_string(),
+                        span: self.span_file_lines(ns.local.span),
+                    });
+                }
+            }
+        }
+        n.visit_mut_children_with(self);
+    }
+
+    fn visit_mut_export_decl(&mut self, n: &mut ExportDecl) {
+        let _ = self.file_from_span(n.span);
+        match &mut n.decl {
+            Decl::Var(v) => {
+                for d in &v.decls {
+                    if let Some(id) = d.name.as_ident() {
+                        // def
+                        self.graph.defs.push(DefRow {
+                            local: id.id.sym.to_string(),
+                            kind: match v.kind { VarDeclKind::Const => "const", VarDeclKind::Let => "let", VarDeclKind::Var => "var" },
+                            span: self.span_file_lines(id.id.span),
+                        });
+                        // export mapping
+                        self.graph.exports.push(ExportRow {
+                            exported: id.id.sym.to_string(),
+                            local: id.id.sym.to_string(),
+                            span: self.span_file_lines(id.id.span),
+                        });
+                        // literal index (optional): only for simple object/array initializers
+                        if let Some(init) = &d.init {
+                            self.harvest_literal_index(&id.id.sym.to_string(), &init, "".to_string());
+                        }
+                    }
+                }
+            }
+            Decl::Fn(f) => {
+                self.graph.defs.push(DefRow {
+                    local: f.ident.sym.to_string(),
+                    kind: "func",
+                    span: self.span_file_lines(f.ident.span),
+                });
+                self.graph.exports.push(ExportRow {
+                    exported: f.ident.sym.to_string(),
+                    local: f.ident.sym.to_string(),
+                    span: self.span_file_lines(f.ident.span),
+                });
+            }
+            Decl::Class(c) => {
+                self.graph.defs.push(DefRow {
+                    local: c.ident.sym.to_string(),
+                    kind: "class",
+                    span: self.span_file_lines(c.ident.span),
+                });
+                self.graph.exports.push(ExportRow {
+                    exported: c.ident.sym.to_string(),
+                    local: c.ident.sym.to_string(),
+                    span: self.span_file_lines(c.ident.span),
+                });
+            }
+            _ => {}
+        }
+        n.visit_mut_children_with(self);
+    }
+
+    fn visit_mut_module_decl(&mut self, n: &mut ModuleDecl) {
+        let _ = self.file_from_span(n.span());
+        match n {
+            ModuleDecl::ExportNamed(en) => {
+                if let Some(src) = &en.src {
+                    for s in &en.specifiers {
+                        if let ExportSpecifier::Named(nm) = s {
+                            let imported = match &nm.orig {
+                                ModuleExportName::Ident(i) => i.sym.to_string(),
+                                ModuleExportName::Str(s) => s.value.to_string(),
+                            };
+                            let exported = nm.exported.as_ref().map(|e| match e {
+                                ModuleExportName::Ident(i) => i.sym.to_string(),
+                                ModuleExportName::Str(s) => s.value.to_string(),
+                            }).unwrap_or_else(|| imported.clone());
+                            self.graph.reexports.push(ReexportRow {
+                                exported,
+                                imported,
+                                source: src.value.to_string(),
+                                span: self.span_file_lines(en.span),
+                            });
+                        }
+                    }
+                } else {
+                    // export { local as exported }
+                    for s in &en.specifiers {
+                        if let ExportSpecifier::Named(nm) = s {
+                            if let ModuleExportName::Ident(orig) = &nm.orig {
+                                let exported = nm.exported.as_ref().map(|e| match e {
+                                    ModuleExportName::Ident(i) => i.sym.to_string(),
+                                    ModuleExportName::Str(s) => s.value.to_string(),
+                                }).unwrap_or_else(|| orig.sym.to_string());
+                                self.graph.exports.push(ExportRow {
+                                    exported,
+                                    local: orig.sym.to_string(),
+                                    span: self.span_file_lines(orig.span),
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+            ModuleDecl::ExportAll(ea) => {
+                self.graph.reexports.push(ReexportRow {
+                    exported: "*".into(),
+                    imported: "*".into(),
+                    source: ea.src.value.to_string(),
+                    span: self.span_file_lines(ea.span),
+                });
+            }
+            ModuleDecl::ExportDefaultDecl(ed) => {
+                if let DefaultDecl::Fn(f) = &ed.decl {
+                    if let Some(id) = &f.ident {
+                        self.graph.defs.push(DefRow {
+                            local: id.sym.to_string(),
+                            kind: "func",
+                            span: self.span_file_lines(id.span),
+                        });
+                        self.graph.exports.push(ExportRow {
+                            exported: "default".into(),
+                            local: id.sym.to_string(),
+                            span: self.span_file_lines(ed.span()),
+                        });
+                    }
+                }
+            }
+            _ => {}
+        }
+        n.visit_mut_children_with(self);
+    }
+
+    fn visit_mut_var_declarator(&mut self, d: &mut VarDeclarator) {
+        if let Some(name) = d.name.as_ident() {
+            self.graph.defs.push(DefRow {
+                local: name.id.sym.to_string(),
+                kind: "var",
+                span: self.span_file_lines(name.id.span),
+            });
+        }
+        d.visit_mut_children_with(self);
+    }
+
+    fn visit_mut_fn_decl(&mut self, n: &mut FnDecl) {
+        self.graph.defs.push(DefRow {
+            local: n.ident.sym.to_string(),
+            kind: "func",
+            span: self.span_file_lines(n.ident.span),
+        });
+        n.visit_mut_children_with(self);
+    }
+
+    fn visit_mut_class_decl(&mut self, n: &mut ClassDecl) {
+        self.graph.defs.push(DefRow {
+            local: n.ident.sym.to_string(),
+            kind: "class",
+            span: self.span_file_lines(n.ident.span),
+        });
+        n.visit_mut_children_with(self);
+    }
+
+    fn visit_mut_assign_expr(&mut self, n: &mut AssignExpr) {
+        match &n.left {
+            AssignTarget::Simple(SimpleAssignTarget::Ident(b)) => {
+                self.push_mutation_row(b.id.sym.to_string(), "".to_string(), "assign", n.span);
+            }
+            AssignTarget::Simple(SimpleAssignTarget::Member(m)) => {
+                let mexpr = Expr::Member(m.clone());
+                if let Some((root, path)) = self.static_member_path(&mexpr) {
+                    self.push_mutation_row(root, path, "assign", n.span);
+                }
+            }
+            _ => {}
+        }
+        n.visit_mut_children_with(self);
+    }
+
+    fn visit_mut_update_expr(&mut self, n: &mut UpdateExpr) {
+        match &*n.arg {
+            Expr::Ident(i) => self.push_mutation_row(i.sym.to_string(), "".to_string(), "update", n.span),
+            Expr::Member(m) => {
+                let mexpr = Expr::Member(m.clone());
+                if let Some((root, path)) = self.static_member_path(&mexpr) {
+                    self.push_mutation_row(root, path, "update", n.span);
+                }
+            }
+            _ => {}
+        }
+        n.visit_mut_children_with(self);
+    }
+
+    fn visit_mut_call_expr(&mut self, n: &mut CallExpr) {
+        // Object.assign(target, ...)
+        if let Callee::Expr(callee) = &n.callee {
+            if let Expr::Member(m) = &**callee {
+                if let (Expr::Ident(obj), MemberProp::Ident(prop)) = (&*m.obj, &m.prop) {
+                    if obj.sym.as_ref() == "Object" && prop.sym.as_ref() == "assign" {
+                        if let Some(first) = n.args.get(0) {
+                            if let Some((root, path)) = self.static_member_path(&first.expr) {
+                                self.push_mutation_row(root, path, "call:Object.assign", n.span);
+                            }
+                        }
+                    } else {
+                        // methods on arrays/maps/objects like push/set
+                        let method = prop.sym.to_string();
+                        if let Some((root, path)) = self.static_member_path(&m.obj) {
+                            let kind = match method.as_str() {
+                                "push" | "unshift" | "splice" => "call:array-mutate",
+                                "set" | "setIn" => "call:set",
+                                _ => "call:member",
+                            };
+                            self.push_mutation_row(root, path, kind, n.span);
+                        }
+                    }
+                }
+            }
+        }
+        n.visit_mut_children_with(self);
     }
 
     fn visit_mut_jsx_element(&mut self, node: &mut JSXElement) {
@@ -1142,6 +1599,7 @@ impl VisitMut for CodePressTransform {
 
         // ---------- gather provenance for this element ----------
         let mut all_nodes: Vec<ProvNode> = vec![];
+        let mut symrefs: Vec<SymbolRef> = vec![];
 
         // props (exprs + spreads)
         for a in &node.opening.attrs {
@@ -1154,6 +1612,7 @@ impl VisitMut for CodePressTransform {
                             let mut seen: HashSet<Id> = HashSet::new();
                             self.trace_expr(expr, &mut chain, 0, &mut seen);
                             all_nodes.extend(chain);
+                            self.collect_symbol_refs_from_expr(expr, &mut symrefs);
                         }
                     }
                 }
@@ -1162,6 +1621,7 @@ impl VisitMut for CodePressTransform {
                     let mut seen: HashSet<Id> = HashSet::new();
                     self.trace_expr(&sp.expr, &mut chain, 0, &mut seen);
                     all_nodes.extend(chain);
+                    self.collect_symbol_refs_from_expr(&sp.expr, &mut symrefs);
                 }
             }
         }
@@ -1176,6 +1636,7 @@ impl VisitMut for CodePressTransform {
                         let mut seen: HashSet<Id> = HashSet::new();
                         self.trace_expr(expr, &mut chain, 0, &mut seen);
                         all_nodes.extend(chain);
+                        self.collect_symbol_refs_from_expr(expr, &mut symrefs);
                     }
                 }
                 JSXElementChild::JSXText(t) => {
@@ -1210,6 +1671,8 @@ impl VisitMut for CodePressTransform {
         let kinds_json = serde_json::to_string(&kinds).unwrap_or_else(|_| "[]".into());
         let cands_enc = xor_encode(&cands_json);
         let kinds_enc = xor_encode(&kinds_json);
+        let symrefs_json = serde_json::to_string(&symrefs).unwrap_or_else(|_| "[]".into());
+        let symrefs_enc = xor_encode(&symrefs_json);
 
         // Always-on behavior for custom component callsites:
         let is_custom_call = !is_host && Self::is_custom_component_name(&node.opening.name);
@@ -1300,6 +1763,7 @@ impl VisitMut for CodePressTransform {
             let attrs = &mut node.opening.attrs;
             CodePressTransform::attach_attr_string(attrs, "data-codepress-edit-candidates", cands_enc.clone());
             CodePressTransform::attach_attr_string(attrs, "data-codepress-source-kinds",  kinds_enc.clone());
+            CodePressTransform::attach_attr_string(attrs, "data-codepress-symbol-refs",  symrefs_enc.clone());
         } else {
             // Host element → tag directly
             CodePressTransform::attach_attr_string(
@@ -1311,6 +1775,11 @@ impl VisitMut for CodePressTransform {
                 &mut node.opening.attrs,
                 "data-codepress-source-kinds",
                 kinds_enc.clone(),
+            );
+            CodePressTransform::attach_attr_string(
+                &mut node.opening.attrs,
+                "data-codepress-symbol-refs",
+                symrefs_enc.clone(),
             );
             if let JSXAttrOrSpread::JSXAttr(a) =
                 self.create_encoded_path_attr(&filename, node.opening.span, Some(node.span))
@@ -1324,8 +1793,6 @@ impl VisitMut for CodePressTransform {
                     value: a.value,
                 }));
             }
-            CodePressTransform::attach_attr_string(&mut node.opening.attrs, "data-codepress-edit-candidates", cands_enc.clone());
-            CodePressTransform::attach_attr_string(&mut node.opening.attrs, "data-codepress-source-kinds",  kinds_enc.clone());
         }
 
     }
@@ -1447,6 +1914,7 @@ pub fn process_transform(mut program: Program, metadata: TransformPluginProgramM
             "data-codepress-edit-candidates".to_string(),
             "data-codepress-source-kinds".to_string(),
             "data-codepress-callsite".to_string(),
+            "data-codepress-symbol-refs".to_string(),
         ],
     };
     program.visit_mut_with(&mut elider);
@@ -1464,4 +1932,57 @@ struct ProviderMeta {
     c: String,
     k: String,
     fp: String,
+}
+// -----------------------------------------------------------------------------
+// Extra types/helpers for symbol-refs & literal index
+// -----------------------------------------------------------------------------
+#[derive(serde::Serialize)]
+struct SymbolRef {
+    file: String,
+    local: String,
+    path: String,
+    span: String,
+}
+
+impl CodePressTransform {
+    fn harvest_literal_index(&mut self, export_name: &str, init: &Box<Expr>, prefix: String) {
+        fn push_key(prefix: &str, seg: &str) -> String {
+            if seg.starts_with('[') { format!("{prefix}{seg}") } else if prefix.is_empty() { seg.to_string() } else { format!("{prefix}.{seg}") }
+        }
+        match &**init {
+            Expr::Object(o) => {
+                for p in &o.props {
+                    if let PropOrSpread::Prop(p) = p {
+                        if let Prop::KeyValue(kv) = &**p {
+                            let key = match &kv.key {
+                                PropName::Ident(i) => i.sym.to_string(),
+                                PropName::Str(s) => s.value.to_string(),
+                                PropName::Num(n) => n.value.to_string(),
+                                _ => continue,
+                            };
+                            let path = push_key(&prefix, &key);
+                            self.harvest_literal_index(export_name, &kv.value, path);
+                        }
+                    }
+                }
+            }
+            Expr::Array(a) => {
+                for (idx, el) in a.elems.iter().enumerate() {
+                    if let Some(el) = el {
+                        let path = push_key(&prefix, &format!("[{idx}]"));
+                        self.harvest_literal_index(export_name, &el.expr, path);
+                    }
+                }
+            }
+            Expr::Lit(Lit::Str(s)) => {
+                self.graph.literal_index.push(LiteralIxRow {
+                    export_name: export_name.to_string(),
+                    path: prefix,
+                    text: s.value.to_string(),
+                    span: self.span_file_lines(s.span),
+                });
+            }
+            _ => {}
+        }
+    }
 }
