@@ -409,7 +409,7 @@ impl CodePressTransform {
                 if let Some(b) = self.bindings.get(&id) {
                     if let Some(init) = &b.init {
                         chain.push(ProvNode::Init {
-                            span: self.span_file_lines(b.def_span),
+                            span: self.span_file_lines(init.span()),
                         });
                         self.trace_expr(init, chain, depth + 1, seen);
                     }
@@ -1335,17 +1335,23 @@ impl VisitMut for CodePressTransform {
             Decl::Var(v) => {
                 for d in &v.decls {
                     if let Some(id) = d.name.as_ident() {
+                        let def_span = if let Some(init) = &d.init {
+                            self.span_file_lines(init.span())
+                        } else {
+                            self.span_file_lines(id.id.span)
+                        };
                         // def
                         self.graph.defs.push(DefRow {
                             local: id.id.sym.to_string(),
                             kind: match v.kind { VarDeclKind::Const => "const", VarDeclKind::Let => "let", VarDeclKind::Var => "var" },
-                            span: self.span_file_lines(id.id.span),
+                            span: def_span,
                         });
                         // export mapping
                         self.graph.exports.push(ExportRow {
                             exported: id.id.sym.to_string(),
                             local: id.id.sym.to_string(),
-                            span: self.span_file_lines(id.id.span),
+                            span: self.span_file_lines(id.id.span), // TODO: should this be a
+                                                                    // larger span?
                         });
                         // literal index (optional): only for simple object/array initializers
                         if let Some(init) = &d.init {
@@ -1456,10 +1462,15 @@ impl VisitMut for CodePressTransform {
 
     fn visit_mut_var_declarator(&mut self, d: &mut VarDeclarator) {
         if let Some(name) = d.name.as_ident() {
+            let def_span = if let Some(init) = &d.init {
+                self.span_file_lines(init.span())
+            } else {
+                self.span_file_lines(name.id.span)
+            };
             self.graph.defs.push(DefRow {
                 local: name.id.sym.to_string(),
                 kind: "var",
-                span: self.span_file_lines(name.id.span),
+                span: def_span,
             });
         }
         d.visit_mut_children_with(self);
