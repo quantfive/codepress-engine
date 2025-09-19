@@ -1189,8 +1189,23 @@ impl VisitMut for CodePressTransform {
         }
 
         // Build payloads
-        let candidates = self.rank_candidates(&all_nodes);
+        let mut candidates = self.rank_candidates(&all_nodes);
         let kinds = Self::aggregate_kinds(&all_nodes);
+
+        if !orig_full_span.is_dummy() {
+            if let Some(line_info) = self.get_line_info(orig_open_span, Some(orig_full_span)) {
+                // Keep the same (file:start-end) shape as other targets produced by span_file_lines
+                let self_target = format!("{}:{}", normalize_filename(&filename), line_info);
+                // Avoid dupes if it somehow already exists
+                let already = candidates.iter().any(|c| c.reason == "callsite" && c.target == self_target);
+                if !already {
+                    let cs = Candidate { target: self_target, reason: "callsite".into() };
+                    // candidates.insert(0, cs);
+                    candidates.push(cs);
+                }
+            }
+        }
+
         let cands_json = serde_json::to_string(&candidates).unwrap_or_else(|_| "[]".into());
         let kinds_json = serde_json::to_string(&kinds).unwrap_or_else(|_| "[]".into());
         let cands_enc = xor_encode(&cands_json);
