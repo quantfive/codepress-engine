@@ -635,6 +635,16 @@ impl CodePressTransform {
                     path: "".to_string(),
                     span: self.span_file_lines(i.span),
                 });
+                // 2) chase initialier (for mutated imports that are re-exported)
+                let id = i.to_id();
+                let init_expr: Option<Expr> = self
+                    .bindings
+                    .get(&id)
+                    .and_then(|b| b.init.as_deref())
+                    .cloned();
+                if let Some(ref init) = init_expr {
+                    self.collect_symbol_refs_from_expr(init, out);
+                }
            }
             Expr::Member(m) => {
                if let Some((root, path)) = self.static_member_path(&Expr::Member(m.clone())) {
