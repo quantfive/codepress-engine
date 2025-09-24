@@ -2,9 +2,12 @@ use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use swc_core::{
-    common::{SourceMapper, Spanned, DUMMY_SP, SyntaxContext},
+    common::{SourceMapper, Spanned, SyntaxContext, DUMMY_SP},
     ecma::{
-        ast::{Id, IdentName, ImportPhase, *},
+        ast::{
+            Expr, ExprOrSpread, Id, Ident, IdentName, ImportPhase, Lit, MemberProp, OptChainBase,
+            OptChainExpr, *,
+        },
         visit::{Visit, VisitMut, VisitMutWith, VisitWith},
     },
     plugin::{plugin_transform, proxies::TransformPluginProgramMetadata},
@@ -42,7 +45,11 @@ fn normalize_filename(filename: &str) -> String {
     } else if let Some(rest) = s.strip_prefix("file://") {
         s = rest.to_string();
     }
-    for prefix in &["turbopack/[project]/", "/turbopack/[project]/", "[project]/"] {
+    for prefix in &[
+        "turbopack/[project]/",
+        "/turbopack/[project]/",
+        "[project]/",
+    ] {
         if let Some(rest) = s.strip_prefix(prefix) {
             return rest.to_string();
         }
@@ -63,13 +70,14 @@ pub struct CodePressTransform {
     bindings: HashMap<Id, Binding>,
 
     // Always-on behavior:
-    wrapper_tag: String,        // DOM wrapper tag (display: contents)
-    provider_ident: String,     // __CPProvider (inline injected)
+    wrapper_tag: String,    // DOM wrapper tag (display: contents)
+    provider_ident: String, // __CPProvider (inline injected)
     inserted_provider_import: bool,
 
     // -------- module graph (this module only) --------
     module_file: Option<String>,
     graph: ModuleGraph,
+    host_attr_stack: Vec<*mut Vec<JSXAttrOrSpread>>,
 }
 
 impl CodePressTransform {
@@ -103,7 +111,10 @@ impl CodePressTransform {
                 defs: vec![],
                 mutations: vec![],
                 literal_index: vec![],
+                local_refs: vec![],
+                local_derives: vec![],
             },
+            host_attr_stack: Vec::new(),
         }
     }
 
@@ -127,7 +138,9 @@ impl CodePressTransform {
     }
 
     fn file_from_span(&mut self, s: swc_core::common::Span) -> Option<String> {
-        if s.is_dummy() { return None; }
+        if s.is_dummy() {
+            return None;
+        }
         if let Some(ref cm) = self.source_map {
             let lo = cm.lookup_char_pos(s.lo());
             let f = normalize_filename(&lo.file.name.to_string());
@@ -138,7 +151,9 @@ impl CodePressTransform {
     }
 
     fn current_file(&self) -> String {
-        self.module_file.clone().unwrap_or_else(|| "unknown".to_string())
+        self.module_file
+            .clone()
+            .unwrap_or_else(|| "unknown".to_string())
     }
 
     fn is_custom_component_name(name: &JSXElementName) -> bool {
@@ -193,26 +208,43 @@ impl CodePressTransform {
     // Build "root.path" for MemberExpr where the path is statically known.
     fn static_member_path(&self, expr: &Expr) -> Option<(String, String)> {
         fn push_seg(out: &mut String, seg: &str) {
-            if seg.starts_with('[') { out.push_str(seg); } else { out.push('.'); out.push_str(seg); }
+            if seg.starts_with('[') {
+                out.push_str(seg);
+            } else {
+                out.push('.');
+                out.push_str(seg);
+            }
         }
         fn walk<'a>(e: &'a Expr, root: &mut Option<String>, path: &mut String) -> bool {
             match e {
-                Expr::Ident(i) => { *root = Some(i.sym.to_string()); true }
+                Expr::Ident(i) => {
+                    *root = Some(i.sym.to_string());
+                    true
+                }
                 Expr::Member(m) => {
-                    if !walk(&m.obj, root, path) { return false; }
+                    if !walk(&m.obj, root, path) {
+                        return false;
+                    }
                     match &m.prop {
-                        MemberProp::Ident(p) => { push_seg(path, &p.sym.to_string()); true }
-                        MemberProp::PrivateName(_) => false,
-                        MemberProp::Computed(c) => {
-                            match &*c.expr {
-                                Expr::Lit(Lit::Str(s)) => { push_seg(path, &format!(r#"["{}"]"#, s.value)); true }
-                                Expr::Lit(Lit::Num(n)) => { push_seg(path, &format!("[{}]", n.value)); true }
-                                _ => false
-                            }
+                        MemberProp::Ident(p) => {
+                            push_seg(path, &p.sym.to_string());
+                            true
                         }
+                        MemberProp::PrivateName(_) => false,
+                        MemberProp::Computed(c) => match &*c.expr {
+                            Expr::Lit(Lit::Str(s)) => {
+                                push_seg(path, &format!(r#"["{}"]"#, s.value));
+                                true
+                            }
+                            Expr::Lit(Lit::Num(n)) => {
+                                push_seg(path, &format!("[{}]", n.value));
+                                true
+                            }
+                            _ => false,
+                        },
                     }
                 }
-                _ => false
+                _ => false,
             }
         }
         let mut root = None;
@@ -224,12 +256,37 @@ impl CodePressTransform {
         }
     }
 
-    fn push_mutation_row(&mut self, root: String, path: String, kind: &'static str, span: swc_core::common::Span) {
+    fn push_mutation_row(
+        &mut self,
+        root: String,
+        path: String,
+        kind: &'static str,
+        span: swc_core::common::Span,
+    ) {
         let _ = self.file_from_span(span);
         self.graph.mutations.push(MutationRow {
-            root, path, kind,
+            root,
+            path,
+            kind,
             span: self.span_file_lines(span),
         });
+    }
+    fn push_local_ref(&mut self, name: &str, kind: &'static str, span: swc_core::common::Span) {
+        let _ = self.file_from_span(span);
+        self.graph.local_refs.push(LocalRefRow {
+            local: name.to_string(),
+            kind,
+            span: self.span_file_lines(span),
+        });
+    }
+
+    /// Collect *identifier* names present inside an expression (shallow walk that skips JSX idents).
+    fn collect_ident_names_in_expr(&self, e: &Expr, out: &mut BTreeSet<String>) {
+        struct IdWalker<'a> { out: &'a mut BTreeSet<String> }
+        impl<'a> Visit for IdWalker<'a> {
+            fn visit_ident(&mut self, n: &Ident) { self.out.insert(n.sym.to_string()); }
+        }
+        e.visit_with(&mut IdWalker { out });
     }
 
     // Inject `globalThis.__CPX_GRAPH[file] = JSON.parse("<json>")` via new Function to avoid big AST building.
@@ -250,7 +307,11 @@ impl CodePressTransform {
                 span: DUMMY_SP,
                 callee: Callee::Expr(Box::new(Expr::New(NewExpr {
                     span: DUMMY_SP,
-                    callee: Box::new(Expr::Ident(Ident::new("Function".into(), DUMMY_SP, SyntaxContext::empty()))),
+                    callee: Box::new(Expr::Ident(Ident::new(
+                        "Function".into(),
+                        DUMMY_SP,
+                        SyntaxContext::empty(),
+                    ))),
                     args: Some(vec![ExprOrSpread {
                         spread: None,
                         expr: Box::new(Expr::Lit(Lit::Str(Str {
@@ -373,14 +434,78 @@ impl CodePressTransform {
         })
     }
 
+    fn get_attr_string(attrs: &[JSXAttrOrSpread], key: &str) -> Option<String> {
+        for a in attrs {
+            if let JSXAttrOrSpread::JSXAttr(attr) = a {
+                if let JSXAttrName::Ident(id) = &attr.name {
+                    if id.sym.as_ref() == key {
+                        if let Some(JSXAttrValue::Lit(Lit::Str(s))) = &attr.value {
+                            return Some(s.value.to_string());
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+    fn set_attr_string(attrs: &mut Vec<JSXAttrOrSpread>, key: &str, val: String) {
+        // remove existing then push
+        attrs.retain(|a| {
+            !matches!(a, JSXAttrOrSpread::JSXAttr(jsx)
+            if matches!(&jsx.name, JSXAttrName::Ident(id) if id.sym.as_ref()==key))
+        });
+        Self::attach_attr_string(attrs, key, val);
+    }
+    /// Merge two JSON-array strings without parsing. Accepts "[]" or "[...]" strings.
+    /// If either side is empty or malformed, falls back to concat or the non-empty side.
+    fn merge_json_arrays_str(lhs: &str, rhs: &str) -> String {
+        let l = lhs.trim();
+        let r = rhs.trim();
+        let empty_l = l == "[]" || l.is_empty();
+        let empty_r = r == "[]" || r.is_empty();
+        if empty_l && empty_r {
+            return "[]".to_string();
+        }
+        if empty_l {
+            return r.to_string();
+        }
+        if empty_r {
+            return l.to_string();
+        }
+        // strip brackets
+        let l_body = l
+            .strip_prefix('[')
+            .and_then(|x| x.strip_suffix(']'))
+            .unwrap_or(l);
+        let r_body = r
+            .strip_prefix('[')
+            .and_then(|x| x.strip_suffix(']'))
+            .unwrap_or(r);
+        if l_body.is_empty() {
+            return format!("[{}]", r_body);
+        }
+        if r_body.is_empty() {
+            return format!("[{}]", l_body);
+        }
+        format!("[{},{}]", l_body, r_body)
+    }
+
     // ---------- binding collection & tracing ----------
 
     fn collect_bindings(&mut self, program: &Program) {
-        let mut bc = BindingCollector { out: &mut self.bindings };
+        let mut bc = BindingCollector {
+            out: &mut self.bindings,
+        };
         program.visit_with(&mut bc);
     }
 
-    fn trace_expr(&self, expr: &Expr, chain: &mut Vec<ProvNode>, depth: usize, seen: &mut HashSet<Id>) {
+    fn trace_expr(
+        &self,
+        expr: &Expr,
+        chain: &mut Vec<ProvNode>,
+        depth: usize,
+        seen: &mut HashSet<Id>,
+    ) {
         if depth > 8 || chain.len() > 128 {
             return;
         }
@@ -447,25 +572,23 @@ impl CodePressTransform {
                 //     });
                 // }
                 let (mut callee_name, callee_span, fn_def_span) = match &c.callee {
-                    Callee::Expr(expr) => {
-                           match &**expr {
-                               Expr::Ident(id) => {
-                                   let name = id.sym.to_string();
-                                   let callee_span = self.span_file_lines(id.span);
-                                   let def = self
-                                       .bindings
-                                       .get(&id.to_id())
-                                       .and_then(|b| b.fn_body_span.or(Some(b.def_span)))
-                                       .map(|sp| self.span_file_lines(sp));
-                                   (name, callee_span, def)
-                               }
-                               Expr::Member(m) => {
-                                   ("<member>".to_string(), self.span_file_lines(m.span), None)
-                               }
-                               _ => ("<expr>".to_string(), self.span_file_lines(c.span), None),
-                           }
-                       }
-                       _ => ("<expr>".to_string(), self.span_file_lines(c.span), None),
+                    Callee::Expr(expr) => match &**expr {
+                        Expr::Ident(id) => {
+                            let name = id.sym.to_string();
+                            let callee_span = self.span_file_lines(id.span);
+                            let def = self
+                                .bindings
+                                .get(&id.to_id())
+                                .and_then(|b| b.fn_body_span.or(Some(b.def_span)))
+                                .map(|sp| self.span_file_lines(sp));
+                            (name, callee_span, def)
+                        }
+                        Expr::Member(m) => {
+                            ("<member>".to_string(), self.span_file_lines(m.span), None)
+                        }
+                        _ => ("<expr>".to_string(), self.span_file_lines(c.span), None),
+                    },
+                    _ => ("<expr>".to_string(), self.span_file_lines(c.span), None),
                 };
                 // if let Callee::Expr(expr) = &c.callee {
                 //     if let Expr::Member(m) = &**expr {
@@ -513,6 +636,16 @@ impl CodePressTransform {
                 });
                 for e in &t.exprs {
                     self.trace_expr(e, chain, depth + 1, seen);
+                }
+            }
+            Expr::TaggedTpl(tt) => {
+                chain.push(ProvNode::Op {
+                    op: "tagged-template".into(),
+                    span: self.span_file_lines(tt.span),
+                });
+                self.trace_expr(&tt.tag, chain, depth + 1, seen);
+                for ex in &tt.tpl.exprs {
+                    self.trace_expr(ex, chain, depth + 1, seen);
                 }
             }
             Expr::Bin(b) => {
@@ -585,36 +718,56 @@ impl CodePressTransform {
         let mut out: Vec<Candidate> = vec![];
         for n in chain {
             match n {
-                ProvNode::Literal { span, .. } => {
-                    out.push(Candidate { target: span.clone(), reason: "literal".into() })
+                ProvNode::Literal { span, .. } => out.push(Candidate {
+                    target: span.clone(),
+                    reason: "literal".into(),
+                }),
+                ProvNode::Init { span } => out.push(Candidate {
+                    target: span.clone(),
+                    reason: "const-init".into(),
+                }),
+                ProvNode::Member { span } => out.push(Candidate {
+                    target: span.clone(),
+                    reason: "member".into(),
+                }),
+                ProvNode::ObjectProp { span, .. } | ProvNode::ArrayElem { span, .. } => {
+                    out.push(Candidate {
+                        target: span.clone(),
+                        reason: "structural".into(),
+                    })
                 }
-                ProvNode::Init { span } => {
-                    out.push(Candidate { target: span.clone(), reason: "const-init".into() })
-                }
-                ProvNode::Member { span } => {
-                    out.push(Candidate { target: span.clone(), reason: "member".into() })
-                }
-                ProvNode::ObjectProp { span, .. } | ProvNode::ArrayElem { span, .. } => out.push(
-                    Candidate { target: span.clone(), reason: "structural".into() },
-                ),
-                ProvNode::Call { callsite, fn_def_span, .. } => {
-                    out.push(Candidate { target: callsite.clone(), reason: "callsite".into() });
+                ProvNode::Call {
+                    callsite,
+                    fn_def_span,
+                    ..
+                } => {
+                    out.push(Candidate {
+                        target: callsite.clone(),
+                        reason: "callsite".into(),
+                    });
                     if let Some(def) = fn_def_span {
-                        out.push(Candidate { target: def.clone(), reason: "fn-def".into() });
+                        out.push(Candidate {
+                            target: def.clone(),
+                            reason: "fn-def".into(),
+                        });
                     }
                 }
-                ProvNode::Ctor { span, .. } => {
-                    out.push(Candidate { target: span.clone(), reason: "constructor".into() })
-                }
-                ProvNode::Import { span, .. } => {
-                    out.push(Candidate { target: span.clone(), reason: "import".into() })
-                }
-                ProvNode::Env { span, .. } => {
-                    out.push(Candidate { target: span.clone(), reason: "env".into() })
-                }
-                ProvNode::Fetch { span, .. } => {
-                    out.push(Candidate { target: span.clone(), reason: "fetch".into() })
-                }
+                ProvNode::Ctor { span, .. } => out.push(Candidate {
+                    target: span.clone(),
+                    reason: "constructor".into(),
+                }),
+                ProvNode::Import { span, .. } => out.push(Candidate {
+                    target: span.clone(),
+                    reason: "import".into(),
+                }),
+                ProvNode::Env { span, .. } => out.push(Candidate {
+                    target: span.clone(),
+                    reason: "env".into(),
+                }),
+                ProvNode::Fetch { span, .. } => out.push(Candidate {
+                    target: span.clone(),
+                    reason: "fetch".into(),
+                }),
                 _ => {}
             }
         }
@@ -624,53 +777,228 @@ impl CodePressTransform {
             .filter(|c| seen.insert(format!("{}#{}", c.reason, c.target)))
             .collect()
     }
-    fn collect_symbol_refs_from_expr(&mut self, expr: &Expr, out: &mut Vec<SymbolRef>) {
-        // Remember file as soon as we can
-        let _ = self.file_from_span(expr.span());
-        match expr {
-            Expr::Ident(i) => {
-                out.push(SymbolRef {
-                    file: self.current_file(),
-                    local: i.sym.to_string(),
-                    path: "".to_string(),
-                    span: self.span_file_lines(i.span),
-                });
-                // 2) chase initialier (for mutated imports that are re-exported)
-                let id = i.to_id();
-                let init_expr: Option<Expr> = self
-                    .bindings
-                    .get(&id)
-                    .and_then(|b| b.init.as_deref())
-                    .cloned();
-                if let Some(ref init) = init_expr {
-                    self.collect_symbol_refs_from_expr(init, out);
+
+    fn push_ident_ref(
+        &mut self,
+        i: &Ident,
+        path: Option<String>,
+        span: swc_core::common::Span,
+        out: &mut Vec<SymbolRef>,
+    ) {
+        let file = self
+            .file_from_span(span)
+            .unwrap_or_else(|| self.current_file());
+        out.push(SymbolRef {
+            file,
+            local: i.sym.to_string(),
+            path: path.unwrap_or_default(),
+            span: self.span_file_lines(span),
+        });
+
+        // chase initializer exactly once
+        if let Some(init) = self
+            .bindings
+            .get(&i.to_id())
+            .and_then(|b| b.init.as_deref())
+            .cloned()
+        {
+            self.collect_symbol_refs_from_expr(&init, out);
+        }
+    }
+
+    fn member_to_root_and_path(
+        &mut self,
+        e: &Expr,
+    ) -> Option<(Ident, String, swc_core::common::Span)> {
+        use swc_core::ecma::ast::*;
+
+        fn push_seg(path: &mut String, seg: &str, bracketed: bool) {
+            if bracketed {
+                path.push('[');
+                path.push_str(seg);
+                path.push(']');
+            } else {
+                if !path.is_empty() {
+                    path.push('.');
                 }
-           }
-            Expr::Member(m) => {
-               if let Some((root, path)) = self.static_member_path(&Expr::Member(m.clone())) {
-                    out.push(SymbolRef {
-                       file: self.current_file(),
-                        local: root,
-                        path,
-                        span: self.span_file_lines(m.span),
-                    });
-                }
-                // also descend into obj/prop expr for nested refs
-                self.collect_symbol_refs_from_expr(&m.obj, out);
-                if let MemberProp::Computed(c) = &m.prop {
-                    self.collect_symbol_refs_from_expr(&c.expr, out);
-               }
+                path.push_str(seg);
             }
+        }
+
+        // Normalize optional chains to a Member if possible
+        if let Expr::OptChain(OptChainExpr { base, .. }) = e {
+            match &**base {
+                OptChainBase::Member(m) => {
+                    // Convert to a plain Member and reuse the same logic
+                    let mem = Expr::Member(m.clone());
+                    return self.member_to_root_and_path(&mem);
+                }
+                OptChainBase::Call(c) => {
+                    // `callee` is Box<Expr>` here as well
+                    let callee_expr: &Expr = &*c.callee;
+                    if let Some((root, _p, sp)) = self.member_to_root_and_path(callee_expr) {
+                        return Some((root, String::new(), sp));
+                    }
+                    return None;
+                }
+            }
+        }
+
+        // Regular MemberExpr
+        if let Expr::Member(m) = e {
+            // Walk object to find the root identifier (m.obj: Box<Expr>)
+            let (root, mut path, root_span) = match &*m.obj {
+                Expr::Ident(id) => (id.clone(), String::new(), id.span),
+                obj_expr => {
+                    if let Some((rid, p, rs)) = self.member_to_root_and_path(obj_expr) {
+                        (rid, p, rs)
+                    } else {
+                        return None;
+                    }
+                }
+            };
+
+            // Append a static segment if possible
+            match &m.prop {
+                MemberProp::Ident(p) => {
+                    push_seg(&mut path, &p.sym, false);
+                }
+                MemberProp::Computed(c) => {
+                    match &*c.expr {
+                        Expr::Lit(Lit::Str(s)) => {
+                            push_seg(&mut path, &format!("{:?}", s.value), true)
+                        }
+                        Expr::Lit(Lit::Num(n)) => push_seg(&mut path, &n.value.to_string(), true),
+                        Expr::Ident(p) => push_seg(&mut path, &p.sym, true),
+                        _ => {} // dynamic index; keep partial
+                    }
+                }
+                MemberProp::PrivateName(_) => { /* ignore as a segment */ }
+            }
+            return Some((root, path, root_span));
+        }
+
+        None
+    }
+
+    fn collect_symbol_refs_from_expr(&mut self, e: &Expr, out: &mut Vec<SymbolRef>) {
+        use swc_core::ecma::ast::*;
+
+        match e {
+            Expr::Ident(i) => {
+                self.push_ident_ref(i, None, i.span, out);
+                // mark plain identifier usage in expressions
+                self.push_local_ref(&i.sym.to_string(), "expr", i.span());
+            }
+
+            Expr::Member(_) | Expr::OptChain(_) => {
+                if let Some((root, path, sp)) = self.member_to_root_and_path(e) {
+                    let p = if path.is_empty() { None } else { Some(path) };
+                    self.push_ident_ref(&root, p, sp, out);
+                }
+            }
+
             Expr::Call(c) => {
-                if let Callee::Expr(e) = &c.callee {
-                    self.collect_symbol_refs_from_expr(e, out);
+                if let swc_core::ecma::ast::Callee::Expr(expr) = &c.callee {
+                    match &**expr {
+                        Expr::Member(_) | Expr::OptChain(_) => {
+                            if let Some((root, _path, sp)) = self.member_to_root_and_path(&**expr) {
+                                self.push_ident_ref(&root, None, sp, out);
+                            } else {
+                                self.collect_symbol_refs_from_expr(&**expr, out);
+                            }
+                        }
+                        _ => self.collect_symbol_refs_from_expr(&**expr, out),
+                    }
                 }
                 for a in &c.args {
-                    if a.spread.is_none() {
+                    self.collect_symbol_refs_from_expr(&a.expr, out);
+                }
+            }
+
+            Expr::New(n) => {
+                self.collect_symbol_refs_from_expr(&n.callee, out);
+                if let Some(args) = &n.args {
+                    for a in args {
                         self.collect_symbol_refs_from_expr(&a.expr, out);
                     }
                 }
             }
+
+            Expr::Tpl(t) => {
+                for ex in &t.exprs {
+                    // record template interpolation idents as "template"
+                    let mut ids = BTreeSet::<String>::new();
+                    self.collect_ident_names_in_expr(ex, &mut ids);
+                    for name in ids.iter() {
+                        self.push_local_ref(name, "template", ex.span());
+                    }
+                    self.collect_symbol_refs_from_expr(ex, out);
+                }
+            }
+
+            Expr::TaggedTpl(tt) => {
+                self.collect_symbol_refs_from_expr(&tt.tag, out);
+                for ex in &tt.tpl.exprs {
+                    self.collect_symbol_refs_from_expr(ex, out);
+                }
+            }
+
+            Expr::Bin(b) => {
+                self.collect_symbol_refs_from_expr(&b.left, out);
+                self.collect_symbol_refs_from_expr(&b.right, out);
+            }
+            Expr::Unary(u) => self.collect_symbol_refs_from_expr(&u.arg, out),
+            Expr::Update(u) => self.collect_symbol_refs_from_expr(&u.arg, out),
+            Expr::Cond(c) => {
+                self.collect_symbol_refs_from_expr(&c.test, out);
+                self.collect_symbol_refs_from_expr(&c.cons, out);
+                self.collect_symbol_refs_from_expr(&c.alt, out);
+            }
+            Expr::Seq(s) => {
+                for x in &s.exprs {
+                    self.collect_symbol_refs_from_expr(x, out);
+                }
+            }
+            Expr::Paren(p) => self.collect_symbol_refs_from_expr(&p.expr, out),
+
+            Expr::Array(a) => {
+                for el in &a.elems {
+                    if let Some(ExprOrSpread { expr, .. }) = el {
+                        self.collect_symbol_refs_from_expr(expr, out);
+                    }
+                }
+            }
+
+            Expr::Object(o) => {
+                for p in &o.props {
+                    match p {
+                        PropOrSpread::Spread(s) => self.collect_symbol_refs_from_expr(&s.expr, out),
+                        PropOrSpread::Prop(pp) => match &**pp {
+                            Prop::KeyValue(kv) => {
+                                if let PropName::Computed(c) = &kv.key {
+                                    self.collect_symbol_refs_from_expr(&c.expr, out);
+                                }
+                                self.collect_symbol_refs_from_expr(&kv.value, out);
+                            }
+                            Prop::Method(_) | Prop::Getter(_) | Prop::Setter(_) => { /* skip */ }
+                            Prop::Shorthand(id) => self.push_ident_ref(id, None, id.span, out),
+                            _ => {}
+                        },
+                    }
+                }
+            }
+
+            // TS wrappers
+            Expr::TsAs(e) => self.collect_symbol_refs_from_expr(&e.expr, out),
+            Expr::TsTypeAssertion(e) => self.collect_symbol_refs_from_expr(&e.expr, out),
+            Expr::TsConstAssertion(e) => self.collect_symbol_refs_from_expr(&e.expr, out),
+            Expr::TsNonNull(e) => self.collect_symbol_refs_from_expr(&e.expr, out),
+            Expr::TsSatisfies(e) => self.collect_symbol_refs_from_expr(&e.expr, out),
+
+            // No refs
+            Expr::Lit(_) | Expr::This(_) | Expr::MetaProp(_) | Expr::PrivateName(_) => {}
+
             _ => {}
         }
     }
@@ -708,7 +1036,14 @@ impl CodePressTransform {
         elem_span: swc_core::common::Span,
     ) -> JSXElement {
         let mut opening = JSXOpeningElement {
-            name: JSXElementName::Ident(Ident::new(self.wrapper_tag.clone().into(), DUMMY_SP, SyntaxContext::empty()).into()),
+            name: JSXElementName::Ident(
+                Ident::new(
+                    self.wrapper_tag.clone().into(),
+                    DUMMY_SP,
+                    SyntaxContext::empty(),
+                )
+                .into(),
+            ),
             attrs: vec![],
             self_closing: false,
             type_args: None,
@@ -722,16 +1057,14 @@ impl CodePressTransform {
                 span: DUMMY_SP,
                 expr: JSXExpr::Expr(Box::new(Expr::Object(ObjectLit {
                     span: DUMMY_SP,
-                    props: vec![PropOrSpread::Prop(Box::new(Prop::KeyValue(
-                        KeyValueProp {
-                            key: PropName::Ident(IdentName::new("display".into(), DUMMY_SP)),
-                            value: Box::new(Expr::Lit(Lit::Str(Str {
-                                span: DUMMY_SP,
-                                value: "contents".into(),
-                                raw: None,
-                            }))),
-                        },
-                    )))],
+                    props: vec![PropOrSpread::Prop(Box::new(Prop::KeyValue(KeyValueProp {
+                        key: PropName::Ident(IdentName::new("display".into(), DUMMY_SP)),
+                        value: Box::new(Expr::Lit(Lit::Str(Str {
+                            span: DUMMY_SP,
+                            value: "contents".into(),
+                            raw: None,
+                        }))),
+                    })))],
                 }))),
             })),
         }));
@@ -741,7 +1074,10 @@ impl CodePressTransform {
         if let JSXAttrOrSpread::JSXAttr(a) = callsite_attr {
             opening.attrs.push(JSXAttrOrSpread::JSXAttr(JSXAttr {
                 span: DUMMY_SP,
-                name: JSXAttrName::Ident(IdentName::new("data-codepress-callsite".into(), DUMMY_SP)),
+                name: JSXAttrName::Ident(IdentName::new(
+                    "data-codepress-callsite".into(),
+                    DUMMY_SP,
+                )),
                 value: a.value,
             }));
         }
@@ -751,7 +1087,14 @@ impl CodePressTransform {
             children: vec![],
             closing: Some(JSXClosingElement {
                 span: DUMMY_SP,
-                name: JSXElementName::Ident(Ident::new(self.wrapper_tag.clone().into(), DUMMY_SP, SyntaxContext::empty()).into()),
+                name: JSXElementName::Ident(
+                    Ident::new(
+                        self.wrapper_tag.clone().into(),
+                        DUMMY_SP,
+                        SyntaxContext::empty(),
+                    )
+                    .into(),
+                ),
             }),
         }
     }
@@ -824,7 +1167,11 @@ impl CodePressTransform {
                 op: AssignOp::Assign,
                 left: AssignTarget::Simple(SimpleAssignTarget::Member(MemberExpr {
                     span: DUMMY_SP,
-                    obj: Box::new(Expr::Ident(Ident::new("__CPX".into(), DUMMY_SP, SyntaxContext::empty()))),
+                    obj: Box::new(Expr::Ident(Ident::new(
+                        "__CPX".into(),
+                        DUMMY_SP,
+                        SyntaxContext::empty(),
+                    ))),
                     prop: MemberProp::Ident(IdentName::new("displayName".into(), DUMMY_SP)),
                 })),
                 right: Box::new(Expr::Lit(Lit::Str(Str {
@@ -848,12 +1195,14 @@ impl CodePressTransform {
                     props: vec![
                         ObjectPatProp::Assign(AssignPatProp {
                             span: DUMMY_SP,
-                            key: Ident::new("value".into(), DUMMY_SP, SyntaxContext::empty()).into(),
+                            key: Ident::new("value".into(), DUMMY_SP, SyntaxContext::empty())
+                                .into(),
                             value: None,
                         }),
                         ObjectPatProp::Assign(AssignPatProp {
                             span: DUMMY_SP,
-                            key: Ident::new("children".into(), DUMMY_SP, SyntaxContext::empty()).into(),
+                            key: Ident::new("children".into(), DUMMY_SP, SyntaxContext::empty())
+                                .into(),
                             value: None,
                         }),
                     ],
@@ -866,7 +1215,11 @@ impl CodePressTransform {
                     span: DUMMY_SP,
                     name: JSXElementName::JSXMemberExpr(JSXMemberExpr {
                         span: DUMMY_SP,
-                        obj: JSXObject::Ident(Ident::new("__CPX".into(), DUMMY_SP, SyntaxContext::empty())),
+                        obj: JSXObject::Ident(Ident::new(
+                            "__CPX".into(),
+                            DUMMY_SP,
+                            SyntaxContext::empty(),
+                        )),
                         prop: IdentName::new("Provider".into(), DUMMY_SP),
                     }),
                     attrs: vec![JSXAttrOrSpread::JSXAttr(JSXAttr {
@@ -896,13 +1249,21 @@ impl CodePressTransform {
                     span: DUMMY_SP,
                     name: JSXElementName::JSXMemberExpr(JSXMemberExpr {
                         span: DUMMY_SP,
-                        obj: JSXObject::Ident(Ident::new("__CPX".into(), DUMMY_SP, SyntaxContext::empty())),
+                        obj: JSXObject::Ident(Ident::new(
+                            "__CPX".into(),
+                            DUMMY_SP,
+                            SyntaxContext::empty(),
+                        )),
                         prop: IdentName::new("Provider".into(), DUMMY_SP),
                     }),
                 }),
             };
             ModuleItem::Stmt(Stmt::Decl(Decl::Fn(FnDecl {
-                ident: Ident::new(self.provider_ident.clone().into(), DUMMY_SP, SyntaxContext::empty()),
+                ident: Ident::new(
+                    self.provider_ident.clone().into(),
+                    DUMMY_SP,
+                    SyntaxContext::empty(),
+                ),
                 declare: false,
                 function: Box::new(Function {
                     params: vec![param],
@@ -940,47 +1301,61 @@ impl CodePressTransform {
 
 #[derive(serde::Serialize)]
 struct ImportRow {
-    local: String,              // local alias in this module
-    imported: String,           // 'default' | named | '*' (namespace)
-    source: String,             // "…/module"
-    span: String,               // "file:start-end"
+    local: String,    // local alias in this module
+    imported: String, // 'default' | named | '*' (namespace)
+    source: String,   // "…/module"
+    span: String,     // "file:start-end"
 }
 
 #[derive(serde::Serialize)]
 struct ExportRow {
-    exported: String,           // name visible to other modules ('default' is ok)
-    local: String,              // local symbol bound in this module
+    exported: String, // name visible to other modules ('default' is ok)
+    local: String,    // local symbol bound in this module
     span: String,
 }
 
 #[derive(serde::Serialize)]
 struct ReexportRow {
-    exported: String,           // name re-exported by this module
-    imported: String,           // name imported from source
-    source: String,             // "…/module"
+    exported: String, // name re-exported by this module
+    imported: String, // name imported from source
+    source: String,   // "…/module"
     span: String,
 }
 
 #[derive(serde::Serialize)]
 struct DefRow {
-    local: String,              // local binding in this module
-    kind: &'static str,         // var|let|const|func|class
+    local: String,      // local binding in this module
+    kind: &'static str, // var|let|const|func|class
     span: String,
 }
 
 #[derive(serde::Serialize)]
 struct MutationRow {
-    root: String,               // root local ident being mutated (teams)
-    path: String,               // dotted/index path if static: ".new_key" or '["k"]' or "[2]"
-    kind: &'static str,         // assign|update|call:Object.assign|call:push|call:set|spread-merge
+    root: String,       // root local ident being mutated (teams)
+    path: String,       // dotted/index path if static: ".new_key" or '["k"]' or "[2]"
+    kind: &'static str, // assign|update|call:Object.assign|call:push|call:set|spread-merge
     span: String,
 }
 
 #[derive(serde::Serialize)]
 struct LiteralIxRow {
-    export_name: String,        // e.g. PRINCIPALS
-    path: String,               // e.g. [1].specialty
+    export_name: String, // e.g. PRINCIPALS
+    path: String,        // e.g. [1].specialty
     text: String,
+    span: String,
+}
+
+#[derive(serde::Serialize)]
+struct LocalRefRow {
+    local: String,      // the locally-bound name you used in this file
+    kind: &'static str, // "expr" | "jsx-tag" | "jsx-prop" | "template"
+    span: String,       // "file:start-end"
+}
+
+#[derive(serde::Serialize)]
+struct LocalDeriveRow {
+    lhs: String,       // new local being defined
+    from: Vec<String>, // locals referenced in the initializer
     span: String,
 }
 
@@ -992,6 +1367,8 @@ struct ModuleGraph {
     defs: Vec<DefRow>,
     mutations: Vec<MutationRow>,
     literal_index: Vec<LiteralIxRow>,
+    local_refs: Vec<LocalRefRow>,
+    local_derives: Vec<LocalDeriveRow>,
 }
 
 // -----------------------------------------------------------------------------
@@ -1015,26 +1392,66 @@ struct ImportInfo {
 #[derive(serde::Serialize)]
 #[serde(tag = "kind")]
 enum ProvNode {
-    Literal { span: String, value_kind: &'static str },
-    Ident { name: String, span: String },
-    Init { span: String },
-    Import { source: String, imported: String, span: String },
-    Member { span: String },
-    ObjectProp { key: String, span: String },
-    ArrayElem { index: usize, span: String },
+    Literal {
+        span: String,
+        value_kind: &'static str,
+    },
+    Ident {
+        name: String,
+        span: String,
+    },
+    Init {
+        span: String,
+    },
+    Import {
+        source: String,
+        imported: String,
+        span: String,
+    },
+    Member {
+        span: String,
+    },
+    ObjectProp {
+        key: String,
+        span: String,
+    },
+    ArrayElem {
+        index: usize,
+        span: String,
+    },
     Call {
         callee: String,
         callsite: String,
         callee_span: String,
         fn_def_span: Option<String>,
     },
-    Ctor { callee: String, span: String },
-    Op { op: String, span: String },
-    Env { key: String, span: String },
-    Fetch { url: Option<String>, span: String },
-    Context { name: String, span: String },
-    Hook { name: String, span: String },
-    Unknown { span: String },
+    Ctor {
+        callee: String,
+        span: String,
+    },
+    Op {
+        op: String,
+        span: String,
+    },
+    Env {
+        key: String,
+        span: String,
+    },
+    Fetch {
+        url: Option<String>,
+        span: String,
+    },
+    Context {
+        name: String,
+        span: String,
+    },
+    Hook {
+        name: String,
+        span: String,
+    },
+    Unknown {
+        span: String,
+    },
 }
 
 #[derive(serde::Serialize)]
@@ -1205,8 +1622,14 @@ fn detect_fetch_like(c: &CallExpr) -> Option<FetchLike> {
 impl CodePressTransform {
     // Build provider wrapper: <__CPProvider value={{cs,c,k,fp}}>{node}</__CPProvider>
     fn wrap_with_provider(&self, node: &mut JSXElement, meta: ProviderMeta) {
-        let provider_name: JSXElementName =
-            JSXElementName::Ident(Ident::new(self.provider_ident.clone().into(), DUMMY_SP, SyntaxContext::empty()).into());
+        let provider_name: JSXElementName = JSXElementName::Ident(
+            Ident::new(
+                self.provider_ident.clone().into(),
+                DUMMY_SP,
+                SyntaxContext::empty(),
+            )
+            .into(),
+        );
 
         let mut opening = JSXOpeningElement {
             name: provider_name.clone(),
@@ -1278,7 +1701,9 @@ impl CodePressTransform {
             JSXElement {
                 span: DUMMY_SP,
                 opening: JSXOpeningElement {
-                    name: JSXElementName::Ident(Ident::new("div".into(), DUMMY_SP, SyntaxContext::empty()).into()),
+                    name: JSXElementName::Ident(
+                        Ident::new("div".into(), DUMMY_SP, SyntaxContext::empty()).into(),
+                    ),
                     attrs: vec![],
                     self_closing: false,
                     type_args: None,
@@ -1292,6 +1717,169 @@ impl CodePressTransform {
             .children
             .push(JSXElementChild::JSXElement(Box::new(original)));
         *node = provider;
+    }
+
+    // Only scan this element’s own opening attrs and direct JSXExpr children.
+    fn collect_shallow_from_jsx_element(&mut self, el: &JSXElement, symrefs: &mut Vec<SymbolRef>) {
+        // opening attrs (no nested JSX)
+        for a in &el.opening.attrs {
+            if let JSXAttrOrSpread::JSXAttr(attr) = a {
+                if let Some(JSXAttrValue::JSXExprContainer(c)) = &attr.value {
+                    if let JSXExpr::Expr(expr) = &c.expr {
+                        self.collect_symbol_refs_from_expr(expr, symrefs);
+                    }
+                } else if let Some(JSXAttrValue::JSXFragment(_))
+                | Some(JSXAttrValue::JSXElement(_)) = &attr.value
+                {
+                    // skip nested JSX in shallow mode
+                }
+            } else if let JSXAttrOrSpread::SpreadElement(sp) = a {
+                self.collect_symbol_refs_from_expr(&sp.expr, symrefs);
+            }
+        }
+
+        // direct children that are expressions (skip nested <JSXElement> / fragments)
+        for ch in &el.children {
+            if let JSXElementChild::JSXExprContainer(c) = ch {
+                if let JSXExpr::Expr(expr) = &c.expr {
+                    self.collect_symbol_refs_from_expr(expr, symrefs);
+                }
+            }
+        }
+    }
+
+    fn collect_from_jsx_element(
+        &mut self,
+        el: &JSXElement,
+        all_nodes: &mut Vec<ProvNode>,
+        symrefs: &mut Vec<SymbolRef>,
+    ) {
+        // record tag identifier usage (custom/local components) as "jsx-tag"
+        if let JSXElementName::Ident(tag_ident) = &el.opening.name {
+            // Uppercase heuristic usually means local binding (Component)
+            self.push_local_ref(&tag_ident.sym.to_string(), "jsx-tag", tag_ident.span);
+        }
+        // 1) attributes on this element
+        for a in &el.opening.attrs {
+            match a {
+                JSXAttrOrSpread::JSXAttr(attr) => match &attr.value {
+                    Some(JSXAttrValue::JSXExprContainer(c)) => {
+                        if let JSXExpr::Expr(expr) = &c.expr {
+                            // mark idents inside JSX prop expressions
+                            let mut ids = BTreeSet::<String>::new();
+                            self.collect_ident_names_in_expr(expr, &mut ids);
+                            for name in ids.iter() {
+                                self.push_local_ref(name, "jsx-prop", expr.span());
+                            }
+
+                            let expr = &**expr;
+                            let mut chain = vec![];
+                            let mut seen = HashSet::<Id>::new();
+                            self.trace_expr(expr, &mut chain, 0, &mut seen);
+                            all_nodes.extend(chain);
+                            self.collect_symbol_refs_from_expr(expr, symrefs);
+                        }
+                    }
+                    Some(JSXAttrValue::JSXElement(inner)) => {
+                        self.collect_from_jsx_element(inner, all_nodes, symrefs);
+                    }
+                    Some(JSXAttrValue::JSXFragment(frag)) => {
+                        self.collect_from_jsx_fragment(frag, all_nodes, symrefs);
+                    }
+                    _ => {}
+                },
+                JSXAttrOrSpread::SpreadElement(sp) => {
+                    // spread child expression local refs
+                    let mut ids = BTreeSet::<String>::new();
+                    self.collect_ident_names_in_expr(&sp.expr, &mut ids);
+                    for name in ids.iter() {
+                        self.push_local_ref(name, "jsx-prop", sp.span());
+                    }
+
+                    let mut chain = vec![];
+                    let mut seen = HashSet::<Id>::new();
+                    self.trace_expr(&sp.expr, &mut chain, 0, &mut seen);
+                    all_nodes.extend(chain);
+                    self.collect_symbol_refs_from_expr(&sp.expr, symrefs);
+                }
+            }
+        }
+
+        // 2) children of this element
+        for ch in &el.children {
+            match ch {
+                JSXElementChild::JSXExprContainer(c) => {
+                    if let JSXExpr::Expr(expr) = &c.expr {
+                        let expr = &**expr;
+                        let mut chain = vec![];
+                        let mut seen = HashSet::<Id>::new();
+                        self.trace_expr(expr, &mut chain, 0, &mut seen);
+                        all_nodes.extend(chain);
+                        self.collect_symbol_refs_from_expr(expr, symrefs);
+                    }
+                }
+                JSXElementChild::JSXElement(inner) => {
+                    self.collect_from_jsx_element(inner, all_nodes, symrefs);
+                }
+                JSXElementChild::JSXFragment(frag) => {
+                    self.collect_from_jsx_fragment(frag, all_nodes, symrefs);
+                }
+                JSXElementChild::JSXSpreadChild(sp) => {
+                    let mut chain = vec![];
+                    let mut seen = HashSet::<Id>::new();
+                    self.trace_expr(&sp.expr, &mut chain, 0, &mut seen);
+                    all_nodes.extend(chain);
+                    self.collect_symbol_refs_from_expr(&sp.expr, symrefs);
+                }
+                JSXElementChild::JSXText(t) => {
+                    all_nodes.push(ProvNode::Literal {
+                        span: self.span_file_lines(t.span),
+                        value_kind: "string",
+                    });
+                }
+            }
+        }
+    }
+
+    fn collect_from_jsx_fragment(
+        &mut self,
+        frag: &JSXFragment,
+        all_nodes: &mut Vec<ProvNode>,
+        symrefs: &mut Vec<SymbolRef>,
+    ) {
+        for ch in &frag.children {
+            match ch {
+                JSXElementChild::JSXExprContainer(c) => {
+                    if let JSXExpr::Expr(expr) = &c.expr {
+                        let expr = &**expr;
+                        let mut chain = vec![];
+                        let mut seen = HashSet::<Id>::new();
+                        self.trace_expr(expr, &mut chain, 0, &mut seen);
+                        all_nodes.extend(chain);
+                        self.collect_symbol_refs_from_expr(expr, symrefs);
+                    }
+                }
+                JSXElementChild::JSXElement(inner) => {
+                    self.collect_from_jsx_element(inner, all_nodes, symrefs);
+                }
+                JSXElementChild::JSXFragment(f) => {
+                    self.collect_from_jsx_fragment(f, all_nodes, symrefs);
+                }
+                JSXElementChild::JSXSpreadChild(sp) => {
+                    let mut chain = vec![];
+                    let mut seen = HashSet::<Id>::new();
+                    self.trace_expr(&sp.expr, &mut chain, 0, &mut seen);
+                    all_nodes.extend(chain);
+                    self.collect_symbol_refs_from_expr(&sp.expr, symrefs);
+                }
+                JSXElementChild::JSXText(t) => {
+                    all_nodes.push(ProvNode::Literal {
+                        span: self.span_file_lines(t.span),
+                        value_kind: "string",
+                    });
+                }
+            }
+        }
     }
 }
 
@@ -1312,7 +1900,13 @@ impl VisitMut for CodePressTransform {
                         imported: named
                             .imported
                             .as_ref()
-                            .and_then(|i| if let ModuleExportName::Ident(i) = i { Some(i.sym.to_string()) } else { None })
+                            .and_then(|i| {
+                                if let ModuleExportName::Ident(i) = i {
+                                    Some(i.sym.to_string())
+                                } else {
+                                    None
+                                }
+                            })
                             .unwrap_or_else(|| named.local.sym.to_string()),
                         source: n.src.value.to_string(),
                         span: self.span_file_lines(named.local.span),
@@ -1353,7 +1947,11 @@ impl VisitMut for CodePressTransform {
                         // def
                         self.graph.defs.push(DefRow {
                             local: id.id.sym.to_string(),
-                            kind: match v.kind { VarDeclKind::Const => "const", VarDeclKind::Let => "let", VarDeclKind::Var => "var" },
+                            kind: match v.kind {
+                                VarDeclKind::Const => "const",
+                                VarDeclKind::Let => "let",
+                                VarDeclKind::Var => "var",
+                            },
                             span: def_span,
                         });
                         // export mapping
@@ -1365,7 +1963,11 @@ impl VisitMut for CodePressTransform {
                         });
                         // literal index (optional): only for simple object/array initializers
                         if let Some(init) = &d.init {
-                            self.harvest_literal_index(&id.id.sym.to_string(), &init, "".to_string());
+                            self.harvest_literal_index(
+                                &id.id.sym.to_string(),
+                                &init,
+                                "".to_string(),
+                            );
                         }
                     }
                 }
@@ -1410,10 +2012,14 @@ impl VisitMut for CodePressTransform {
                                 ModuleExportName::Ident(i) => i.sym.to_string(),
                                 ModuleExportName::Str(s) => s.value.to_string(),
                             };
-                            let exported = nm.exported.as_ref().map(|e| match e {
-                                ModuleExportName::Ident(i) => i.sym.to_string(),
-                                ModuleExportName::Str(s) => s.value.to_string(),
-                            }).unwrap_or_else(|| imported.clone());
+                            let exported = nm
+                                .exported
+                                .as_ref()
+                                .map(|e| match e {
+                                    ModuleExportName::Ident(i) => i.sym.to_string(),
+                                    ModuleExportName::Str(s) => s.value.to_string(),
+                                })
+                                .unwrap_or_else(|| imported.clone());
                             self.graph.reexports.push(ReexportRow {
                                 exported,
                                 imported,
@@ -1427,10 +2033,14 @@ impl VisitMut for CodePressTransform {
                     for s in &en.specifiers {
                         if let ExportSpecifier::Named(nm) = s {
                             if let ModuleExportName::Ident(orig) = &nm.orig {
-                                let exported = nm.exported.as_ref().map(|e| match e {
-                                    ModuleExportName::Ident(i) => i.sym.to_string(),
-                                    ModuleExportName::Str(s) => s.value.to_string(),
-                                }).unwrap_or_else(|| orig.sym.to_string());
+                                let exported = nm
+                                    .exported
+                                    .as_ref()
+                                    .map(|e| match e {
+                                        ModuleExportName::Ident(i) => i.sym.to_string(),
+                                        ModuleExportName::Str(s) => s.value.to_string(),
+                                    })
+                                    .unwrap_or_else(|| orig.sym.to_string());
                                 self.graph.exports.push(ExportRow {
                                     exported,
                                     local: orig.sym.to_string(),
@@ -1482,6 +2092,19 @@ impl VisitMut for CodePressTransform {
                 kind: "var",
                 span: def_span,
             });
+            // localDerives — LHS depends on idents in initializer
+            if let Some(init) = &d.init {
+                let mut ids = BTreeSet::<String>::new();
+                self.collect_ident_names_in_expr(init, &mut ids);
+                if !ids.is_empty() {
+                    let _ = self.file_from_span(d.span);
+                    self.graph.local_derives.push(LocalDeriveRow {
+                        lhs: name.id.sym.to_string(),
+                        from: ids.into_iter().collect(),
+                        span: self.span_file_lines(d.span),
+                    });
+                }
+            }
         }
         d.visit_mut_children_with(self);
     }
@@ -1522,7 +2145,9 @@ impl VisitMut for CodePressTransform {
 
     fn visit_mut_update_expr(&mut self, n: &mut UpdateExpr) {
         match &*n.arg {
-            Expr::Ident(i) => self.push_mutation_row(i.sym.to_string(), "".to_string(), "update", n.span),
+            Expr::Ident(i) => {
+                self.push_mutation_row(i.sym.to_string(), "".to_string(), "update", n.span)
+            }
             Expr::Member(m) => {
                 let mexpr = Expr::Member(m.clone());
                 if let Some((root, path)) = self.static_member_path(&mexpr) {
@@ -1564,10 +2189,24 @@ impl VisitMut for CodePressTransform {
     }
 
     fn visit_mut_jsx_element(&mut self, node: &mut JSXElement) {
+        // Determine if this node is a host before descending
+        let is_host_pre = matches!(
+            &node.opening.name,
+            JSXElementName::Ident(id) if id.sym.chars().next().map(|c| c.is_lowercase()).unwrap_or(false)
+        );
+        if is_host_pre {
+            // SAFETY: we only deref within this call frame, and SWC visits depth-first
+            let attrs_ptr: *mut Vec<JSXAttrOrSpread> = &mut node.opening.attrs;
+            self.host_attr_stack.push(attrs_ptr);
+        }
+
         node.visit_mut_children_with(self);
 
         // Skip our synthetic elements to avoid computing spans on DUMMY_SP, but still visit inside.
         if self.is_synthetic_element(&node.opening.name) {
+            if is_host_pre {
+                self.host_attr_stack.pop();
+            }
             return;
         }
 
@@ -1580,16 +2219,21 @@ impl VisitMut for CodePressTransform {
             if orig_full_span.is_dummy() {
                 "unknown".to_string()
             } else {
-                cm.lookup_char_pos(orig_full_span.lo()).file.name.to_string()
+                cm.lookup_char_pos(orig_full_span.lo())
+                    .file
+                    .name
+                    .to_string()
             }
         } else {
             "unknown".to_string()
         };
 
         // Preserve your original attribute on EVERY JSX element
-        node.opening
-            .attrs
-            .push(self.create_encoded_path_attr(&filename, node.opening.span, Some(node.span)));
+        node.opening.attrs.push(self.create_encoded_path_attr(
+            &filename,
+            node.opening.span,
+            Some(node.span),
+        ));
 
         // Root repo/branch once
         if self.repo_name.is_some() && !GLOBAL_ATTRIBUTES_ADDED.load(Ordering::Relaxed) {
@@ -1613,62 +2257,18 @@ impl VisitMut for CodePressTransform {
         }
 
         // Host vs custom
-        let is_host = matches!(
-            &node.opening.name,
-            JSXElementName::Ident(id) if id.sym.chars().next().map(|c| c.is_lowercase()).unwrap_or(false)
-        );
+        let is_host = is_host_pre;
 
         // ---------- gather provenance for this element ----------
         let mut all_nodes: Vec<ProvNode> = vec![];
         let mut symrefs: Vec<SymbolRef> = vec![];
 
-        // props (exprs + spreads)
-        for a in &node.opening.attrs {
-            match a {
-                JSXAttrOrSpread::JSXAttr(prop_attr) => {
-                    if let Some(JSXAttrValue::JSXExprContainer(container)) = &prop_attr.value {
-                        if let JSXExpr::Expr(expr) = &container.expr {
-                            let expr = &**expr;
-                            let mut chain = vec![];
-                            let mut seen: HashSet<Id> = HashSet::new();
-                            self.trace_expr(expr, &mut chain, 0, &mut seen);
-                            all_nodes.extend(chain);
-                            self.collect_symbol_refs_from_expr(expr, &mut symrefs);
-                        }
-                    }
-                }
-                JSXAttrOrSpread::SpreadElement(sp) => {
-                    let mut chain = vec![];
-                    let mut seen: HashSet<Id> = HashSet::new();
-                    self.trace_expr(&sp.expr, &mut chain, 0, &mut seen);
-                    all_nodes.extend(chain);
-                    self.collect_symbol_refs_from_expr(&sp.expr, &mut symrefs);
-                }
-            }
-        }
+        // Deep walk: this element + any nested JSX inside attrs/children
+        self.collect_from_jsx_element(node, &mut all_nodes, &mut symrefs);
 
-        // children (expr + plain text)
-        for ch in &node.children {
-            match ch {
-                JSXElementChild::JSXExprContainer(container) => {
-                    if let JSXExpr::Expr(expr) = &container.expr {
-                        let expr = &**expr;
-                        let mut chain = vec![];
-                        let mut seen: HashSet<Id> = HashSet::new();
-                        self.trace_expr(expr, &mut chain, 0, &mut seen);
-                        all_nodes.extend(chain);
-                        self.collect_symbol_refs_from_expr(expr, &mut symrefs);
-                    }
-                }
-                JSXElementChild::JSXText(t) => {
-                    all_nodes.push(ProvNode::Literal {
-                        span: self.span_file_lines(t.span),
-                        value_kind: "string",
-                    });
-                }
-                _ => {}
-            }
-        }
+        // shallow (callsite-only)
+        let mut symrefs_shallow: Vec<SymbolRef> = vec![];
+        self.collect_shallow_from_jsx_element(node, &mut symrefs_shallow);
 
         // Build payloads
         let mut candidates = self.rank_candidates(&all_nodes);
@@ -1679,9 +2279,14 @@ impl VisitMut for CodePressTransform {
                 // Keep the same (file:start-end) shape as other targets produced by span_file_lines
                 let self_target = format!("{}:{}", normalize_filename(&filename), line_info);
                 // Avoid dupes if it somehow already exists
-                let already = candidates.iter().any(|c| c.reason == "callsite" && c.target == self_target);
+                let already = candidates
+                    .iter()
+                    .any(|c| c.reason == "callsite" && c.target == self_target);
                 if !already {
-                    let cs = Candidate { target: self_target, reason: "callsite".into() };
+                    let cs = Candidate {
+                        target: self_target,
+                        reason: "callsite".into(),
+                    };
                     // candidates.insert(0, cs);
                     candidates.push(cs);
                 }
@@ -1693,62 +2298,124 @@ impl VisitMut for CodePressTransform {
         let cands_enc = xor_encode(&cands_json);
         let kinds_enc = xor_encode(&kinds_json);
         let symrefs_json = serde_json::to_string(&symrefs).unwrap_or_else(|_| "[]".into());
+        let symrefs_shallow_json =
+            serde_json::to_string(&symrefs_shallow).unwrap_or_else(|_| "[]".into());
         let symrefs_enc = xor_encode(&symrefs_json);
+        let cs_symrefs_enc = xor_encode(&symrefs_shallow_json);
 
         // Always-on behavior for custom component callsites:
         let is_custom_call = !is_host && Self::is_custom_component_name(&node.opening.name);
 
         if is_custom_call {
-            // DOM wrapper (display: contents) carrying callsite; we also duplicate metadata on the invocation
-            let mut wrapper =
-                self.make_display_contents_wrapper(&filename, orig_open_span, orig_full_span);
-
-            let mut original = std::mem::replace(
-                node,
-                JSXElement {
-                    span: DUMMY_SP,
-                    opening: JSXOpeningElement {
-                        name: JSXElementName::Ident(Ident::new("div".into(), DUMMY_SP, SyntaxContext::empty()).into()),
-                        attrs: vec![],
-                        self_closing: false,
-                        type_args: None,
-                        span: DUMMY_SP,
-                    },
-                    children: vec![],
-                    closing: None,
-                },
-            );
-
-            // Duplicate metadata on invocation
+            // 1) Leave DEEP refs on the invocation (unchanged)
             CodePressTransform::attach_attr_string(
-                &mut original.opening.attrs,
+                &mut node.opening.attrs,
                 "data-codepress-edit-candidates",
                 cands_enc.clone(),
             );
             CodePressTransform::attach_attr_string(
-                &mut original.opening.attrs,
+                &mut node.opening.attrs,
                 "data-codepress-source-kinds",
                 kinds_enc.clone(),
             );
-            if let JSXAttrOrSpread::JSXAttr(a) =
-                self.create_encoded_path_attr(&filename, orig_open_span, Some(orig_full_span))
-            {
-                original.opening.attrs.push(JSXAttrOrSpread::JSXAttr(JSXAttr {
-                    span: DUMMY_SP,
-                    name: JSXAttrName::Ident(IdentName::new(
-                        "data-codepress-callsite".into(),
-                        DUMMY_SP,
-                    )),
-                    value: a.value,
-                }));
+            CodePressTransform::attach_attr_string(
+                &mut node.opening.attrs,
+                "data-codepress-symbol-refs",
+                symrefs_enc.clone(),
+            );
+
+            // 2) Stamp SHALLOW call-site refs on the nearest host ancestor in the caller.
+            if let Some(host_attrs_ptr) = self.host_attr_stack.last().copied() {
+                // SAFETY: pointer is valid within this visit frame
+                let host_attrs: &mut Vec<JSXAttrOrSpread> = unsafe { &mut *host_attrs_ptr };
+                // MERGE SHALLOW (not overwrite) callsite refs
+                if let Some(existing) =
+                    Self::get_attr_string(host_attrs, "data-codepress-callsite-symbol-refs")
+                {
+                    let merged = Self::merge_json_arrays_str(&existing, &cs_symrefs_enc);
+                    Self::set_attr_string(
+                        host_attrs,
+                        "data-codepress-callsite-symbol-refs",
+                        merged,
+                    );
+                } else {
+                    Self::attach_attr_string(
+                        host_attrs,
+                        "data-codepress-callsite-symbol-refs",
+                        cs_symrefs_enc.clone(),
+                    );
+                }
+                // MERGE DEEP refs into host
+                if let Some(existing) =
+                    Self::get_attr_string(host_attrs, "data-codepress-symbol-refs")
+                {
+                    let merged = Self::merge_json_arrays_str(&existing, &symrefs_enc);
+                    Self::set_attr_string(host_attrs, "data-codepress-symbol-refs", merged);
+                } else {
+                    Self::attach_attr_string(
+                        host_attrs,
+                        "data-codepress-symbol-refs",
+                        symrefs_enc.clone(),
+                    );
+                }
+                // stamp/merge callsite location too (file:start-end)
+                if let JSXAttrOrSpread::JSXAttr(a) =
+                    self.create_encoded_path_attr(&filename, orig_open_span, Some(orig_full_span))
+                {
+                    let key = "data-codepress-callsite";
+                    if let Some(existing) = Self::get_attr_string(host_attrs, key) {
+                        // locations are single strings; keep first (stable) and ignore duplicates
+                        // No-op if already set
+                        let _ = existing;
+                    } else {
+                        host_attrs.push(JSXAttrOrSpread::JSXAttr(JSXAttr {
+                            span: DUMMY_SP,
+                            name: JSXAttrName::Ident(IdentName::new(key.into(), DUMMY_SP)),
+                            value: a.value,
+                        }));
+                    }
+                }
+            } else {
+                // 2b) No host ancestor available. Introduce a TEMP wrapper (display:contents)
+                //     that carries call-site refs; Pass 2 (HoistAndElide) will hoist them into
+                //     the first host descendant and remove the wrapper => no extra DOM ends up in output.
+                let mut wrapper =
+                    self.make_display_contents_wrapper(&filename, orig_open_span, orig_full_span);
+                CodePressTransform::attach_attr_string(
+                    &mut wrapper.opening.attrs,
+                    "data-codepress-callsite-symbol-refs",
+                    cs_symrefs_enc.clone(),
+                );
+                CodePressTransform::attach_attr_string(
+                    &mut wrapper.opening.attrs,
+                    "data-codepress-symbol-refs",
+                    symrefs_enc.clone(),
+                );
+                // move current node into wrapper children
+                let original = std::mem::replace(
+                    node,
+                    JSXElement {
+                        span: DUMMY_SP,
+                        opening: JSXOpeningElement {
+                            name: JSXElementName::Ident(
+                                Ident::new("div".into(), DUMMY_SP, SyntaxContext::empty()).into(),
+                            ),
+                            attrs: vec![],
+                            self_closing: false,
+                            type_args: None,
+                            span: DUMMY_SP,
+                        },
+                        children: vec![],
+                        closing: None,
+                    },
+                );
+                wrapper
+                    .children
+                    .push(JSXElementChild::JSXElement(Box::new(original)));
+                *node = wrapper;
             }
 
-            wrapper
-                .children
-                .push(JSXElementChild::JSXElement(Box::new(original)));
-            *node = wrapper;
-
-            // Also wrap with non-DOM Provider carrying same payload (context crosses portals, no DOM added)
+            // 3) wrap with non-DOM Provider carrying same payload (context crosses portals, no DOM added)
             let cs_enc = if let JSXAttrOrSpread::JSXAttr(a) =
                 self.create_encoded_path_attr(&filename, orig_open_span, Some(orig_full_span))
             {
@@ -1778,13 +2445,10 @@ impl VisitMut for CodePressTransform {
                 c: cands_enc.clone(),
                 k: kinds_enc.clone(),
                 fp: fp_enc,
+                sr: symrefs_enc.clone(),
+                csr: cs_symrefs_enc.clone(),
             };
             self.wrap_with_provider(node, meta);
-
-            let attrs = &mut node.opening.attrs;
-            CodePressTransform::attach_attr_string(attrs, "data-codepress-edit-candidates", cands_enc.clone());
-            CodePressTransform::attach_attr_string(attrs, "data-codepress-source-kinds",  kinds_enc.clone());
-            CodePressTransform::attach_attr_string(attrs, "data-codepress-symbol-refs",  symrefs_enc.clone());
         } else {
             // Host element → tag directly
             CodePressTransform::attach_attr_string(
@@ -1802,6 +2466,11 @@ impl VisitMut for CodePressTransform {
                 "data-codepress-symbol-refs",
                 symrefs_enc.clone(),
             );
+            CodePressTransform::attach_attr_string(
+                &mut node.opening.attrs,
+                "data-codepress-callsite-symbol-refs",
+                cs_symrefs_enc.clone(),
+            );
             if let JSXAttrOrSpread::JSXAttr(a) =
                 self.create_encoded_path_attr(&filename, node.opening.span, Some(node.span))
             {
@@ -1815,7 +2484,9 @@ impl VisitMut for CodePressTransform {
                 }));
             }
         }
-
+        if is_host_pre {
+            self.host_attr_stack.pop();
+        }
     }
 }
 
@@ -1870,6 +2541,64 @@ impl HoistAndElide {
             }))),
         }));
     }
+    fn is_host(el: &JSXElement) -> bool {
+        matches!(
+            &el.opening.name,
+            JSXElementName::Ident(id) if id.sym.chars().next().map(|c| c.is_lowercase()).unwrap_or(false)
+        )
+    }
+
+    // returns Some(&mut JSXElement) of the first host descendant, depth-first
+    fn first_host_descendant_mut<'a>(el: &'a mut JSXElement) -> Option<&'a mut JSXElement> {
+        for ch in &mut el.children {
+            if let JSXElementChild::JSXElement(inner) = ch {
+                if Self::is_host(inner) {
+                    return Some(inner);
+                }
+                if let Some(d) = Self::first_host_descendant_mut(inner) {
+                    return Some(d);
+                }
+            }
+        }
+        None
+    }
+    fn remove_attr(attrs: &mut Vec<JSXAttrOrSpread>, key: &str) {
+        attrs.retain(|a| {
+            if let JSXAttrOrSpread::JSXAttr(attr) = a {
+                if let JSXAttrName::Ident(id) = &attr.name {
+                    return id.sym.as_ref() != key;
+                }
+            }
+            true
+        });
+    }
+    fn copy_payload_keys(
+        src_attrs: &[JSXAttrOrSpread],
+        dst_attrs: &mut Vec<JSXAttrOrSpread>,
+        keys: &[String],
+    ) {
+        for key in keys {
+            if let Some(val) = Self::get_attr_string(src_attrs, key) {
+                // For JSON-array ref keys, MERGE instead of overwrite
+                if key == "data-codepress-callsite-symbol-refs"
+                    || key == "data-codepress-symbol-refs"
+                {
+                    if let Some(existing) = Self::get_attr_string(dst_attrs, key) {
+                        let merged = CodePressTransform::merge_json_arrays_str(&existing, &val);
+                        Self::remove_attr(dst_attrs, key);
+                        Self::push_attr(dst_attrs, key, merged);
+                    } else {
+                        Self::push_attr(dst_attrs, key, val);
+                    }
+                } else {
+                    // For non-array payloads, keep first writer
+                    if !Self::has_attr(dst_attrs, key) {
+                        Self::push_attr(dst_attrs, key, val);
+                    }
+                }
+            }
+        }
+    }
 }
 
 impl VisitMut for HoistAndElide {
@@ -1890,14 +2619,14 @@ impl VisitMut for HoistAndElide {
             }
         };
         let mut child = child_el;
-
-        // Hoist keys if missing on child
-        for key in &self.keys {
-            if !Self::has_attr(&child.opening.attrs, key) {
-                if let Some(val) = Self::get_attr_string(&node.opening.attrs, key) {
-                    Self::push_attr(&mut child.opening.attrs, key, val);
-                }
-            }
+        // 1) Prefer to hoist payload into the nearest host DOM descendant.
+        if let Some(host) = Self::first_host_descendant_mut(&mut child) {
+            Self::copy_payload_keys(&node.opening.attrs, &mut host.opening.attrs, &self.keys);
+        } else {
+            // 2) No host descendant available here (likely a custom component invocation).
+            //    Hoist payload as props to the child invocation itself (these will land
+            //    on real DOM if the component forwards props).
+            Self::copy_payload_keys(&node.opening.attrs, &mut child.opening.attrs, &self.keys);
         }
 
         // Replace wrapper with child
@@ -1910,7 +2639,10 @@ impl VisitMut for HoistAndElide {
 // -----------------------------------------------------------------------------
 
 #[plugin_transform]
-pub fn process_transform(mut program: Program, metadata: TransformPluginProgramMetadata) -> Program {
+pub fn process_transform(
+    mut program: Program,
+    metadata: TransformPluginProgramMetadata,
+) -> Program {
     let config = metadata
         .get_transform_plugin_config()
         .map(|s| serde_json::from_str(&s).unwrap_or_default())
@@ -1936,6 +2668,7 @@ pub fn process_transform(mut program: Program, metadata: TransformPluginProgramM
             "data-codepress-source-kinds".to_string(),
             "data-codepress-callsite".to_string(),
             "data-codepress-symbol-refs".to_string(),
+            "data-codepress-callsite-symbol-refs".to_string(),
         ],
     };
     program.visit_mut_with(&mut elider);
@@ -1953,6 +2686,8 @@ struct ProviderMeta {
     c: String,
     k: String,
     fp: String,
+    sr: String,
+    csr: String,
 }
 // -----------------------------------------------------------------------------
 // Extra types/helpers for symbol-refs & literal index
@@ -1968,7 +2703,13 @@ struct SymbolRef {
 impl CodePressTransform {
     fn harvest_literal_index(&mut self, export_name: &str, init: &Box<Expr>, prefix: String) {
         fn push_key(prefix: &str, seg: &str) -> String {
-            if seg.starts_with('[') { format!("{prefix}{seg}") } else if prefix.is_empty() { seg.to_string() } else { format!("{prefix}.{seg}") }
+            if seg.starts_with('[') {
+                format!("{prefix}{seg}")
+            } else if prefix.is_empty() {
+                seg.to_string()
+            } else {
+                format!("{prefix}.{seg}")
+            }
         }
         match &**init {
             Expr::Object(o) => {
