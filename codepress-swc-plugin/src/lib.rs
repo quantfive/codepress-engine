@@ -21,15 +21,14 @@ static GLOBAL_ATTRIBUTES_ADDED: AtomicBool = AtomicBool::new(false);
 // -----------------------------------------------------------------------------
 
 fn xor_encode(input: &str) -> String {
-    // TODO: turn on encoding for production
-    // const SECRET: &[u8] = b"codepress-file-obfuscation";
-    // let xored: Vec<u8> = input
-    //     .bytes()
-    //     .enumerate()
-    //     .map(|(i, b)| b ^ SECRET[i % SECRET.len()])
-    //     .collect();
-    // URL_SAFE_NO_PAD.encode(xored)
-    input.to_string()
+    const SECRET: &[u8] = b"codepress-file-obfuscation";
+    let xored: Vec<u8> = input
+        .bytes()
+        .enumerate()
+        .map(|(i, b)| b ^ SECRET[i % SECRET.len()])
+        .collect();
+    URL_SAFE_NO_PAD.encode(xored)
+    // input.to_string()
 }
 
 /// Normalize bundler/debugger style filenames before encoding.
