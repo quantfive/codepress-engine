@@ -2,6 +2,7 @@ use base64::{engine::general_purpose::STANDARD, Engine as _};
 use serde::Serialize;
 use serde_json::json;
 use std::collections::HashMap;
+use std::fmt::Write as _;
 use std::sync::atomic::{AtomicBool, Ordering};
 use swc_core::common::{FileName, SourceMapper, DUMMY_SP};
 use swc_core::ecma::{
@@ -586,6 +587,7 @@ impl CodePressTransform {
             "repoName": registration.repo_name,
             "branchName": registration.branch_name,
             "components": components_value,
+            "moduleInfo": serde_json::Value::Null,
         });
 
         let registration_json = registration_literal.to_string();
@@ -598,12 +600,22 @@ impl CodePressTransform {
             ))
             .unwrap_or_default();
 
-        let injected_code = format!(
-            "const __cpReg = {registration_json};\nif (typeof globalThis !== \"undefined\") {{\n  const __target = (globalThis.{global} = globalThis.{global} || []);\n  const existingIndex = __target.findIndex((item) => item.filePath === __cpReg.filePath);\n  if (existingIndex >= 0) {{\n    __target[existingIndex] = __cpReg;\n  }} else {{\n    __target.push(__cpReg);\n  }}\n  {flush}\n}}",
-            registration_json = registration_json,
+        let mut injected_code = String::new();
+        injected_code.push_str(&format!(
+            "const __cpReg = {registration_json};\n",
+        ));
+        injected_code.push_str(
+            "const __moduleInfo = (() => {\n  let loader = null;\n  let moduleId = null;\n  let chunkIds = null;\n  let importMetaUrl = null;\n  try {\n    if (typeof __webpack_require__ !== 'undefined') {\n      loader = 'webpack';\n    }\n  } catch (err) {}\n  try {\n    if (typeof module !== 'undefined') {\n      if (module && typeof module.id !== 'undefined') {\n        moduleId = module.id;\n      } else if (module && typeof module.i !== 'undefined') {\n        moduleId = module.i;\n      }\n      if (module && typeof module.ids !== 'undefined') {\n        chunkIds = Array.isArray(module.ids) ? module.ids.slice() : [module.ids];\n      }\n    }\n  } catch (err) {}\n  try {\n    if (typeof import.meta !== 'undefined' && import.meta && import.meta.url) {\n      importMetaUrl = import.meta.url;\n    }\n  } catch (err) {}\n  return { loader, moduleId, chunkIds, importMetaUrl };\n})();\n"
+        );
+        injected_code.push_str(
+            "__cpReg.moduleInfo = __moduleInfo;\nif (Array.isArray(__cpReg.components)) {\n  __cpReg.components = __cpReg.components.map((comp) => {\n    const exportName = comp.exportName || comp.export_name || comp.spec || 'default';\n    return Object.assign({}, comp, { runtime: Object.assign({}, comp.runtime || {}, { loader: __moduleInfo.loader, moduleId: __moduleInfo.moduleId, chunkIds: __moduleInfo.chunkIds, importMetaUrl: __moduleInfo.importMetaUrl, exportName }) });\n  });\n}\n"
+        );
+        write!(
+            &mut injected_code,
+            "if (typeof globalThis !== \"undefined\") {{\n  const __target = (globalThis.{global} = globalThis.{global} || []);\n  const existingIndex = __target.findIndex((item) => item.filePath === __cpReg.filePath);\n  if (existingIndex >= 0) {{\n    __target[existingIndex] = __cpReg;\n  }} else {{\n    __target.push(__cpReg);\n  }}\n  {flush}\n}}\n",
             global = self.runtime_global,
             flush = flush_callback
-        );
+        ).ok();
 
         Some(parse_module_items(&injected_code))
     }

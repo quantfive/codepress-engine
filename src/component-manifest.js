@@ -262,6 +262,7 @@ function collectManifest({ outFile } = {}) {
     entries.push({
       filePath: relPath,
       components,
+      moduleInfo: null,
     });
   }
 
