@@ -5,6 +5,7 @@ const { spawn, execSync } = require("child_process");
 const fs = require("fs");
 const path = require("path");
 const { startServer } = require("./server");
+const { collectManifest } = require("./component-manifest");
 
 // Get command line arguments
 const args = process.argv.slice(2);
@@ -96,6 +97,7 @@ function showHelp() {
 \x1b[1mCommands:\x1b[0m
   server          Start the development server
   setup           Setup dependencies for the visual editor
+  components      Component catalog utilities (use "components manifest")
   <command>       Run any command with the server running in background
   help            Show this help message
 
@@ -117,6 +119,10 @@ if (args.length > 0) {
 
     case "setup":
       setupDependencies();
+      break;
+
+    case "components":
+      handleComponentsCommand(args.slice(1));
       break;
 
     case "help":
@@ -160,4 +166,33 @@ if (args.length > 0) {
 } else {
   // No arguments provided, show help
   showHelp();
+}
+
+function handleComponentsCommand(componentArgs) {
+  const subcommand = componentArgs[0];
+
+  switch (subcommand) {
+    case "manifest": {
+      const outFlagIndex = componentArgs.indexOf("--out");
+      const outFile =
+        outFlagIndex >= 0 && componentArgs[outFlagIndex + 1]
+          ? componentArgs[outFlagIndex + 1]
+          : undefined;
+      try {
+        collectManifest({ outFile });
+        process.exit(0);
+      } catch (error) {
+        console.error(
+          `\x1b[31m✗ Failed to build component manifest: ${error.message}\x1b[0m`
+        );
+        process.exit(1);
+      }
+      break;
+    }
+    default:
+      console.error(
+        "\x1b[31m✗ Unknown components command. Try: codepress components manifest [--out path]\x1b[0m"
+      );
+      process.exit(1);
+  }
 }
