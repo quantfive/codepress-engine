@@ -2,7 +2,7 @@ name: Release and Publish
 
 on:
   push:
-    branches: [main]
+    branches: [main, develop, "feature/**"]
   workflow_dispatch:
 
 concurrency:
@@ -21,8 +21,10 @@ jobs:
       contents: read
       packages: read
     outputs:
-      version_changed: ${{ steps.version_check.outputs.changed }}
-      new_version: ${{ steps.version_check.outputs.version }}
+      version_changed: ${{ steps.release_info.outputs.changed }}
+      release_version: ${{ steps.release_info.outputs.release_version }}
+      release_tag: ${{ steps.release_info.outputs.release_tag }}
+      branch_name: ${{ steps.release_info.outputs.branch_name }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -43,21 +45,50 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Check if version should be published
-        id: version_check
+      - name: Compute release metadata
+        id: release_info
         env:
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           CURRENT_VERSION=$(node -p "require('./package.json').version")
-          LATEST_PUBLISHED=$(npm view @quantfive/codepress-engine version 2>/dev/null || echo "0.0.0")
-          echo "current_version=$CURRENT_VERSION" >> $GITHUB_OUTPUT
-          echo "latest_published=$LATEST_PUBLISHED" >> $GITHUB_OUTPUT
+          BRANCH_NAME=${GITHUB_REF#refs/heads/}
+          TIMESTAMP=$(date +%Y%m%d%H%M%S)
 
-          if [ "$CURRENT_VERSION" != "$LATEST_PUBLISHED" ]; then
-            echo "changed=true" >> $GITHUB_OUTPUT
-            echo "version=$CURRENT_VERSION" >> $GITHUB_OUTPUT
+          if [[ "$BRANCH_NAME" == "main" ]]; then
+            RELEASE_VERSION="$CURRENT_VERSION"
+            RELEASE_TAG="latest"
+          elif [[ "$BRANCH_NAME" == "develop" ]]; then
+            RELEASE_VERSION="$CURRENT_VERSION-beta.$TIMESTAMP"
+            RELEASE_TAG="beta"
+          elif [[ "$BRANCH_NAME" =~ ^feature/ ]]; then
+            FEATURE_NAME=$(echo "$BRANCH_NAME" | sed 's/feature\///' | sed 's/[^a-zA-Z0-9]/-/g')
+            RELEASE_VERSION="$CURRENT_VERSION-alpha.$FEATURE_NAME.$TIMESTAMP"
+            RELEASE_TAG="alpha"
           else
+            SAFE_BRANCH=$(echo "$BRANCH_NAME" | sed 's/[^a-zA-Z0-9]/-/g')
+            RELEASE_VERSION="$CURRENT_VERSION-dev.$SAFE_BRANCH.$TIMESTAMP"
+            RELEASE_TAG="dev"
+          fi
+
+          echo "release_version=$RELEASE_VERSION" >> $GITHUB_OUTPUT
+          echo "release_tag=$RELEASE_TAG" >> $GITHUB_OUTPUT
+          echo "branch_name=$BRANCH_NAME" >> $GITHUB_OUTPUT
+
+          if git tag | grep -q "^v$RELEASE_VERSION$"; then
+            echo "Version v$RELEASE_VERSION already tagged"
             echo "changed=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          if [[ "$BRANCH_NAME" == "main" ]]; then
+            LATEST_PUBLISHED=$(npm view @quantfive/codepress-engine version 2>/dev/null || echo "0.0.0")
+            if [ "$RELEASE_VERSION" != "$LATEST_PUBLISHED" ]; then
+              echo "changed=true" >> $GITHUB_OUTPUT
+            else
+              echo "changed=false" >> $GITHUB_OUTPUT
+            fi
+          else
+            echo "changed=true" >> $GITHUB_OUTPUT
           fi
 
   build-and-publish:
@@ -89,6 +120,28 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Update package version for release
+        env:
+          RELEASE_VERSION: ${{ needs.check-version.outputs.release_version }}
+        run: |
+          node -e "
+            const fs = require('fs');
+            const version = process.env.RELEASE_VERSION;
+            const pkgPath = './package.json';
+            const lockPath = './package-lock.json';
+            const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
+            pkg.version = version;
+            fs.writeFileSync(pkgPath, JSON.stringify(pkg, null, 2) + '\n');
+            if (fs.existsSync(lockPath)) {
+              const lock = JSON.parse(fs.readFileSync(lockPath, 'utf8'));
+              lock.version = version;
+              if (lock.packages && lock.packages['']) {
+                lock.packages[''].version = version;
+              }
+              fs.writeFileSync(lockPath, JSON.stringify(lock, null, 2) + '\n');
+            }
+          "
+
       - name: Build JS
         run: npm run build
 
@@ -104,9 +157,23 @@ jobs:
         id: recheck
         env:
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TARGET_VERSION: ${{ needs.check-version.outputs.release_version }}
         run: |
-          CURRENT_VERSION=$(node -p "require('./package.json').version")
-          FOUND=$(npm view @quantfive/codepress-engine versions --json | node -e "let a=JSON.parse(require('fs').readFileSync(0,'utf8'));console.log(a.includes(process.argv[1]))" "$CURRENT_VERSION")
+          PUBLISHED=$(npm view @quantfive/codepress-engine versions --json 2>/dev/null || echo '[]')
+          FOUND=$(printf '%s' "$PUBLISHED" | node - <<'NODE'
+const fs = require('fs');
+const data = fs.readFileSync(0, 'utf8') || '[]';
+let versions = [];
+try {
+  versions = JSON.parse(data);
+} catch (err) {
+  versions = [];
+}
+const target = process.env.TARGET_VERSION;
+const exists = Array.isArray(versions) && versions.includes(target);
+process.stdout.write(String(exists));
+NODE
+          )
           if [ "$FOUND" = "true" ]; then
             echo "already=true" >> $GITHUB_OUTPUT
           else
@@ -115,24 +182,48 @@ jobs:
 
       - name: Publish to GitHub Packages
         if: steps.recheck.outputs.already == 'false'
-        run: npm publish
         env:
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ needs.check-version.outputs.release_tag }}
+        run: |
+          if [ "$RELEASE_TAG" = "latest" ]; then
+            npm publish
+          else
+            npm publish --tag "$RELEASE_TAG"
+          fi
 
       - name: Create Git tag (after successful publish)
         if: steps.recheck.outputs.already == 'false'
         run: |
-          VERSION=${{ needs.check-version.outputs.new_version }}
+          VERSION=${{ needs.check-version.outputs.release_version }}
+          BRANCH_NAME=${{ needs.check-version.outputs.branch_name }}
           git config --local user.email "action@github.com"
           git config --local user.name "GitHub Action"
-          git tag -a "v$VERSION" -m "Release v$VERSION"
+          git tag -a "v$VERSION" -m "Release v$VERSION from $BRANCH_NAME"
           git push origin "v$VERSION"
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v${{ needs.check-version.outputs.new_version }}
-          name: Release v${{ needs.check-version.outputs.new_version }}
+          tag_name: v${{ needs.check-version.outputs.release_version }}
+          name: Engine v${{ needs.check-version.outputs.release_version }}
+          prerelease: ${{ needs.check-version.outputs.release_tag != 'latest' }}
           generate_release_notes: true
+          body: |
+            ## CodePress Engine Release
+
+            **Branch**: `${{ needs.check-version.outputs.branch_name }}`
+            **Dist Tag**: `${{ needs.check-version.outputs.release_tag }}`
+
+            ```bash
+            # Configure npm to use the GitHub Packages registry once per machine
+            npm config set @quantfive:registry https://npm.pkg.github.com
+
+            # Install the published dist-tag (defaults to latest on main)
+            npm install @quantfive/codepress-engine@${{ needs.check-version.outputs.release_tag }}
+
+            # Pin to this exact release
+            npm install @quantfive/codepress-engine@${{ needs.check-version.outputs.release_version }}
+            ```
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
