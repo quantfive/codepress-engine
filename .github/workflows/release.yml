@@ -160,21 +160,7 @@ jobs:
           TARGET_VERSION: ${{ needs.check-version.outputs.release_version }}
         run: |
           PUBLISHED=$(npm view @quantfive/codepress-engine versions --json 2>/dev/null || echo '[]')
-          FOUND=$(printf '%s' "$PUBLISHED" | node - <<'NODE'
-const fs = require('fs');
-const data = fs.readFileSync(0, 'utf8') || '[]';
-let versions = [];
-try {
-  versions = JSON.parse(data);
-} catch (err) {
-  versions = [];
-}
-const target = process.env.TARGET_VERSION;
-const exists = Array.isArray(versions) && versions.includes(target);
-process.stdout.write(String(exists));
-NODE
-          )
-          if [ "$FOUND" = "true" ]; then
+          if printf '%s' "$PUBLISHED" | grep -F "\"$TARGET_VERSION\"" >/dev/null; then
             echo "already=true" >> $GITHUB_OUTPUT
           else
             echo "already=false" >> $GITHUB_OUTPUT
