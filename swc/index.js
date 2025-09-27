@@ -1,4 +1,16 @@
-const { detectGitBranch, detectGitRepoName } = require("../src/git-info");
+const gitInfo = (() => {
+  try {
+    return require("../dist/git-info");
+  } catch (err) {
+    try {
+      return require("../src/git-info");
+    } catch (err2) {
+      throw err;
+    }
+  }
+})();
+
+const { detectGitBranch, detectGitRepoName } = gitInfo;
 
 /**
  * Creates SWC plugin configuration with auto-detected git information
