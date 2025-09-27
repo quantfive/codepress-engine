@@ -342,13 +342,13 @@ function collectManifest({ outFile, silent = false } = {}) {
       continue;
     }
 
+    const relPath = path.relative(rootDir, filePath).replace(/\\/g, "/");
+
     let components = collectFromModule(ast);
     if (!components.length) {
       components = fallbackCollectFromSource(source, relPath);
     }
     if (!components.length) continue;
-
-    const relPath = path.relative(rootDir, filePath).replace(/\\/g, "/");
 
     entries.push({
       filePath: relPath,
