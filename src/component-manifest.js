@@ -44,6 +44,94 @@ function looksLikeComponent(name) {
   return first && first === first.toUpperCase();
 }
 
+function fallbackCollectFromSource(source, filePath) {
+  const results = [];
+
+  const pushComponent = ({ exportName, displayName, kind, isDefault }) => {
+    const cleanDisplayName = displayName || exportName || deriveNameFromPath(filePath);
+    if (!cleanDisplayName || !looksLikeComponent(cleanDisplayName)) return;
+    results.push({
+      exportName,
+      displayName: cleanDisplayName,
+      kind,
+      isDefault,
+    });
+  };
+
+  const namedFnRegex = /export\s+function\s+([A-Z][A-Za-z0-9_]*)\s*\(/g;
+  let match;
+  while ((match = namedFnRegex.exec(source))) {
+    pushComponent({
+      exportName: match[1],
+      displayName: match[1],
+      kind: "function",
+      isDefault: false,
+    });
+  }
+
+  const namedConstRegex = /export\s+(?:const|let|var)\s+([A-Z][A-Za-z0-9_]*)\s*=\s*(?:async\s+)?(?:\([^)]*\)|[^=]+)=>/g;
+  while ((match = namedConstRegex.exec(source))) {
+    pushComponent({
+      exportName: match[1],
+      displayName: match[1],
+      kind: "arrow",
+      isDefault: false,
+    });
+  }
+
+  const namedClassRegex = /export\s+class\s+([A-Z][A-Za-z0-9_]*)\s+/g;
+  while ((match = namedClassRegex.exec(source))) {
+    pushComponent({
+      exportName: match[1],
+      displayName: match[1],
+      kind: "class",
+      isDefault: false,
+    });
+  }
+
+  const defaultFnRegex = /export\s+default\s+function\s+([A-Z][A-Za-z0-9_]*)?/g;
+  while ((match = defaultFnRegex.exec(source))) {
+    const displayName = match[1] || deriveNameFromPath(filePath);
+    pushComponent({
+      exportName: "default",
+      displayName,
+      kind: "function",
+      isDefault: true,
+    });
+  }
+
+  const defaultClassRegex = /export\s+default\s+class\s+([A-Z][A-Za-z0-9_]*)?/g;
+  while ((match = defaultClassRegex.exec(source))) {
+    const displayName = match[1] || deriveNameFromPath(filePath);
+    pushComponent({
+      exportName: "default",
+      displayName,
+      kind: "class",
+      isDefault: true,
+    });
+  }
+
+  const defaultIdentRegex = /export\s+default\s+([A-Z][A-Za-z0-9_]*)\b/g;
+  while ((match = defaultIdentRegex.exec(source))) {
+    pushComponent({
+      exportName: "default",
+      displayName: match[1],
+      kind: "reference",
+      isDefault: true,
+    });
+  }
+
+  return results;
+}
+
+function deriveNameFromPath(filePath) {
+  const base = path.basename(filePath).replace(/\.[^/.]+$/, "");
+  if (looksLikeComponent(base)) {
+    return base;
+  }
+  return null;
+}
+
 function expressionKind(node) {
   if (!node) return "expression";
   switch (node.type) {
@@ -226,7 +314,7 @@ function collectFromModule(ast) {
   return components;
 }
 
-function collectManifest({ outFile } = {}) {
+function collectManifest({ outFile, silent = false } = {}) {
   const rootDir = process.cwd();
   const repoFullName = detectGitRepoName();
   const branchName = detectGitBranch() || "main";
@@ -254,7 +342,10 @@ function collectManifest({ outFile } = {}) {
       continue;
     }
 
-    const components = collectFromModule(ast);
+    let components = collectFromModule(ast);
+    if (!components.length) {
+      components = fallbackCollectFromSource(source, relPath);
+    }
     if (!components.length) continue;
 
     const relPath = path.relative(rootDir, filePath).replace(/\\/g, "/");
@@ -281,12 +372,14 @@ function collectManifest({ outFile } = {}) {
   }
 
   fs.writeFileSync(outputPath, JSON.stringify(manifest, null, 2));
-  console.log(
-    `\x1b[32m✓ Component manifest generated with ${entries.length} modules -> ${path.relative(
-      rootDir,
-      outputPath
-    )}\x1b[0m`
-  );
+  if (!silent) {
+    console.log(
+      `\x1b[32m✓ Component manifest generated with ${entries.length} modules -> ${path.relative(
+        rootDir,
+        outputPath
+      )}\x1b[0m`
+    );
+  }
 
   return manifest;
 }

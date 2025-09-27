@@ -11,6 +11,13 @@ const gitInfo = (() => {
 })();
 
 const { detectGitBranch, detectGitRepoName } = gitInfo;
+const { writeManifestIfNeeded } = (() => {
+  try {
+    return require("../dist/manifest-writer");
+  } catch (err) {
+    return require("../src/manifest-writer");
+  }
+})();
 
 /**
  * Creates SWC plugin configuration with auto-detected git information
@@ -35,6 +42,12 @@ function createSWCPlugin(userConfig = {}) {
       "__CODEPRESS_COMPONENTS_FLUSH__",
     ...userConfig,
   };
+
+  writeManifestIfNeeded(userConfig).catch((error) => {
+    console.warn(
+      `[codepress] Failed to update component manifest: ${error.message}`
+    );
+  });
 
   // Return the plugin configuration array
   return ["@quantfive/codepress-engine/swc/wasm", config];

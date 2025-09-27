@@ -179,7 +179,7 @@ function handleComponentsCommand(componentArgs) {
           ? componentArgs[outFlagIndex + 1]
           : undefined;
       try {
-        collectManifest({ outFile });
+        collectManifest({ outFile, silent: false });
         process.exit(0);
       } catch (error) {
         console.error(
