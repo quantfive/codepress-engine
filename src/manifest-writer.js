@@ -29,17 +29,35 @@ const buildDefaultEndpoint = () => {
   }
 
   const host = process.env.CODEPRESS_BACKEND_HOST;
-  if (!host) {
-    return null;
+  if (host) {
+    const protocol = process.env.CODEPRESS_BACKEND_PROTOCOL || "http";
+    const port = process.env.CODEPRESS_BACKEND_PORT || "8007";
+    return `${protocol}://${host}:${port}/v1/components/manifest`;
   }
 
-  const protocol = process.env.CODEPRESS_BACKEND_PROTOCOL || "http";
-  const port = process.env.CODEPRESS_BACKEND_PORT || "8007";
-  return `${protocol}://${host}:${port}/v1/components/manifest`;
+  const defaultHost = process.env.CODEPRESS_DEFAULT_BACKEND_HOST || "localhost";
+  const defaultPort = process.env.CODEPRESS_DEFAULT_BACKEND_PORT || "8007";
+  return `http://${defaultHost}:${defaultPort}/v1/components/manifest`;
 };
 
 const hashManifest = (manifest) =>
   crypto.createHash("sha256").update(JSON.stringify(manifest)).digest("hex");
+
+const logManifestPreview = (manifest) => {
+  try {
+    const preview = {
+      repoFullName: manifest.repoFullName,
+      branchName: manifest.branchName,
+      entriesCount: Array.isArray(manifest.entries) ? manifest.entries.length : 0,
+      entriesSample: (manifest.entries || []).slice(0, 5),
+    };
+    console.warn(
+      `[codepress] Manifest payload preview: ${JSON.stringify(preview, null, 2)}`
+    );
+  } catch (err) {
+    console.warn(`[codepress] Failed to log manifest preview: ${err.message}`);
+  }
+};
 
 async function postManifest(manifest, options) {
   const endpoint =
@@ -77,11 +95,13 @@ async function postManifest(manifest, options) {
       console.warn(
         `[codepress] Manifest upload failed (${response.status}): ${body}`
       );
+      logManifestPreview(manifest);
     }
   } catch (error) {
     console.warn(
       `[codepress] Manifest upload encountered an error: ${error.message}`
     );
+    logManifestPreview(manifest);
   }
 }
 
