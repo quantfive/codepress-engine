@@ -6,6 +6,12 @@ const { detectGitBranch, detectGitRepoName } = require("./git-info");
 const DEFAULT_OUT_FILE = path.join(".codepress", "component-manifest.json");
 const SUPPORTED_EXTENSIONS = new Set([".tsx", ".jsx", ".ts", ".js"]);
 const EXCLUDED_FOLDERS = new Set(["node_modules", ".git", ".next", "dist", "build", ".output"]);
+const IGNORED_PATH_PATTERNS = [
+  /^pages\//,
+  /^src\/pages\//,
+  /^app\//,
+  /^src\/app\//,
+];
 
 function walkDirectory(dirPath) {
   const entries = fs.readdirSync(dirPath, { withFileTypes: true });
@@ -322,6 +328,11 @@ function collectManifest({ outFile, silent = false } = {}) {
   const entries = [];
 
   for (const filePath of files) {
+    const relPath = path.relative(rootDir, filePath).replace(/\\/g, "/");
+    if (IGNORED_PATH_PATTERNS.some((pattern) => pattern.test(relPath))) {
+      continue;
+    }
+
     let source;
     try {
       source = fs.readFileSync(filePath, "utf8");
@@ -341,8 +352,6 @@ function collectManifest({ outFile, silent = false } = {}) {
     } catch (error) {
       continue;
     }
-
-    const relPath = path.relative(rootDir, filePath).replace(/\\/g, "/");
 
     let components = collectFromModule(ast);
     if (!components.length) {

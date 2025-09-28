@@ -50,6 +50,7 @@ pub struct CodePressTransform {
     runtime_global: String,
     registration_flush_callback: Option<String>,
     pending_module_components: Vec<DiscoveredComponent>,
+    skip_registration_for_module: bool,
 }
 
 /// Normalizes incoming filenames from bundlers (e.g., Turbopack) before encoding
@@ -117,6 +118,7 @@ impl CodePressTransform {
             runtime_global,
             registration_flush_callback,
             pending_module_components: Vec::new(),
+            skip_registration_for_module: false,
         }
     }
 
@@ -213,13 +215,17 @@ impl CodePressTransform {
 
 impl VisitMut for CodePressTransform {
     fn visit_mut_module(&mut self, module: &mut Module) {
+        self.skip_registration_for_module = self.should_skip_module(module);
         // Collect exported components for this module before mutation
         self.collect_exported_components(module);
 
         // Continue traversing for JSX transformations
         module.visit_mut_children_with(self);
 
-        if self.runtime_registration && !self.pending_module_components.is_empty() {
+        if self.runtime_registration
+            && !self.skip_registration_for_module
+            && !self.pending_module_components.is_empty()
+        {
             let registration = self.build_module_registration(module);
             if let Some(mut items) = self.create_runtime_registration_stmt(&registration) {
                 module.body.append(&mut items);
@@ -286,6 +292,10 @@ impl CodePressTransform {
 
     fn collect_exported_components(&mut self, module: &Module) {
         self.pending_module_components.clear();
+
+        if self.skip_registration_for_module {
+            return;
+        }
 
         for item in &module.body {
             match item {
@@ -577,6 +587,10 @@ impl CodePressTransform {
         &self,
         registration: &ModuleRegistration,
     ) -> Option<Vec<ModuleItem>> {
+        if self.skip_registration_for_module {
+            return None;
+        }
+
         let components_value = match serde_json::to_value(&registration.components) {
             Ok(value) => value,
             Err(_) => return None,
@@ -618,6 +632,32 @@ impl CodePressTransform {
         ).ok();
 
         Some(parse_module_items(&injected_code))
+    }
+
+    fn should_skip_module(&self, module: &Module) -> bool {
+        if let Some(ref cm) = self.source_map {
+            let loc = cm.lookup_char_pos(module.span.lo());
+            let raw = match &*loc.file.name {
+                FileName::Custom(name) => name.clone(),
+                FileName::Real(path_buf) => path_buf.to_string_lossy().into_owned(),
+                _ => String::new(),
+            };
+            let normalized = normalize_filename(&raw);
+            return Self::should_skip_module_path(&normalized);
+        }
+        false
+    }
+
+    fn should_skip_module_path(path: &str) -> bool {
+        if path.is_empty() {
+            return false;
+        }
+
+        let lower = path.to_lowercase();
+        lower.contains("node_modules/next/")
+            || lower.contains("node_modules\\next\\")
+            || lower.contains("/.next/")
+            || lower.contains("\\.next\\")
     }
 }
 
