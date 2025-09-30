@@ -1166,24 +1166,10 @@ function createApp() {
 
   // Endpoint to write files to local filesystem (for local mode)
   app.post("/write-files", async (request, reply) => {
-    console.log(
-      `\x1b[36mℹ [write-files] Received request to write files\x1b[0m`
-    );
-
     try {
       const { updated_files } = request.body;
 
-      console.log(
-        `\x1b[36mℹ [write-files] Request body keys: ${Object.keys(request.body || {}).join(", ")}\x1b[0m`
-      );
-      console.log(
-        `\x1b[36mℹ [write-files] Updated files count: ${updated_files ? Object.keys(updated_files).length : 0}\x1b[0m`
-      );
-
       if (!updated_files || typeof updated_files !== "object") {
-        console.warn(
-          `\x1b[33m⚠ [write-files] Missing or invalid updated_files object\x1b[0m`
-        );
         return reply.code(400).send({
           error: "Missing or invalid updated_files object",
         });
@@ -1193,9 +1179,6 @@ function createApp() {
       for (const [filePath, newContent] of Object.entries(updated_files)) {
         try {
           const targetFilePath = toAbsolutePath(filePath);
-          console.log(
-            `\x1b[36mℹ [write-files] Writing ${filePath} → ${targetFilePath}\x1b[0m`
-          );
           await applyFullFileReplacement(newContent, targetFilePath);
           writtenFiles.push(targetFilePath);
           console.log(`\x1b[32m✓ Wrote ${targetFilePath} to disk\x1b[0m`);
@@ -1205,10 +1188,6 @@ function createApp() {
           );
         }
       }
-
-      console.log(
-        `\x1b[32m✓ [write-files] Successfully wrote ${writtenFiles.length} file(s)\x1b[0m`
-      );
 
       return reply.code(200).send({
         success: true,
