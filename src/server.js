@@ -1195,8 +1195,8 @@ function createApp() {
         apiHost === "localhost" || apiHost === "127.0.0.1" ? "http" : "https";
       const wsProtocol = protocol === "https" ? "wss" : "ws";
 
-      // Step 1: Call /agents/claude/start with github_mode=false
-      const startUrl = `${protocol}://${apiHost}:${apiPort}/agents/claude/start`;
+      // Step 1: Call /v1/agents/claude/start with github_mode=false
+      const startUrl = `${protocol}://${apiHost}:${apiPort}/v1/agents/claude/start`;
       const startBody = {
         github_repo_name,
         instruction: user_instruction,
@@ -1247,7 +1247,7 @@ function createApp() {
 
       // Step 3: Connect to WebSocket and forward events
       const WebSocket = require("ws");
-      const wsUrl = `${wsProtocol}://${apiHost}:${apiPort}/agents/claude/ws/${session_id}`;
+      const wsUrl = `${wsProtocol}://${apiHost}:${apiPort}/v1/agents/claude/ws/${session_id}`;
       console.log(`\x1b[36mℹ Connecting to WebSocket: ${wsUrl}\x1b[0m`);
 
       const ws = new WebSocket(wsUrl);
