@@ -1164,6 +1164,41 @@ function createApp() {
     }
   });
 
+  // Endpoint to write files to local filesystem (for local mode)
+  app.post("/write-files", async (request, reply) => {
+    try {
+      const { updated_files } = request.body;
+
+      if (!updated_files || typeof updated_files !== "object") {
+        return reply.code(400).send({
+          error: "Missing or invalid updated_files object",
+        });
+      }
+
+      const writtenFiles = [];
+      for (const [filePath, newContent] of Object.entries(updated_files)) {
+        try {
+          const targetFilePath = toAbsolutePath(filePath);
+          await applyFullFileReplacement(newContent, targetFilePath);
+          writtenFiles.push(targetFilePath);
+          console.log(`\x1b[32m✓ Wrote ${targetFilePath} to disk\x1b[0m`);
+        } catch (writeErr) {
+          console.error(
+            `\x1b[31m✗ Failed to write ${filePath}: ${writeErr.message}\x1b[0m`
+          );
+        }
+      }
+
+      return reply.code(200).send({
+        success: true,
+        written_files: writtenFiles,
+      });
+    } catch (err) {
+      console.error(`\x1b[31m✗ Error in /write-files: ${err.message}\x1b[0m`);
+      return reply.code(500).send({ error: err.message });
+    }
+  });
+
   return app;
 }
 
