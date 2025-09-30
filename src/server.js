@@ -1164,143 +1164,37 @@ function createApp() {
     }
   });
 
-  // New Claude Code local mode endpoint (github_mode=false)
-  app.post("/visual-editor-api-agent-claude", async (request, reply) => {
+  // Endpoint to write files to local filesystem (for local mode)
+  app.post("/write-files", async (request, reply) => {
     try {
-      const data = request.body;
-      const {
-        encoded_location,
-        github_repo_name,
-        user_instruction,
-        image_data,
-        filename,
-      } = data;
-      const authHeader =
-        request.headers.authorization || request.headers["authorization"];
+      const { updated_files } = request.body;
 
-      console.log(
-        `\x1b[36mℹ [visual-editor-api-agent-claude] Starting Claude Code session (local mode)\x1b[0m`
-      );
-
-      // Save image data before processing
-      await saveImageData({ imageData: image_data, filename });
-
-      // Backend API settings
-      const apiHost = process.env.CODEPRESS_BACKEND_HOST || "localhost";
-      const apiPort = parseInt(
-        process.env.CODEPRESS_BACKEND_PORT || "8007",
-        10
-      );
-      const protocol =
-        apiHost === "localhost" || apiHost === "127.0.0.1" ? "http" : "https";
-      const wsProtocol = protocol === "https" ? "wss" : "ws";
-
-      // Step 1: Call /v1/agents/claude/start with github_mode=false
-      const startUrl = `${protocol}://${apiHost}:${apiPort}/v1/agents/claude/start`;
-      const startBody = {
-        github_repo_name,
-        instruction: user_instruction,
-        encoded_location,
-        github_mode: false,
-      };
-
-      const headers = {
-        "Content-Type": "application/json",
-      };
-      if (authHeader) {
-        headers.Authorization = authHeader;
+      if (!updated_files || typeof updated_files !== "object") {
+        return reply.code(400).send({
+          error: "Missing or invalid updated_files object",
+        });
       }
 
-      console.log(
-        `\x1b[36mℹ Calling ${startUrl} with github_mode=false\x1b[0m`
-      );
-
-      const startResponse = await fetch(startUrl, {
-        method: "POST",
-        headers,
-        body: JSON.stringify(startBody),
-      });
-
-      if (!startResponse.ok) {
-        const errorText = await startResponse.text();
-        throw new Error(
-          `Failed to start Claude session (${startResponse.status}): ${errorText}`
-        );
-      }
-
-      const { session_id } = await startResponse.json();
-      console.log(`\x1b[36mℹ Claude session started: ${session_id}\x1b[0m`);
-
-      // Step 2: Set up SSE headers for streaming response to client
-      reply.raw.writeHead(200, {
-        "Content-Type": "text/event-stream",
-        "Cache-Control": "no-cache",
-        Connection: "keep-alive",
-        "Access-Control-Allow-Origin": "*",
-        "Access-Control-Allow-Headers": "Cache-Control",
-      });
-
-      function sendEvent(eventData) {
-        const data = JSON.stringify(eventData);
-        reply.raw.write(`data: ${data}\n\n`);
-      }
-
-      // Step 3: Connect to WebSocket and forward events
-      const WebSocket = require("ws");
-      const wsUrl = `${wsProtocol}://${apiHost}:${apiPort}/v1/agents/claude/ws/${session_id}`;
-      console.log(`\x1b[36mℹ Connecting to WebSocket: ${wsUrl}\x1b[0m`);
-
-      const ws = new WebSocket(wsUrl);
-
-      ws.on("open", () => {
-        console.log(`\x1b[36mℹ WebSocket connected\x1b[0m`);
-        sendEvent({ type: "session_started", session_id });
-      });
-
-      ws.on("message", async (rawData) => {
+      const writtenFiles = [];
+      for (const [filePath, newContent] of Object.entries(updated_files)) {
         try {
-          const event = JSON.parse(rawData.toString());
-          console.log(`\x1b[36mℹ WS event: ${event.type || "unknown"}\x1b[0m`);
-
-          // Forward all events to client
-          sendEvent(event);
-
-          // If this is final_result with updated_files, write them to disk
-          if (event.type === "final_result" && event.result?.updated_files) {
-            const updatedFiles = event.result.updated_files;
-            for (const [filePath, newContent] of Object.entries(updatedFiles)) {
-              const targetFilePath = toAbsolutePath(filePath);
-              await applyFullFileReplacement(newContent, targetFilePath);
-              console.log(`\x1b[32m✓ Wrote ${targetFilePath} to disk\x1b[0m`);
-            }
-          }
-
-          // Close SSE stream when complete or error
-          if (event.type === "complete" || event.type === "error") {
-            ws.close();
-            reply.raw.end();
-          }
-        } catch (e) {
-          console.error(`\x1b[31m✗ Error processing WS message: ${e}\x1b[0m`);
+          const targetFilePath = toAbsolutePath(filePath);
+          await applyFullFileReplacement(newContent, targetFilePath);
+          writtenFiles.push(targetFilePath);
+          console.log(`\x1b[32m✓ Wrote ${targetFilePath} to disk\x1b[0m`);
+        } catch (writeErr) {
+          console.error(
+            `\x1b[31m✗ Failed to write ${filePath}: ${writeErr.message}\x1b[0m`
+          );
         }
-      });
+      }
 
-      ws.on("error", (err) => {
-        console.error(`\x1b[31m✗ WebSocket error: ${err.message}\x1b[0m`);
-        sendEvent({ type: "error", error: err.message, ephemeral: false });
-        reply.raw.end();
-      });
-
-      ws.on("close", () => {
-        console.log(`\x1b[36mℹ WebSocket closed\x1b[0m`);
-        if (!reply.raw.writableEnded) {
-          reply.raw.end();
-        }
+      return reply.code(200).send({
+        success: true,
+        written_files: writtenFiles,
       });
     } catch (err) {
-      console.error(
-        `\x1b[31m✗ Error in /visual-editor-api-agent-claude: ${err.message}\x1b[0m`
-      );
+      console.error(`\x1b[31m✗ Error in /write-files: ${err.message}\x1b[0m`);
       return reply.code(500).send({ error: err.message });
     }
   });
