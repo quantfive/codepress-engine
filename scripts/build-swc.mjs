@@ -7,7 +7,7 @@ import { execFile } from "node:child_process";
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
 const BANDS = [
-  // Doesn't work (requires more shimming)
+  // Doesn't work (requires more shimming in rust lib)
   // Next 13.5 - 14.0
   // { id: "v0_79_81", swc_core: "=0.81.0", extra: {} },
 
@@ -15,14 +15,33 @@ const BANDS = [
   {
     id: "v0_82_87",
     swc_core: "=0.87.0",
-    extra: { swc_common: "=0.33.15", compat_feature: "compat_0_87" },
+    extra: {
+      swc_common: "=0.33.15",
+      compat_feature: "compat_0_87",
+      serde: "=1.0.219",
+      serde_json: "=1.0.140",
+    },
   },
 
   // Next 14.2 - 15.4
-  { id: "v26", swc_core: "=26.4.5", extra: {} },
+  {
+    id: "v26",
+    swc_core: "=26.4.5",
+    extra: {
+      serde: "=1.0.219",
+      serde_json: "^1.0.140",
+    },
+  },
 
   // Next 15.5+
-  { id: "v42", swc_core: "=42.0.3", extra: {} },
+  {
+    id: "v42",
+    swc_core: "=42.0.3",
+    extra: {
+      serde: "^1.0.225",
+      serde_json: "^1.0.140",
+    },
+  },
 ];
 
 // Newer Next uses WASI preview1 (“wasip1”). Some older builds still used “wasi”.
@@ -42,6 +61,9 @@ const run = (cmd, args, opts = {}) =>
   );
 
 const templateCargo = (band) => {
+  const serdeVer = band.extra?.serde ?? "=1.0.219";
+  const serdeJsonVer = band.extra?.serde_json ?? "^1.0.140";
+
   const swcCommonLine =
     band.extra && band.extra.swc_common
       ? `swc_common = "${band.extra.swc_common}"`
@@ -56,17 +78,6 @@ ${band.extra.compat_feature} = []
 default = ["${band.extra.compat_feature}"]
 `
       : "";
-
-  // TODO: put serde version in bands
-  // Choose serde versions per swc_core band:
-  // - v42+ needs serde >= 1.0.225 (required by swc_common ^14)
-  // - older bands are OK with 1.0.219
-  const coreMajor = parseInt(
-    String(band.swc_core).match(/(\d+)/)?.[1] ?? "0",
-    10,
-  );
-  const serdeVer = coreMajor >= 42 ? "^1.0.225" : "=1.0.219";
-  const serdeJsonVer = "^1.0.140"; // compatible across these runners
 
   return `\
 [package]
