@@ -1,15 +1,16 @@
 {
   "name": "@quantfive/codepress-engine",
-  "version": "0.3.16",
+  "version": "0.3.17",
   "description": "CodePress engine - Babel and SWC plug-ins",
   "main": "./babel/index.js",
   "exports": {
     ".": "./babel/index.js",
     "./babel": "./babel/index.js",
     "./swc": "./swc/index.js",
-    "./swc/wasm": "./swc/codepress_engine.v26.wasm",
-    "./swc/wasm-v0_82_87": "./swc/codepress_engine.v0_82_87.wasm",
+    "./swc/wasm": "./swc/codepress_engine.v42.wasm",
+    "./swc/wasm-v42": "./swc/codepress_engine.v42.wasm",
     "./swc/wasm-v26": "./swc/codepress_engine.v26.wasm",
+    "./swc/wasm-v0_82_87": "./swc/codepress_engine.v0_82_87.wasm",
     "./hash-util": "./dist/hash-util.js",
     "./server": "./dist/server.js",
     "./cli": "./dist/cli.js"

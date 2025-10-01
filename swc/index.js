@@ -91,12 +91,15 @@ function pickBand() {
     );
     const v = nextPkg.version || "";
     // very coarse bucketing by major/minor
-    // Next ~13.4.10-canary.1 up to ~13.5 / early 14 → v0.79–0.81
-    if (/^13\.(4|5)\./.test(v)) return { band: "v0_79_81" };
-    // Next ~14.1.x (per SWC note) → v0.82–0.87
+    // Next 15.5+ → v42 (runner 18.x / swc_core 42.x)
+    if (/^15\.(5|[6-9]|\d{2,})\./.test(v)) return { band: "v42" };
+    // Next 14.2–15.4 → v26
+    if (/^(14\.(2|3|4|5)\.|15\.(0|1|2|3|4)\.)/.test(v)) return { band: "v26" };
+    // Next 14.0–14.1 → v0.82–0.87
     if (/^14\.(0|1)\./.test(v)) return { band: "v0_82_87" };
-    // Next 14.2+ and 15.x → modern track (we’ll default to v26 build)
-    if (/^14\.(2|3|4|5)\./.test(v) || /^15\./.test(v)) return { band: "v26" };
+    // very coarse bucketing by major/minor
+    // // Next 13.4-14.1 → v0.79–0.81
+    // if (/^13\.(4|5)\./.test(v)) return { band: "v0_79_81" };
   } catch (_) {}
 
   // Fallback: look at @swc/core (non-Next runners)
@@ -104,31 +107,81 @@ function pickBand() {
     const swcPkg = require(
       require.resolve("@swc/core/package.json", { paths: [process.cwd()] }),
     );
+    // TODO: clean this up to be correct
     const v = swcPkg.version || ""; // JS wrapper version
-    // Old-ish @swc/core 1.3.68–1.3.80 → v0.79–0.81
-    if (/^1\.3\.(6[8-9]|7\d|80)$/.test(v)) return { band: "v0_79_81" };
+    // // Old-ish @swc/core 1.3.68–1.3.80 → v0.79–0.81
+    // if (/^1\.3\.(6[8-9]|7\d|80)$/.test(v)) return { band: "v0_79_81" };
     // 1.3.81–1.3.105 → v0.82–0.87
     if (/^1\.3\.(8[1-9]|9\d|10[0-5])$/.test(v)) return { band: "v0_82_87" };
-    // Anything newer → v26 track
-    return { band: "v26" };
+    // TODO: determine what swc version are v26
+    // return { band: "v26" };
+    return { band: "v42" };
   } catch (_) {}
 
   // Last resort
-  return { band: "v26" };
+  return { band: "v42" };
 }
 
 function resolveWasmFile({ band, wasmPath }) {
   // If user forces a specifier/path, just pass it through.
-  if (process.env.CODEPRESS_SWC_WASM) return process.env.CODEPRESS_SWC_WASM;
-  if (wasmPath) return wasmPath;
+  if (process.env.CODEPRESS_SWC_WASM) {
+    const abs = process.env.CODEPRESS_SWC_WASM;
+    // Prefer a CWD-relative POSIX path so Turbopack can import it.
+    const rel =
+      "./" +
+      path.posix.normalize(
+        path.relative(process.cwd(), abs).split(path.sep).join("/"),
+      );
+    return rel;
+  }
+  if (wasmPath) {
+    const rel =
+      "./" +
+      path.posix.normalize(
+        path.relative(process.cwd(), wasmPath).split(path.sep).join("/"),
+      );
+    return rel;
+  }
 
-  // Return a PACKAGE EXPORT SUBPATH so Turbopack/Next can resolve it.
-  // These must match your package.json "exports".
+  // Map to export subpaths (must match package.json "exports"), then
+  // resolve to an ABSOLUTE FILE PATH for the Node-side runner.
   const byBand = {
-    v26: "@quantfive/codepress-engine/swc/wasm-v26",
     v0_82_87: "@quantfive/codepress-engine/swc/wasm-v0_82_87",
+    v26: "@quantfive/codepress-engine/swc/wasm-v26",
+    v42: "@quantfive/codepress-engine/swc/wasm-v42",
   };
-  return byBand[band] || byBand.v26;
+  const spec = byBand[band] || byBand.v42;
+  // Resolve the export to a physical file so we can hand Turbopack a relative path.
+  try {
+    const abs = require.resolve(spec, { paths: [process.cwd()] });
+    const rel =
+      "./" +
+      path.posix.normalize(
+        path.relative(process.cwd(), abs).split(path.sep).join("/"),
+      );
+    return rel;
+  } catch {
+    // Last-resort: try local files directly (useful for `pnpm link` / tgz installs)
+    for (const base of [
+      "codepress_engine.v42",
+      "codepress_engine.v26",
+      "codepress_engine.v0_82_87",
+    ]) {
+      for (const suffix of ["", ".wasi-legacy"]) {
+        const p = path.join(__dirname, base + suffix + ".wasm");
+        if (fs.existsSync(p)) {
+          const rel =
+            "./" +
+            path.posix.normalize(
+              path.relative(process.cwd(), p).split(path.sep).join("/"),
+            );
+          return rel;
+        }
+      }
+    }
+    // If all else fails, return the specifier (older Next may resolve it).
+    return spec;
+  }
 }
 
 /**

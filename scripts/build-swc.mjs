@@ -7,19 +7,22 @@ import { execFile } from "node:child_process";
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
 const BANDS = [
-  // Doesn't work (can probably fix with shim)
-  // // v0.79–0.81 (Next 13.4.10-canary.1 → around 13.5 / early 14)
+  // Doesn't work (requires more shimming)
+  // Next 13.5 - 14.0
   // { id: "v0_79_81", swc_core: "=0.81.0", extra: {} },
 
-  // v0.82–0.87 (Next ~14.1.0 timeframe; requires swc_common pin per docs)
+  // Next 14.0 - 14.1
   {
     id: "v0_82_87",
     swc_core: "=0.87.0",
     extra: { swc_common: "=0.33.15", compat_feature: "compat_0_87" },
   },
 
-  // Modern (today’s Next 14.2+ / 15 often use newer tracks; keep one “latest” too)
+  // Next 14.2 - 15.4
   { id: "v26", swc_core: "=26.4.5", extra: {} },
+
+  // Next 15.5+
+  { id: "v42", swc_core: "=42.0.3", extra: {} },
 ];
 
 // Newer Next uses WASI preview1 (“wasip1”). Some older builds still used “wasi”.
@@ -44,19 +47,26 @@ const templateCargo = (band) => {
       ? `swc_common = "${band.extra.swc_common}"`
       : "";
 
-  // Always declare the compat feature to silence cfg warnings on bands that don't enable it.
-  // Only enable it by default for the legacy band (0.82–0.87).
-  const defaultFeatures =
+  const featuresBlock =
     band.extra && band.extra.compat_feature
-      ? `default = ["${band.extra.compat_feature}"]`
-      : `default = []`;
-
-  const featuresBlock = `
+      ? `
 
 [features]
-compat_0_87 = []
-${defaultFeatures}
-`;
+${band.extra.compat_feature} = []
+default = ["${band.extra.compat_feature}"]
+`
+      : "";
+
+  // TODO: put serde version in bands
+  // Choose serde versions per swc_core band:
+  // - v42+ needs serde >= 1.0.225 (required by swc_common ^14)
+  // - older bands are OK with 1.0.219
+  const coreMajor = parseInt(
+    String(band.swc_core).match(/(\d+)/)?.[1] ?? "0",
+    10,
+  );
+  const serdeVer = coreMajor >= 42 ? "^1.0.225" : "=1.0.219";
+  const serdeJsonVer = "^1.0.140"; // compatible across these runners
 
   return `\
 [package]
@@ -74,8 +84,8 @@ strip = "symbols"
 
 [dependencies]
 base64 = "0.22.1"
-serde = { version = "=1.0.219", features = ["derive"] }
-serde_json = "=1.0.140"
+serde = { version = "${serdeVer}", features = ["derive"] }
+serde_json = "${serdeJsonVer}"
 ${swcCommonLine}
 
 [dependencies.swc_core]
