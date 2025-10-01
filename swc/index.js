@@ -107,14 +107,33 @@ function pickBand() {
     const swcPkg = require(
       require.resolve("@swc/core/package.json", { paths: [process.cwd()] }),
     );
-    // TODO: clean this up to be correct
-    const v = swcPkg.version || ""; // JS wrapper version
-    // // Old-ish @swc/core 1.3.68–1.3.80 → v0.79–0.81
-    // if (/^1\.3\.(6[8-9]|7\d|80)$/.test(v)) return { band: "v0_79_81" };
-    // 1.3.81–1.3.105 → v0.82–0.87
-    if (/^1\.3\.(8[1-9]|9\d|10[0-5])$/.test(v)) return { band: "v0_82_87" };
-    // TODO: determine what swc version are v26
-    // return { band: "v26" };
+    const v = String(swcPkg.version || "0.0.0");
+
+    // Tiny semver compare: returns -1, 0, 1
+    const cmp = (a, b) => {
+      const pa = a.split(".").map((n) => parseInt(n, 10) || 0);
+      const pb = b.split(".").map((n) => parseInt(n, 10) || 0);
+      for (let i = 0; i < 3; i++) {
+        if (pa[i] < pb[i]) return -1;
+        if (pa[i] > pb[i]) return 1;
+      }
+      return 0;
+    };
+    const gte = (x, y) => cmp(x, y) >= 0;
+    const lte = (x, y) => cmp(x, y) <= 0;
+    const lt = (x, y) => cmp(x, y) < 0;
+
+    // Buckets:
+    // - 1.3.81 .. 1.3.105  → swc_core 0.82–0.87 ABI (band v0_82_87)
+    // - 1.3.106 .. 1.10.x  → swc_core 26.x ABI (band v26)
+    // - 1.11.0+            → swc_core 42.x ABI (band v42)
+    if (gte(v, "1.3.81") && lte(v, "1.3.105")) {
+      return { band: "v0_82_87" };
+    }
+    if (gte(v, "1.3.106") && lt(v, "1.11.0")) {
+      return { band: "v26" };
+    }
+    // 1.11.0 and newer
     return { band: "v42" };
   } catch (_) {}
 
@@ -123,65 +142,25 @@ function pickBand() {
 }
 
 function resolveWasmFile({ band, wasmPath }) {
-  // If user forces a specifier/path, just pass it through.
-  if (process.env.CODEPRESS_SWC_WASM) {
-    const abs = process.env.CODEPRESS_SWC_WASM;
-    // Prefer a CWD-relative POSIX path so Turbopack can import it.
-    const rel =
-      "./" +
-      path.posix.normalize(
-        path.relative(process.cwd(), abs).split(path.sep).join("/"),
-      );
-    return rel;
-  }
-  if (wasmPath) {
-    const rel =
-      "./" +
-      path.posix.normalize(
-        path.relative(process.cwd(), wasmPath).split(path.sep).join("/"),
-      );
-    return rel;
+  // If user forces a specifier/path, allow only absolute paths or package specifiers.
+  const forced = process.env.CODEPRESS_SWC_WASM || wasmPath;
+  if (forced) {
+    // Accept package specifiers (e.g. @quantfive/codepress-engine/swc/wasm-v26)
+    // or absolute paths. Reject relative paths (Turbopack cannot import them here).
+    if (/^@/.test(forced) || forced.startsWith("/")) return forced;
+    console.warn(
+      "[codepress] Ignoring relative CODEPRESS_SWC_WASM. Use a package export (e.g. @quantfive/codepress-engine/swc/wasm-v26) or an absolute path.",
+    );
   }
 
-  // Map to export subpaths (must match package.json "exports"), then
-  // resolve to an ABSOLUTE FILE PATH for the Node-side runner.
+  // Always return a PACKAGE EXPORT SUBPATH so Turbopack/Next can resolve it.
+  // These MUST match package.json "exports".
   const byBand = {
     v0_82_87: "@quantfive/codepress-engine/swc/wasm-v0_82_87",
     v26: "@quantfive/codepress-engine/swc/wasm-v26",
     v42: "@quantfive/codepress-engine/swc/wasm-v42",
   };
-  const spec = byBand[band] || byBand.v42;
-  // Resolve the export to a physical file so we can hand Turbopack a relative path.
-  try {
-    const abs = require.resolve(spec, { paths: [process.cwd()] });
-    const rel =
-      "./" +
-      path.posix.normalize(
-        path.relative(process.cwd(), abs).split(path.sep).join("/"),
-      );
-    return rel;
-  } catch {
-    // Last-resort: try local files directly (useful for `pnpm link` / tgz installs)
-    for (const base of [
-      "codepress_engine.v42",
-      "codepress_engine.v26",
-      "codepress_engine.v0_82_87",
-    ]) {
-      for (const suffix of ["", ".wasi-legacy"]) {
-        const p = path.join(__dirname, base + suffix + ".wasm");
-        if (fs.existsSync(p)) {
-          const rel =
-            "./" +
-            path.posix.normalize(
-              path.relative(process.cwd(), p).split(path.sep).join("/"),
-            );
-          return rel;
-        }
-      }
-    }
-    // If all else fails, return the specifier (older Next may resolve it).
-    return spec;
-  }
+  return byBand[band] || byBand.v42;
 }
 
 /**
@@ -204,7 +183,7 @@ function createSWCPlugin(userConfig = {}) {
   const sel = pickBand();
   const wasm = resolveWasmFile(sel);
 
-  const finalPath = process.env.CODEPRESS_SWC_WASM || wasm;
+  const finalPath = wasm;
 
   // Return the plugin configuration array
   return [finalPath, config];
