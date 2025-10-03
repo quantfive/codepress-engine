@@ -1442,8 +1442,124 @@ impl CodePressTransform {
 
 impl VisitMut for CodePressTransform {
     fn visit_mut_module(&mut self, m: &mut Module) {
-        // Inject inline provider once per module
+        // Inject inline provider once per module (from main branch)
         self.ensure_provider_inline(m);
+
+        // Stamping of exported symbols with __cp_id and __cp_fp (merged change)
+        // Determine encoded file path for this module
+        let filename = if let Some(ref cm) = self.source_map {
+            let loc = cm.lookup_char_pos(m.span.lo());
+            loc.file.name.to_string()
+        } else {
+            "unknown".to_string()
+        };
+        let normalized = normalize_filename(&filename);
+        let encoded_fp = xor_encode(&normalized);
+
+        // Helper to build assignment: Ident.__cp_id = "..." and Ident.__cp_fp = "..."
+        let mut stamp_for_ident = |ident: &Ident, export_name: &str| -> Vec<ModuleItem> {
+            let mut out: Vec<ModuleItem> = Vec::new();
+
+            // Ident.__cp_id = "<fp>#<export>"
+            let left_id = make_assign_left_member(
+                Expr::Ident(ident.clone()),
+                cp_ident_name("__cp_id"),
+            );
+            let right_id = Expr::Lit(Lit::Str(Str {
+                span: DUMMY_SP,
+                value: format!("{}#{}", encoded_fp, export_name).into(),
+                raw: None,
+            }));
+            let id_assign = Stmt::Expr(ExprStmt {
+                span: DUMMY_SP,
+                expr: Box::new(Expr::Assign(AssignExpr {
+                    span: DUMMY_SP,
+                    op: AssignOp::Assign,
+                    left: left_id,
+                    right: Box::new(right_id),
+                })),
+            });
+            out.push(ModuleItem::Stmt(id_assign));
+
+            // Ident.__cp_fp = "<fp>"
+            let left_fp = make_assign_left_member(
+                Expr::Ident(ident.clone()),
+                cp_ident_name("__cp_fp"),
+            );
+            let right_fp = Expr::Lit(Lit::Str(Str {
+                span: DUMMY_SP,
+                value: encoded_fp.clone().into(),
+                raw: None,
+            }));
+            let fp_assign = Stmt::Expr(ExprStmt {
+                span: DUMMY_SP,
+                expr: Box::new(Expr::Assign(AssignExpr {
+                    span: DUMMY_SP,
+                    op: AssignOp::Assign,
+                    left: left_fp,
+                    right: Box::new(right_fp),
+                })),
+            });
+            out.push(ModuleItem::Stmt(fp_assign));
+
+            out
+        };
+
+        // Walk module items and append stamping statements after export declarations
+        let mut new_body: Vec<ModuleItem> = Vec::with_capacity(m.body.len() * 2);
+        for item in m.body.drain(..) {
+            match &item {
+                ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(ExportDecl { decl, .. })) => {
+                    new_body.push(item.clone());
+                    match decl {
+                        Decl::Fn(fn_decl) => {
+                            let name = fn_decl.ident.clone();
+                            new_body.extend(stamp_for_ident(&name, &name.sym.to_string()));
+                        }
+                        Decl::Class(class_decl) => {
+                            let name = class_decl.ident.clone();
+                            new_body.extend(stamp_for_ident(&name, &name.sym.to_string()));
+                        }
+                        Decl::Var(var_decl) => {
+                            for d in &var_decl.decls {
+                                if let Pat::Ident(bi) = &d.name {
+                                    let name = bi.id.clone();
+                                    new_body.extend(stamp_for_ident(&name, &name.sym.to_string()));
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                ModuleItem::ModuleDecl(ModuleDecl::ExportDefaultDecl(ExportDefaultDecl { decl, .. })) => {
+                    new_body.push(item.clone());
+                    match decl {
+                        DefaultDecl::Fn(FnExpr { ident: Some(id), .. }) => {
+                            new_body.extend(stamp_for_ident(&id, "default"));
+                        }
+                        DefaultDecl::Class(ClassExpr { ident: Some(id), .. }) => {
+                            new_body.extend(stamp_for_ident(&id, "default"));
+                        }
+                        _ => {}
+                    }
+                }
+                ModuleItem::ModuleDecl(ModuleDecl::ExportNamed(NamedExport { specifiers, .. })) => {
+                    new_body.push(item.clone());
+                    for spec in specifiers {
+                        if let ExportSpecifier::Named(ExportNamedSpecifier { orig, .. }) = spec {
+                            if let ModuleExportName::Ident(orig_ident) = orig {
+                                let id = cp_ident(&orig_ident.sym.to_string());
+                                new_body.extend(stamp_for_ident(&id, &orig_ident.sym.to_string()));
+                            }
+                        }
+                    }
+                }
+                _ => new_body.push(item),
+            }
+        }
+        m.body = new_body;
+
+        // Continue other transforms and inject graph (from main branch)
         m.visit_mut_children_with(self);
         self.inject_graph_stmt(m);
     }
@@ -1759,6 +1875,7 @@ impl VisitMut for CodePressTransform {
         n.visit_mut_children_with(self);
     }
 
+    
     fn visit_mut_jsx_element(&mut self, node: &mut JSXElement) {
         node.visit_mut_children_with(self);
 
