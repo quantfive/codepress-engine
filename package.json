@@ -1,6 +1,6 @@
 {
   "name": "@quantfive/codepress-engine",
-  "version": "0.3.17",
+  "version": "0.3.18",
   "description": "CodePress engine - Babel and SWC plug-ins",
   "main": "./babel/index.js",
   "exports": {
@@ -11,6 +11,7 @@
     "./swc/wasm-v42": "./swc/codepress_engine.v42.wasm",
     "./swc/wasm-v26": "./swc/codepress_engine.v26.wasm",
     "./swc/wasm-v0_82_87": "./swc/codepress_engine.v0_82_87.wasm",
+    "./runtime": "./swc/runtime.js",
     "./hash-util": "./dist/hash-util.js",
     "./server": "./dist/server.js",
     "./cli": "./dist/cli.js"
@@ -27,10 +28,11 @@
   "scripts": {
     "build": "babel src --out-dir dist --copy-files",
     "build:rust": "node ./scripts/build-swc.mjs",
-    "prepack": "npm run build && npm run build:rust",
+    "build:runtime": "babel swc/runtime.jsx --out-file swc/runtime.js --presets @babel/preset-react",
+    "prepack": "npm run build && npm run build:runtime && npm run build:rust",
     "test": "jest",
-    "dev:link": "npm run build && npm run build:rust && npm link",
-    "prepublishOnly": "npm run build && npm run build:rust",
+    "dev:link": "npm run build && npm run build:runtime && npm run build:rust && npm link",
+    "prepublishOnly": "npm run build && npm run build:runtime && npm run build:rust",
     "version:patch": "npm version patch",
     "version:minor": "npm version minor",
     "version:major": "npm version major"
@@ -53,7 +55,13 @@
     "access": "restricted"
   },
   "peerDependencies": {
-    "@babel/core": "^7.0.0"
+    "@babel/core": "^7.0.0",
+    "react": "^18.2.0 || ^19.0.0",
+    "react-dom": "^18.2.0 || ^19.0.0"
+  },
+  "peerDependenciesMeta": {
+    "react": { "optional": true },
+    "react-dom": { "optional": true }
   },
   "devDependencies": {
     "@babel/cli": "^7.26.0",

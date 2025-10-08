@@ -77,6 +77,17 @@ function detectGitRepoName() {
   }
 }
 
+function runtimeIsAvailable() {
+  try {
+    require.resolve("react", { paths: [process.cwd()] });
+    require.resolve("react-dom", { paths: [process.cwd()] });
+    require.resolve("@quantfive/codepress-engine/runtime", { paths: [process.cwd()] });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function pickBand() {
   // Manual overrides first
   if (process.env.CODEPRESS_SWC_WASM)
@@ -182,6 +193,8 @@ function createSWCPlugin(userConfig = {}) {
 
   const sel = pickBand();
   const wasm = resolveWasmFile(sel);
+
+  const auto = runtimeIsAvailable();
 
   const finalPath = wasm;
 
