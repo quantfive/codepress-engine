@@ -260,7 +260,22 @@ impl CodePressTransform {
         }
     }
 
+    fn has_attr_key(attrs: &[JSXAttrOrSpread], key: &str) -> bool {
+        attrs.iter().any(|a| {
+            if let JSXAttrOrSpread::JSXAttr(attr) = a {
+                if let JSXAttrName::Ident(id) = &attr.name {
+                    return id.sym.as_ref() == key;
+                }
+            }
+            false
+        })
+    }
+
     fn attach_attr_string(attrs: &mut Vec<JSXAttrOrSpread>, key: &str, val: String) {
+        // Do not override existing props; only add if absent
+        if Self::has_attr_key(attrs, key) {
+            return;
+        }
         attrs.push(JSXAttrOrSpread::JSXAttr(JSXAttr {
             span: DUMMY_SP,
             name: JSXAttrName::Ident(cp_ident_name(key.into())),
@@ -1812,11 +1827,14 @@ impl VisitMut for CodePressTransform {
         };
 
         // Preserve your original attribute on EVERY JSX element
-        node.opening.attrs.push(self.create_encoded_path_attr(
-            &filename,
-            node.opening.span,
-            Some(node.span),
-        ));
+        // Only add our fingerprint if it does not already exist
+        if !Self::has_attr_key(&node.opening.attrs, "codepress-data-fp") {
+            node.opening.attrs.push(self.create_encoded_path_attr(
+                &filename,
+                node.opening.span,
+                Some(node.span),
+            ));
+        }
 
         // Root repo/branch once
         if self.repo_name.is_some() && !GLOBAL_ATTRIBUTES_ADDED.load(Ordering::Relaxed) {
@@ -1962,17 +1980,21 @@ impl VisitMut for CodePressTransform {
                 "data-codepress-source-kinds",
                 kinds_enc.clone(),
             );
-            if let JSXAttrOrSpread::JSXAttr(a) =
-                self.create_encoded_path_attr(&filename, orig_open_span, Some(orig_full_span))
-            {
-                original
-                    .opening
-                    .attrs
-                    .push(JSXAttrOrSpread::JSXAttr(JSXAttr {
-                        span: DUMMY_SP,
-                        name: JSXAttrName::Ident(cp_ident_name("data-codepress-callsite".into())),
-                        value: a.value,
-                    }));
+            if !Self::has_attr_key(&original.opening.attrs, "data-codepress-callsite") {
+                if let JSXAttrOrSpread::JSXAttr(a) = self.create_encoded_path_attr(
+                    &filename,
+                    orig_open_span,
+                    Some(orig_full_span),
+                ) {
+                    original
+                        .opening
+                        .attrs
+                        .push(JSXAttrOrSpread::JSXAttr(JSXAttr {
+                            span: DUMMY_SP,
+                            name: JSXAttrName::Ident(cp_ident_name("data-codepress-callsite".into())),
+                            value: a.value,
+                        }));
+                }
             }
 
             wrapper
@@ -2014,21 +2036,9 @@ impl VisitMut for CodePressTransform {
             self.wrap_with_provider(node, meta);
 
             let attrs = &mut node.opening.attrs;
-            CodePressTransform::attach_attr_string(
-                attrs,
-                "data-codepress-edit-candidates",
-                cands_enc.clone(),
-            );
-            CodePressTransform::attach_attr_string(
-                attrs,
-                "data-codepress-source-kinds",
-                kinds_enc.clone(),
-            );
-            CodePressTransform::attach_attr_string(
-                attrs,
-                "data-codepress-symbol-refs",
-                symrefs_enc.clone(),
-            );
+            CodePressTransform::attach_attr_string(attrs, "data-codepress-edit-candidates", cands_enc.clone());
+            CodePressTransform::attach_attr_string(attrs, "data-codepress-source-kinds", kinds_enc.clone());
+            CodePressTransform::attach_attr_string(attrs, "data-codepress-symbol-refs", symrefs_enc.clone());
         } else {
             // Host element → tag directly
             CodePressTransform::attach_attr_string(
@@ -2046,14 +2056,18 @@ impl VisitMut for CodePressTransform {
                 "data-codepress-symbol-refs",
                 symrefs_enc.clone(),
             );
-            if let JSXAttrOrSpread::JSXAttr(a) =
-                self.create_encoded_path_attr(&filename, node.opening.span, Some(node.span))
-            {
-                node.opening.attrs.push(JSXAttrOrSpread::JSXAttr(JSXAttr {
-                    span: DUMMY_SP,
-                    name: JSXAttrName::Ident(cp_ident_name("data-codepress-callsite".into())),
-                    value: a.value,
-                }));
+            if !Self::has_attr_key(&node.opening.attrs, "data-codepress-callsite") {
+                if let JSXAttrOrSpread::JSXAttr(a) = self.create_encoded_path_attr(
+                    &filename,
+                    node.opening.span,
+                    Some(node.span),
+                ) {
+                    node.opening.attrs.push(JSXAttrOrSpread::JSXAttr(JSXAttr {
+                        span: DUMMY_SP,
+                        name: JSXAttrName::Ident(cp_ident_name("data-codepress-callsite".into())),
+                        value: a.value,
+                    }));
+                }
             }
         }
     }
