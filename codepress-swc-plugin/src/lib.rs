@@ -135,6 +135,21 @@ pub struct CodePressTransform {
 }
 
 impl CodePressTransform {
+    /// Finds the index immediately after the directive prologue (e.g. "use client", "use strict").
+    /// Any injected statements should be inserted at this index to avoid preceding directives.
+    fn directive_insert_index(&self, m: &Module) -> usize {
+        let mut idx = 0;
+        for item in &m.body {
+            if let ModuleItem::Stmt(Stmt::Expr(ExprStmt { expr, .. })) = item {
+                if let Expr::Lit(Lit::Str(_)) = &**expr {
+                    idx += 1;
+                    continue;
+                }
+            }
+            break;
+        }
+        idx
+    }
     pub fn new(
         mut config: HashMap<String, serde_json::Value>,
         source_map: Option<std::sync::Arc<dyn SourceMapper>>,
@@ -360,7 +375,8 @@ impl CodePressTransform {
                 ctxt: SyntaxContext::empty(),
             })),
         }));
-        m.body.insert(0, stmt);
+        let insert_at = self.directive_insert_index(m);
+        m.body.insert(insert_at, stmt);
     }
 
     fn get_line_info(
@@ -1030,11 +1046,13 @@ impl CodePressTransform {
             })))
         };
 
-        // Prepend in order
-        m.body.insert(0, provider_fn);
-        m.body.insert(0, cpx_name_stmt);
-        m.body.insert(0, cpx_decl);
-        m.body.insert(0, import_decl);
+        // Insert after any top-of-file directives, preserving order: import, const, displayName, function
+        let insert_at = self.directive_insert_index(m);
+        // Insert in reverse so the final order is preserved
+        m.body.insert(insert_at, provider_fn);
+        m.body.insert(insert_at, cpx_name_stmt);
+        m.body.insert(insert_at, cpx_decl);
+        m.body.insert(insert_at, import_decl);
         self.inserted_provider_import = true;
     }
 }
