@@ -894,6 +894,14 @@ impl CodePressTransform {
         if self.inserted_provider_import {
             return;
         }
+
+        // Only inject into TSX files to avoid emitting JSX into .ts modules
+        // Establish current file from the module span if available
+        let _ = self.file_from_span(m.span);
+        let file = self.current_file();
+        if !file.ends_with(".tsx") {
+            return;
+        }
         // import { createContext } from "react";
         let import_decl = ModuleItem::ModuleDecl(ModuleDecl::Import(ImportDecl {
             span: DUMMY_SP,

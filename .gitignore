@@ -9,7 +9,8 @@ coverage
 codepress-swc-plugin/target/
 
 # Keep main branch clean with source code only
-swc/codepress_engine.wasm
+*.wasm
+swc/*.wasm
 
 # SWC plugin cache directory
 .swc/

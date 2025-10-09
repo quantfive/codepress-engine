@@ -1,9 +1,11 @@
 // scripts/build-swc.mjs
-import { mkdir, mkdtemp, readFile, writeFile, rm, cp } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join, dirname } from "node:path";
-import { fileURLToPath } from "node:url";
+
 import { execFile } from "node:child_process";
+import { cp, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
 const BANDS = [
@@ -44,6 +46,39 @@ const BANDS = [
   },
 ];
 
+// Allow selecting specific bands via env (`BAND` or `BANDS`) or CLI args.
+// Examples:
+//   BAND=v42 node scripts/build-swc.mjs
+//   BANDS=v26,v42 node scripts/build-swc.mjs
+//   node scripts/build-swc.mjs v42 v26
+const args = process.argv.slice(2).filter(Boolean);
+const bandEnvRaw = process.env.BAND || process.env.BANDS || "";
+const bandIdsFromEnv = bandEnvRaw
+  .split(",")
+  .map((s) => s.trim())
+  .filter(Boolean);
+const requestedIds = [...bandIdsFromEnv, ...args];
+const validIds = new Set(BANDS.map((b) => b.id));
+let BANDS_TO_BUILD = BANDS;
+if (requestedIds.length) {
+  const unknown = requestedIds.filter((id) => !validIds.has(id));
+  if (unknown.length) {
+    console.error(
+      `[codepress] Unknown band(s): ${unknown.join(", ")}. Valid: ${[...validIds].join(", ")}`
+    );
+    process.exit(1);
+  }
+  const requestedSet = new Set(requestedIds);
+  BANDS_TO_BUILD = BANDS.filter((b) => requestedSet.has(b.id));
+  console.log(
+    `[codepress] Building bands: ${BANDS_TO_BUILD.map((b) => b.id).join(", ")}`
+  );
+} else {
+  console.log(
+    `[codepress] Building all bands: ${BANDS.map((b) => b.id).join(", ")}`
+  );
+}
+
 // Newer Next uses WASI preview1 (“wasip1”). Some older builds still used “wasi”.
 const TARGETS = [
   { triple: "wasm32-wasip1", suffix: "" }, // default
@@ -56,8 +91,8 @@ const OUT_DIR = join(__dirname, "..", "swc");
 const run = (cmd, args, opts = {}) =>
   new Promise((res, rej) =>
     execFile(cmd, args, opts, (e, stdout, stderr) =>
-      e ? rej(new Error(stderr || e)) : res(stdout),
-    ),
+      e ? rej(new Error(stderr || e)) : res(stdout)
+    )
   );
 
 const templateCargo = (band) => {
@@ -127,7 +162,7 @@ async function buildOneBand(band) {
   for (const t of TARGETS) {
     if (!(await hasTarget(t.triple))) {
       console.warn(
-        `[codepress] Skipping ${t.triple} (rustc target not installed). Run: rustup target add ${t.triple}`,
+        `[codepress] Skipping ${t.triple} (rustc target not installed). Run: rustup target add ${t.triple}`
       );
       continue;
     }
@@ -139,7 +174,7 @@ async function buildOneBand(band) {
       "target",
       t.triple,
       "release",
-      "codepress_swc_plugin.wasm",
+      "codepress_swc_plugin.wasm"
     );
     const outName = `codepress_engine.${band.id}${t.suffix}.wasm`;
     await mkdir(OUT_DIR, { recursive: true });
@@ -150,5 +185,5 @@ async function buildOneBand(band) {
   await rm(tmp, { recursive: true, force: true });
 }
 
-for (const band of BANDS) await buildOneBand(band);
+for (const band of BANDS_TO_BUILD) await buildOneBand(band);
 console.log("Finished SWC bands built.");
