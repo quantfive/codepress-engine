@@ -74,7 +74,7 @@ function acquireLock() {
       JSON.stringify({
         pid: process.pid,
         timestamp: Date.now(),
-      })
+      }),
     );
 
     return true;
@@ -181,15 +181,15 @@ function applyPatternChanges(fileContent, changes) {
       if (findPatterns.has(change.find)) {
         const existingIndex = findPatterns.get(change.find);
         console.warn(
-          `\x1b[33m⚠ CONFLICT DETECTED: Multiple changes target the same pattern\x1b[0m`
+          `\x1b[33m⚠ CONFLICT DETECTED: Multiple changes target the same pattern\x1b[0m`,
         );
         console.warn(
-          `  Change ${existingIndex + 1}: ${changes[existingIndex].explanation}`
+          `  Change ${existingIndex + 1}: ${changes[existingIndex].explanation}`,
         );
         console.warn(`  Change ${index + 1}: ${change.explanation}`);
         console.warn(`  Pattern: ${change.find.substring(0, 100)}...`);
         console.warn(
-          `\x1b[33m  → Only the first change will be applied\x1b[0m`
+          `\x1b[33m  → Only the first change will be applied\x1b[0m`,
         );
       } else {
         findPatterns.set(change.find, index);
@@ -212,13 +212,13 @@ function applyPatternChanges(fileContent, changes) {
 
             if (openTags !== closeTags) {
               console.warn(
-                `\x1b[33m⚠ POTENTIAL JSX MALFORMATION: Unmatched tags in replacement\x1b[0m`
+                `\x1b[33m⚠ POTENTIAL JSX MALFORMATION: Unmatched tags in replacement\x1b[0m`,
               );
               console.warn(
-                `  Open tags: ${openTags}, Close tags: ${closeTags}`
+                `  Open tags: ${openTags}, Close tags: ${closeTags}`,
               );
               console.warn(
-                `  Replacement: ${replaceWith.substring(0, 200)}...`
+                `  Replacement: ${replaceWith.substring(0, 200)}...`,
               );
             }
 
@@ -226,10 +226,10 @@ function applyPatternChanges(fileContent, changes) {
             console.log(`\x1b[32m✓ Replaced pattern successfully\x1b[0m`);
           } else {
             console.warn(
-              `\x1b[33m⚠ Pattern not found for replace: ${find.substring(0, 50)}...\x1b[0m`
+              `\x1b[33m⚠ Pattern not found for replace: ${find.substring(0, 50)}...\x1b[0m`,
             );
             console.warn(
-              `\x1b[33m  This might be due to a previous change modifying the content\x1b[0m`
+              `\x1b[33m  This might be due to a previous change modifying the content\x1b[0m`,
             );
           }
         } else {
@@ -242,11 +242,11 @@ function applyPatternChanges(fileContent, changes) {
           if (modifiedContent.includes(find)) {
             modifiedContent = modifiedContent.replace(find, find + insert);
             console.log(
-              `\x1b[32m✓ Inserted content after pattern successfully\x1b[0m`
+              `\x1b[32m✓ Inserted content after pattern successfully\x1b[0m`,
             );
           } else {
             console.warn(
-              `\x1b[33m⚠ Pattern not found for insertAfter: ${find.substring(0, 50)}...\x1b[0m`
+              `\x1b[33m⚠ Pattern not found for insertAfter: ${find.substring(0, 50)}...\x1b[0m`,
             );
           }
         } else {
@@ -259,11 +259,11 @@ function applyPatternChanges(fileContent, changes) {
           if (modifiedContent.includes(find)) {
             modifiedContent = modifiedContent.replace(find, insert + find);
             console.log(
-              `\x1b[32m✓ Inserted content before pattern successfully\x1b[0m`
+              `\x1b[32m✓ Inserted content before pattern successfully\x1b[0m`,
             );
           } else {
             console.warn(
-              `\x1b[33m⚠ Pattern not found for insertBefore: ${find.substring(0, 50)}...\x1b[0m`
+              `\x1b[33m⚠ Pattern not found for insertBefore: ${find.substring(0, 50)}...\x1b[0m`,
             );
           }
         } else {
@@ -278,7 +278,7 @@ function applyPatternChanges(fileContent, changes) {
             console.log(`\x1b[32m✓ Deleted pattern successfully\x1b[0m`);
           } else {
             console.warn(
-              `\x1b[33m⚠ Pattern not found for delete: ${find.substring(0, 50)}...\x1b[0m`
+              `\x1b[33m⚠ Pattern not found for delete: ${find.substring(0, 50)}...\x1b[0m`,
             );
           }
         } else {
@@ -317,7 +317,7 @@ async function callBackendApiStreaming(
   endpoint,
   data,
   incomingAuthHeader,
-  onStreamEvent
+  onStreamEvent,
 ) {
   // Backend API settings
   const apiHost = process.env.CODEPRESS_BACKEND_HOST || "localhost";
@@ -347,7 +347,7 @@ async function callBackendApiStreaming(
 
   try {
     console.log(
-      `\x1b[36mℹ Calling backend streaming API: ${method} ${url}\x1b[0m`
+      `\x1b[36mℹ Calling backend streaming API: ${method} ${url}\x1b[0m`,
     );
     const response = await fetch(url, requestOptions);
 
@@ -395,7 +395,7 @@ async function callBackendApiStreaming(
                   "Error parsing SSE data:",
                   parseError,
                   "Line:",
-                  line
+                  line,
                 );
               }
             }
@@ -412,7 +412,7 @@ async function callBackendApiStreaming(
     }
   } catch (error) {
     console.error(
-      `\x1b[31m✗ Backend streaming API call failed: ${error.message}\x1b[0m`
+      `\x1b[31m✗ Backend streaming API call failed: ${error.message}\x1b[0m`,
     );
     throw error;
   }
@@ -441,17 +441,17 @@ async function callBackendApi(method, endpoint, data, incomingAuthHeader) {
 
     // Debug: Log environment token status
     console.log(
-      `\x1b[36mℹ Environment API token: ${authToken ? "[PRESENT]" : "[NOT SET]"}\x1b[0m`
+      `\x1b[36mℹ Environment API token: ${authToken ? "[PRESENT]" : "[NOT SET]"}\x1b[0m`,
     );
     console.log(
-      `\x1b[36mℹ Incoming auth header: ${incomingAuthHeader ? "[PRESENT]" : "[NOT PROVIDED]"}\x1b[0m`
+      `\x1b[36mℹ Incoming auth header: ${incomingAuthHeader ? "[PRESENT]" : "[NOT PROVIDED]"}\x1b[0m`,
     );
 
     // If no API token, try to use the incoming Authorization header
     if (!authToken && incomingAuthHeader) {
       authToken = incomingAuthHeader.split(" ")[1]; // Extract token part
       console.log(
-        `\x1b[36mℹ Using incoming Authorization header for authentication\x1b[0m`
+        `\x1b[36mℹ Using incoming Authorization header for authentication\x1b[0m`,
       );
     }
 
@@ -466,10 +466,10 @@ async function callBackendApi(method, endpoint, data, incomingAuthHeader) {
       console.log(
         `\x1b[36mℹ Using ${
           process.env.CODEPRESS_API_TOKEN ? "API Token" : "GitHub OAuth Token"
-        } for authentication\x1b[0m`
+        } for authentication\x1b[0m`,
       );
       console.log(
-        `\x1b[36mℹ Final auth header: Bearer ${authToken.substring(0, 10)}...\x1b[0m`
+        `\x1b[36mℹ Final auth header: Bearer ${authToken.substring(0, 10)}...\x1b[0m`,
       );
     } else {
       console.log("\x1b[33m⚠ No authentication token available\x1b[0m");
@@ -487,13 +487,13 @@ async function callBackendApi(method, endpoint, data, incomingAuthHeader) {
     // Debug: Log response status and preview
     console.log(`\x1b[36mℹ Response status: ${response.status}\x1b[0m`);
     console.log(
-      `\x1b[36mℹ Response preview: ${responseText.substring(0, 100)}...\x1b[0m`
+      `\x1b[36mℹ Response preview: ${responseText.substring(0, 100)}...\x1b[0m`,
     );
 
     // Check if response is successful
     if (!response.ok) {
       throw new Error(
-        `API request failed with status ${response.status}: ${responseText}`
+        `API request failed with status ${response.status}: ${responseText}`,
       );
     }
 
@@ -607,7 +607,7 @@ async function saveImageData({ imageData, filename }) {
         base64Data = imageData;
         imageExtension = "png";
         console.log(
-          "\x1b[33m⚠ Image data URI prefix not found and no filename provided, defaulting to .png extension.\x1b[0m"
+          "\x1b[33m⚠ Image data URI prefix not found and no filename provided, defaulting to .png extension.\x1b[0m",
         );
       }
 
@@ -661,10 +661,10 @@ async function applyChangesAndFormat(
   fileContent,
   changes,
   targetFile,
-  usePatternChanges = true
+  usePatternChanges = true,
 ) {
   console.log(
-    `\x1b[36mℹ Received ${changes.length} changes from backend\x1b[0m`
+    `\x1b[36mℹ Received ${changes.length} changes from backend\x1b[0m`,
   );
 
   // Apply the changes using the appropriate function based on the flag
@@ -690,7 +690,7 @@ async function applyChangesAndFormat(
   fs.writeFileSync(targetFile, formattedCode, "utf8");
 
   console.log(
-    `\x1b[32m✓ Updated file ${targetFile} with ${changes.length} changes using ${usePatternChanges ? "pattern-based" : "text-based"} approach\x1b[0m`
+    `\x1b[32m✓ Updated file ${targetFile} with ${changes.length} changes using ${usePatternChanges ? "pattern-based" : "text-based"} approach\x1b[0m`,
   );
 
   return formattedCode;
@@ -714,7 +714,7 @@ async function applyChangesAndFormat(
  */
 async function getChanges({ githubRepoName, fileChanges, authHeader }) {
   console.log(
-    `\x1b[36mℹ Getting changes from backend for ${fileChanges.length} files\x1b[0m`
+    `\x1b[36mℹ Getting changes from backend for ${fileChanges.length} files\x1b[0m`,
   );
 
   return await callBackendApi(
@@ -724,7 +724,7 @@ async function getChanges({ githubRepoName, fileChanges, authHeader }) {
       github_repo_name: githubRepoName,
       file_changes: fileChanges,
     },
-    authHeader
+    authHeader,
   );
 }
 
@@ -737,25 +737,31 @@ async function getChanges({ githubRepoName, fileChanges, authHeader }) {
 async function applyFullFileReplacement(modifiedContent, targetFile) {
   console.log(`\x1b[36mℹ Applying full file replacement\x1b[0m`);
 
-  // Format with Prettier
   let formattedCode;
-  try {
-    formattedCode = await prettier.format(modifiedContent, {
-      parser: "typescript",
-      semi: true,
-      singleQuote: false,
-    });
-  } catch (prettierError) {
-    console.error("Prettier formatting failed:", prettierError);
-    // If formatting fails, use the unformatted code
-    formattedCode = modifiedContent;
+  if (typeof modifiedContent === "string") {
+    // Format with Prettier
+    try {
+      formattedCode = await prettier.format(modifiedContent, {
+        parser: "typescript",
+        semi: true,
+        singleQuote: false,
+      });
+    } catch (prettierError) {
+      console.error("Prettier formatting failed:", prettierError);
+      // If formatting fails, use the unformatted code
+      formattedCode = modifiedContent;
+    }
+    fs.writeFileSync(targetFile, formattedCode, "utf8");
+  } else if (modifiedContent.type === "binary" && modifiedContent.base64) {
+    const buffer = Buffer.from(modifiedContent.base64, "base64");
+    formattedCode = "binary_encoded_file";
+    fs.writeFileSync(targetFile, buffer);
+  } else {
+    console.warn(`Unknown file type for ${targetFile}, skipping`);
   }
 
-  // Write back to file
-  fs.writeFileSync(targetFile, formattedCode, "utf8");
-
   console.log(
-    `\x1b[32m✓ Updated file ${targetFile} with complete file replacement\x1b[0m`
+    `\x1b[32m✓ Updated file ${targetFile} with complete file replacement\x1b[0m`,
   );
 
   return formattedCode;
@@ -808,18 +814,18 @@ async function handleStreamingAgentRequest({
         user_instruction: user_instruction,
       },
       authHeader,
-      sendEvent
+      sendEvent,
     );
 
     console.log(
-      `\x1b[36mℹ backendResponse to agent: ${JSON.stringify(backendResponse)}\x1b[0m`
+      `\x1b[36mℹ backendResponse to agent: ${JSON.stringify(backendResponse)}\x1b[0m`,
     );
 
     // Handle the response and apply changes
     if (backendResponse && backendResponse.updated_files) {
       const updatedFilePaths = [];
       for (const [filePath, newContent] of Object.entries(
-        backendResponse.updated_files
+        backendResponse.updated_files,
       )) {
         const targetFilePath = toAbsolutePath(filePath);
         await applyFullFileReplacement(newContent, targetFilePath);
@@ -846,7 +852,7 @@ async function handleStreamingAgentRequest({
     sendEvent({ type: "complete" });
   } catch (error) {
     console.error(
-      `\x1b[31m✗ Error in streaming agent: ${error.message}\x1b[0m`
+      `\x1b[31m✗ Error in streaming agent: ${error.message}\x1b[0m`,
     );
     sendEvent({
       type: "error",
@@ -932,7 +938,7 @@ function createApp() {
 
       // Debug: Log auth header info
       console.log(
-        `\x1b[36mℹ Auth header received: ${authHeader ? "[PRESENT]" : "[MISSING]"}\x1b[0m`
+        `\x1b[36mℹ Auth header received: ${authHeader ? "[PRESENT]" : "[MISSING]"}\x1b[0m`,
       );
 
       if (!Array.isArray(changes)) {
@@ -942,17 +948,17 @@ function createApp() {
       }
 
       console.log(
-        `\x1b[36mℹ Visual Editor API Request: Received ${changes.length} changes for repo ${github_repo_name}\x1b[0m`
+        `\x1b[36mℹ Visual Editor API Request: Received ${changes.length} changes for repo ${github_repo_name}\x1b[0m`,
       );
 
       // Debug: Check if browser dimensions are provided
       const changesWithDimensions = changes.filter(
-        (change) => change.browser_width && change.browser_height
+        (change) => change.browser_width && change.browser_height,
       );
       if (changesWithDimensions.length > 0) {
         const sampleChange = changesWithDimensions[0];
         console.log(
-          `\x1b[36mℹ Browser dimensions detected: ${sampleChange.browser_width}x${sampleChange.browser_height}\x1b[0m`
+          `\x1b[36mℹ Browser dimensions detected: ${sampleChange.browser_width}x${sampleChange.browser_height}\x1b[0m`,
         );
       } else {
         console.log(`\x1b[33m⚠ No browser dimensions found in changes\x1b[0m`);
@@ -969,7 +975,7 @@ function createApp() {
         try {
           if (!change.encoded_location) {
             console.warn(
-              `\x1b[33m⚠ Skipping change with missing encoded_location.\x1b[0m`
+              `\x1b[33m⚠ Skipping change with missing encoded_location.\x1b[0m`,
             );
             continue;
           }
@@ -978,7 +984,7 @@ function createApp() {
           const targetFile = decode(encodedFilePath);
           if (!targetFile) {
             console.warn(
-              `\x1b[33m⚠ Skipping change with undecodable file from encoded_location: ${change.encoded_location}.\x1b[0m`
+              `\x1b[33m⚠ Skipping change with undecodable file from encoded_location: ${change.encoded_location}.\x1b[0m`,
             );
             continue;
           }
@@ -993,7 +999,7 @@ function createApp() {
 
           if (!hasStyleChanges && !hasTextChanges && !hasMoveChanges) {
             console.warn(
-              `\x1b[33m⚠ Skipping change with no style, text, or move changes.\x1b[0m`
+              `\x1b[33m⚠ Skipping change with no style, text, or move changes.\x1b[0m`,
             );
             continue;
           }
@@ -1003,7 +1009,7 @@ function createApp() {
           validChanges.push(change);
         } catch (e) {
           console.error(
-            `\x1b[31m✖ Error processing change for location: ${change.encoded_location}\x1b[0m`
+            `\x1b[31m✖ Error processing change for location: ${change.encoded_location}\x1b[0m`,
           );
         }
       }
@@ -1016,13 +1022,13 @@ function createApp() {
           fileContentMap.set(encodedLocation, fileContent);
         } catch (e) {
           console.error(
-            `\x1b[31m✖ Error reading file for location: ${encodedLocation}\x1b[0m`
+            `\x1b[31m✖ Error reading file for location: ${encodedLocation}\x1b[0m`,
           );
         }
       }
 
       console.log(
-        `\x1b[36mℹ Pre-fetched ${fileContentMap.size} unique files for ${validChanges.length} changes\x1b[0m`
+        `\x1b[36mℹ Pre-fetched ${fileContentMap.size} unique files for ${validChanges.length} changes\x1b[0m`,
       );
 
       // Second pass: process each change with pre-fetched content
@@ -1033,7 +1039,7 @@ function createApp() {
           const fileContent = fileContentMap.get(change.encoded_location);
           if (!fileContent) {
             console.warn(
-              `\x1b[33m⚠ Skipping change with missing file content for: ${change.encoded_location}\x1b[0m`
+              `\x1b[33m⚠ Skipping change with missing file content for: ${change.encoded_location}\x1b[0m`,
             );
             continue;
           }
@@ -1054,7 +1060,7 @@ function createApp() {
           });
         } catch (e) {
           console.error(
-            `\x1b[31m✖ Error processing change for location: ${change.encoded_location}\x1b[0m`
+            `\x1b[31m✖ Error processing change for location: ${change.encoded_location}\x1b[0m`,
           );
         }
       }
@@ -1077,16 +1083,16 @@ function createApp() {
       }
 
       console.log(
-        `\x1b[36mℹ Sending request for ${fileChangesForBackend.length} individual changes (${changes.length} total original changes)\x1b[0m`
+        `\x1b[36mℹ Sending request for ${fileChangesForBackend.length} individual changes (${changes.length} total original changes)\x1b[0m`,
       );
 
       // Debug: Log browser dimensions being sent to backend
       const backendChangesWithDimensions = fileChangesForBackend.filter(
-        (change) => change.browser_width && change.browser_height
+        (change) => change.browser_width && change.browser_height,
       );
       if (backendChangesWithDimensions.length > 0) {
         console.log(
-          `\x1b[36mℹ Sending browser dimensions to backend for ${backendChangesWithDimensions.length} changes\x1b[0m`
+          `\x1b[36mℹ Sending browser dimensions to backend for ${backendChangesWithDimensions.length} changes\x1b[0m`,
         );
       }
 
@@ -1100,7 +1106,7 @@ function createApp() {
       if (backendResponse && backendResponse.updated_files) {
         console.log(`\x1b[36mℹ Processing updated_files format\x1b[0m`);
         for (const [filePath, newContent] of Object.entries(
-          backendResponse.updated_files
+          backendResponse.updated_files,
         )) {
           const targetFile = toAbsolutePath(filePath);
 
@@ -1124,7 +1130,7 @@ function createApp() {
       });
     } catch (err) {
       console.error(
-        `\x1b[31m✖ Fatal error in /visual-editor-api: ${err.message}\x1b[0m`
+        `\x1b[31m✖ Fatal error in /visual-editor-api: ${err.message}\x1b[0m`,
       );
       return reply.code(500).send({
         error: "An internal server error occurred",
@@ -1142,7 +1148,7 @@ function createApp() {
         request.headers.authorization || request.headers["authorization"];
 
       console.log(
-        `\x1b[36mℹ [visual-editor-api-agent] Auth header received: ${authHeader ? "[PRESENT]" : "[MISSING]"}, Always streaming\x1b[0m`
+        `\x1b[36mℹ [visual-editor-api-agent] Auth header received: ${authHeader ? "[PRESENT]" : "[MISSING]"}, Always streaming\x1b[0m`,
       );
 
       const { targetFile, fileContent } =
@@ -1184,7 +1190,7 @@ function createApp() {
           console.log(`\x1b[32m✓ Wrote ${targetFilePath} to disk\x1b[0m`);
         } catch (writeErr) {
           console.error(
-            `\x1b[31m✗ Failed to write ${filePath}: ${writeErr.message}\x1b[0m`
+            `\x1b[31m✗ Failed to write ${filePath}: ${writeErr.message}\x1b[0m`,
           );
         }
       }
@@ -1235,7 +1241,7 @@ async function startServer(options = {}) {
     await app.listen({ port, host: "0.0.0.0" });
 
     console.log(
-      `\x1b[32m✅ Codepress Dev Server running at http://localhost:${port}\x1b[0m`
+      `\x1b[32m✅ Codepress Dev Server running at http://localhost:${port}\x1b[0m`,
     );
 
     // Save instance
@@ -1245,7 +1251,7 @@ async function startServer(options = {}) {
   } catch (err) {
     if (err.code === "EADDRINUSE") {
       console.log(
-        `\x1b[33mℹ Codepress Dev Server: Port ${port} is already in use, server is likely already running\x1b[0m`
+        `\x1b[33mℹ Codepress Dev Server: Port ${port} is already in use, server is likely already running\x1b[0m`,
       );
     } else {
       console.error("Codepress Dev Server error:", err);
@@ -1325,7 +1331,7 @@ function getProjectStructure() {
             return new RegExp(regexPattern);
           } catch (error) {
             console.warn(
-              `\x1b[33m⚠ Invalid regex pattern for "${pattern}": ${error.message}\x1b[0m`
+              `\x1b[33m⚠ Invalid regex pattern for "${pattern}": ${error.message}\x1b[0m`,
             );
             return null;
           }
@@ -1336,11 +1342,11 @@ function getProjectStructure() {
       excludePatterns = [...excludePatterns, ...gitignorePatterns];
 
       console.log(
-        `\x1b[36mℹ Found ${gitignorePatterns.length} valid gitignore patterns\x1b[0m`
+        `\x1b[36mℹ Found ${gitignorePatterns.length} valid gitignore patterns\x1b[0m`,
       );
     } else {
       console.log(
-        `\x1b[33m⚠ No .gitignore file found, no exclusions applied\x1b[0m`
+        `\x1b[33m⚠ No .gitignore file found, no exclusions applied\x1b[0m`,
       );
     }
 
@@ -1375,7 +1381,7 @@ function getProjectStructure() {
         }
       } catch (error) {
         console.warn(
-          `\x1b[33m⚠ Error reading directory ${dir}: ${error.message}\x1b[0m`
+          `\x1b[33m⚠ Error reading directory ${dir}: ${error.message}\x1b[0m`,
         );
       }
 
@@ -1384,7 +1390,7 @@ function getProjectStructure() {
 
     const fileList = getFilesRecursively(process.cwd());
     console.log(
-      `\x1b[36mℹ Generated file list with ${fileList.length} files\x1b[0m`
+      `\x1b[36mℹ Generated file list with ${fileList.length} files\x1b[0m`,
     );
 
     // Return as a formatted string with one file per line
