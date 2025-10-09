@@ -112,6 +112,45 @@ fn normalize_filename(filename: &str) -> String {
     s
 }
 
+// Determine if ssr or client component
+fn is_client_file(program: &Program) -> bool {
+    use swc_core::ecma::ast::*;
+    if let Program::Module(m) = program {
+        if let Some(first) = m.body.first() {
+            if let ModuleItem::Stmt(Stmt::Expr(ExprStmt { expr, .. })) = first {
+                if let Expr::Lit(Lit::Str(s)) = &**expr {
+                    return s.value.as_ref() == "use client";
+                }
+            }
+        }
+    }
+    false
+}
+
+fn prologue_insert_index(m: &Module) -> usize {
+    use swc_core::ecma::ast::*;
+    let mut i = 0;
+    while let Some(item) = m.body.get(i) {
+        match item {
+            ModuleItem::Stmt(Stmt::Expr(ExprStmt { expr, .. }))
+                if matches!(&**expr, Expr::Lit(Lit::Str(_))) =>
+            {
+                i += 1;
+            }
+            _ => break,
+        }
+    }
+    i
+}
+
+fn is_third_party_path(path: &str) -> bool {
+    let p = path.replace('\\', "/");
+    p.contains("/node_modules/")
+        || p.starts_with("next/")
+        || p.contains("/.next/")
+        || p.contains("/dist/")
+}
+
 // -----------------------------------------------------------------------------
 // Transform state
 // -----------------------------------------------------------------------------
@@ -128,6 +167,9 @@ pub struct CodePressTransform {
     wrapper_tag: String,    // DOM wrapper tag (display: contents)
     provider_ident: String, // __CPProvider (inline injected)
     inserted_provider_import: bool,
+
+    is_client_file: bool,
+    needs_provider: bool,
 
     // -------- module graph (this module only) --------
     module_file: Option<String>,
@@ -158,6 +200,8 @@ impl CodePressTransform {
             provider_ident,
             inserted_provider_import: false,
             module_file: None,
+            is_client_file: false,
+            needs_provider: false,
             graph: ModuleGraph {
                 imports: vec![],
                 exports: vec![],
@@ -360,7 +404,9 @@ impl CodePressTransform {
                 ctxt: SyntaxContext::empty(),
             })),
         }));
-        m.body.insert(0, stmt);
+
+        let insert_at = prologue_insert_index(m);
+        m.body.insert(insert_at, stmt);
     }
 
     fn get_line_info(
@@ -1031,10 +1077,14 @@ impl CodePressTransform {
         };
 
         // Prepend in order
-        m.body.insert(0, provider_fn);
-        m.body.insert(0, cpx_name_stmt);
-        m.body.insert(0, cpx_decl);
-        m.body.insert(0, import_decl);
+        let mut idx = prologue_insert_index(m);
+        m.body.insert(idx, provider_fn);
+        idx += 1;
+        m.body.insert(idx, cpx_name_stmt);
+        idx += 1;
+        m.body.insert(idx, cpx_decl);
+        idx += 1;
+        m.body.insert(idx, import_decl);
         self.inserted_provider_import = true;
     }
 }
@@ -1349,7 +1399,12 @@ fn detect_fetch_like(c: &CallExpr) -> Option<FetchLike> {
 // -----------------------------------------------------------------------------
 impl CodePressTransform {
     // Build provider wrapper: <__CPProvider value={{cs,c,k,fp}}>{node}</__CPProvider>
-    fn wrap_with_provider(&self, node: &mut JSXElement, meta: ProviderMeta) {
+    fn wrap_with_provider(&mut self, node: &mut JSXElement, meta: ProviderMeta) {
+        if !self.is_client_file {
+            // Ssr - don't wrap
+            return;
+        }
+        self.needs_provider = true;
         let provider_name: JSXElementName =
             JSXElementName::Ident(cp_ident(&self.provider_ident).into());
 
@@ -1438,13 +1493,226 @@ impl CodePressTransform {
             .push(JSXElementChild::JSXElement(Box::new(original)));
         *node = provider;
     }
+
+    fn file_looks_like_next_layout(&self) -> bool {
+        let f = self.current_file();
+        // normalize to forward slashes already done by normalize_filename elsewhere
+        // crude but effective: match .../app/.../layout.tsx|tsx|js|jsx
+        let f = f.to_ascii_lowercase();
+        (f.ends_with("/layout.tsx")
+            || f.ends_with("/layout.jsx")
+            || f.ends_with("/layout.ts")
+            || f.ends_with("/layout.js"))
+            && f.contains("/app/")
+    }
+
+    fn has_cproot_import(m: &Module) -> bool {
+        use swc_core::ecma::ast::*;
+        m.body.iter().any(|item| {
+            if let ModuleItem::ModuleDecl(ModuleDecl::Import(ImportDecl {
+                src, specifiers, ..
+            })) = item
+            {
+                if src.value.as_ref() == "@quantfive/codepress-engine/runtime" {
+                    return specifiers.iter().any(|s| match s {
+                        ImportSpecifier::Named(n) => n.local.sym.as_ref() == "CPRootProvider",
+                        _ => false,
+                    });
+                }
+            }
+            false
+        })
+    }
+
+    fn inject_cproot_import(m: &mut Module) {
+        use swc_core::ecma::ast::*;
+        let import_decl = ModuleItem::ModuleDecl(ModuleDecl::Import(ImportDecl {
+            span: DUMMY_SP,
+            specifiers: vec![ImportSpecifier::Named(ImportNamedSpecifier {
+                span: DUMMY_SP,
+                local: cp_ident("CPRootProvider".into()),
+                imported: Some(ModuleExportName::Ident(cp_ident("CPRootProvider".into()))),
+                is_type_only: false,
+            })],
+            src: Box::new(Str {
+                span: DUMMY_SP,
+                value: "@quantfive/codepress-engine/runtime".into(),
+                raw: None,
+            }),
+            type_only: false,
+            with: None,
+            #[cfg(not(feature = "compat_0_87"))]
+            phase: ImportPhase::Evaluation,
+        }));
+        // Add near top (but after "use client" directive if any)
+        let insert_at = match m.body.first() {
+            Some(ModuleItem::Stmt(Stmt::Expr(ExprStmt { expr, .. })))
+                if matches!(&**expr, Expr::Lit(Lit::Str(_))) =>
+            {
+                1
+            }
+            _ => 0,
+        };
+        m.body.insert(insert_at, import_decl);
+    }
+
+    /// Wrap the default-exported layout's returned JSX with <CPRootProvider>.
+    /// Handles:
+    ///   export default function Layout(...) { return <html>...</html>; }
+    ///   export default (props) => <html>...</html>
+    fn maybe_wrap_next_layout(&mut self, m: &mut Module) {
+        if !self.file_looks_like_next_layout() {
+            return;
+        }
+        // If the file is already a client file, no need to add a root wrapper:
+        // the inline provider logic will handle client subtrees as needed.
+        if self.is_client_file {
+            return;
+        }
+
+        // Find default export
+        use swc_core::ecma::ast::*;
+        let mut wrapped = false;
+
+        // 1) export default function ... { return <JSX/> }
+        for item in m.body.iter_mut() {
+            if let ModuleItem::ModuleDecl(ModuleDecl::ExportDefaultDecl(ed)) = item {
+                // existing DefaultDecl::Fn handling – patched in step 2 above
+                if let DefaultDecl::Fn(fndecl) = &mut ed.decl {
+                    let func = fndecl.function.as_mut();
+                    if let Some(block) = &mut func.body {
+                        for stmt in block.stmts.iter_mut().rev() {
+                            if let Stmt::Return(ret) = stmt {
+                                if let Some(orig) = ret.arg.take() {
+                                    if matches!(&*orig, Expr::JSXElement(_) | Expr::JSXFragment(_))
+                                    {
+                                        ret.arg = Some(Box::new(Expr::JSXElement(Box::new(
+                                            Self::wrap_jsx_in_cproot(orig),
+                                        ))));
+                                        wrapped = true;
+                                        break;
+                                    } else {
+                                        // put it back unchanged
+                                        ret.arg = Some(orig);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            } else if let ModuleItem::ModuleDecl(ModuleDecl::ExportDefaultExpr(ede)) = item {
+                // 2) export default (() => <JSX/>)  OR  export default <JSX/>
+                match &mut *ede.expr {
+                    // export default <JSX/>
+                    Expr::JSXElement(_) | Expr::JSXFragment(_) => {
+                        let orig = std::mem::replace(
+                            &mut ede.expr,
+                            Box::new(Expr::Lit(Lit::Null(Null { span: DUMMY_SP }))),
+                        );
+                        ede.expr =
+                            Box::new(Expr::JSXElement(Box::new(Self::wrap_jsx_in_cproot(orig))));
+                        wrapped = true;
+                    }
+                    // export default (() => <JSX/>)
+                    Expr::Arrow(af) => {
+                        match af.body.as_mut() {
+                            swc_core::ecma::ast::BlockStmtOrExpr::Expr(e) => {
+                                // e: &mut Box<Expr>
+                                if matches!(&**e, Expr::JSXElement(_) | Expr::JSXFragment(_)) {
+                                    let orig = std::mem::replace(
+                                        e,
+                                        Box::new(Expr::Lit(Lit::Null(Null { span: DUMMY_SP }))),
+                                    );
+                                    *e = Box::new(Expr::JSXElement(Box::new(
+                                        Self::wrap_jsx_in_cproot(orig),
+                                    )));
+                                    wrapped = true;
+                                }
+                            }
+                            swc_core::ecma::ast::BlockStmtOrExpr::BlockStmt(b) => {
+                                // b: &mut BlockStmt
+                                for stmt in b.stmts.iter_mut().rev() {
+                                    if let Stmt::Return(ret) = stmt {
+                                        if let Some(arg) = &mut ret.arg {
+                                            if matches!(
+                                                &**arg,
+                                                Expr::JSXElement(_) | Expr::JSXFragment(_)
+                                            ) {
+                                                let orig = std::mem::replace(
+                                                    arg,
+                                                    Box::new(Expr::Lit(Lit::Null(Null {
+                                                        span: DUMMY_SP,
+                                                    }))),
+                                                );
+                                                *arg = Box::new(Expr::JSXElement(Box::new(
+                                                    Self::wrap_jsx_in_cproot(orig),
+                                                )));
+                                                wrapped = true;
+                                                break;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        if wrapped && !Self::has_cproot_import(m) {
+            Self::inject_cproot_import(m);
+        }
+    }
+
+    // helper to create <CPRootProvider>{<original/>}</CPRootProvider>
+    fn wrap_jsx_in_cproot(
+        original_expr: Box<swc_core::ecma::ast::Expr>,
+    ) -> swc_core::ecma::ast::JSXElement {
+        use swc_core::ecma::ast::*;
+        JSXElement {
+            span: DUMMY_SP,
+            opening: JSXOpeningElement {
+                span: DUMMY_SP,
+                name: JSXElementName::Ident(cp_ident("CPRootProvider".into()).into()),
+                attrs: vec![],
+                self_closing: false,
+                type_args: None,
+            },
+            children: vec![JSXElementChild::JSXExprContainer(JSXExprContainer {
+                span: DUMMY_SP,
+                expr: JSXExpr::Expr(original_expr),
+            })],
+            closing: Some(JSXClosingElement {
+                span: DUMMY_SP,
+                name: JSXElementName::Ident(cp_ident("CPRootProvider".into()).into()),
+            }),
+        }
+    }
 }
 
 impl VisitMut for CodePressTransform {
     fn visit_mut_module(&mut self, m: &mut Module) {
-        // Inject inline provider once per module
-        self.ensure_provider_inline(m);
+        // Ensure we have a current file path recorded
+        // Ignore node_modules and other third party libs?
+        // let cur = self.current_file();
+        // if !cur.is_empty() && is_third_party_path(&cur) {
+        //     return;
+        // }
+
         m.visit_mut_children_with(self);
+
+        // Inject inline client provider only when:
+        // - this is a client file
+        // - we actually wrapped with Provider
+        if self.needs_provider && self.is_client_file {
+            self.ensure_provider_inline(m);
+        }
+
+        // Layout wrapper (server file root provider)
+        self.maybe_wrap_next_layout(m);
+
         self.inject_graph_stmt(m);
     }
     fn visit_mut_import_decl(&mut self, n: &mut ImportDecl) {
@@ -2138,6 +2406,8 @@ pub fn process_transform(
         Some(std::sync::Arc::new(metadata.source_map));
 
     let mut transform = CodePressTransform::new(config, source_map);
+
+    transform.is_client_file = is_client_file(&program);
 
     // Collect bindings once up-front (to resolve inits/imports/functions)
     transform.collect_bindings(&program);
