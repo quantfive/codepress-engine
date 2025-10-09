@@ -1969,33 +1969,8 @@ impl VisitMut for CodePressTransform {
                 },
             );
 
-            // Duplicate metadata on invocation
-            CodePressTransform::attach_attr_string(
-                &mut original.opening.attrs,
-                "data-codepress-edit-candidates",
-                cands_enc.clone(),
-            );
-            CodePressTransform::attach_attr_string(
-                &mut original.opening.attrs,
-                "data-codepress-source-kinds",
-                kinds_enc.clone(),
-            );
-            if !Self::has_attr_key(&original.opening.attrs, "data-codepress-callsite") {
-                if let JSXAttrOrSpread::JSXAttr(a) = self.create_encoded_path_attr(
-                    &filename,
-                    orig_open_span,
-                    Some(orig_full_span),
-                ) {
-                    original
-                        .opening
-                        .attrs
-                        .push(JSXAttrOrSpread::JSXAttr(JSXAttr {
-                            span: DUMMY_SP,
-                            name: JSXAttrName::Ident(cp_ident_name("data-codepress-callsite".into())),
-                            value: a.value,
-                        }));
-                }
-            }
+            // Intentionally avoid duplicating metadata onto the custom component invocation
+            // to prevent interfering with component prop forwarding (e.g., Radix Slot).
 
             wrapper
                 .children
@@ -2036,6 +2011,7 @@ impl VisitMut for CodePressTransform {
             self.wrap_with_provider(node, meta);
 
             let attrs = &mut node.opening.attrs;
+            // Only annotate the injected wrappers (provider or host wrapper), not the invocation element
             CodePressTransform::attach_attr_string(attrs, "data-codepress-edit-candidates", cands_enc.clone());
             CodePressTransform::attach_attr_string(attrs, "data-codepress-source-kinds", kinds_enc.clone());
             CodePressTransform::attach_attr_string(attrs, "data-codepress-symbol-refs", symrefs_enc.clone());
