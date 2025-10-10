@@ -734,6 +734,59 @@ async function getChanges({ githubRepoName, fileChanges, authHeader }) {
  * @param {string} targetFile Target file path
  * @returns {Promise<string>} Formatted code
  */
+function pickPrettierParser(filePath) {
+  const lower = (filePath || "").toLowerCase();
+  if (lower.endsWith(".ts") || lower.endsWith(".tsx")) return "typescript";
+  return "babel"; // default for .js/.jsx and others
+}
+
+function tryFormatWithPrettierOrNull(code, filePath) {
+  try {
+    return prettier.format(code, {
+      parser: pickPrettierParser(filePath),
+      semi: true,
+      singleQuote: false,
+    });
+  } catch (e) {
+    return null;
+  }
+}
+
+function closeUnclosedJsxTags(code) {
+  try {
+    const tagRegex = /<\/?([A-Za-z][A-Za-z0-9]*)\b[^>]*?\/?>(?!\s*<\!)/g;
+    const selfClosingRegex = /<([A-Za-z][A-Za-z0-9]*)\b[^>]*?\/>/;
+    const stack = [];
+    let match;
+    while ((match = tagRegex.exec(code)) !== null) {
+      const full = match[0];
+      const name = match[1];
+      const isClose = full.startsWith("</");
+      const isSelfClosing = selfClosingRegex.test(full);
+      if (isSelfClosing) continue;
+      if (!isClose) {
+        stack.push(name);
+      } else {
+        if (stack.length && stack[stack.length - 1] === name) {
+          stack.pop();
+        } else {
+          const idx = stack.lastIndexOf(name);
+          if (idx !== -1) stack.splice(idx, 1);
+        }
+      }
+    }
+    if (stack.length === 0) return code;
+    let suffix = "";
+    for (let i = stack.length - 1; i >= 0; i--) {
+      const tag = stack[i];
+      suffix += `</${tag}>`;
+    }
+    return code + "\n" + suffix + "\n";
+  } catch {
+    return code;
+  }
+}
+
 async function applyFullFileReplacement(modifiedContent, targetFile) {
   console.log(`\x1b[36mℹ Applying full file replacement\x1b[0m`);
 
@@ -741,7 +794,7 @@ async function applyFullFileReplacement(modifiedContent, targetFile) {
   let formattedCode;
   try {
     formattedCode = await prettier.format(modifiedContent, {
-      parser: "typescript",
+      parser: pickPrettierParser(targetFile),
       semi: true,
       singleQuote: false,
     });
@@ -752,6 +805,17 @@ async function applyFullFileReplacement(modifiedContent, targetFile) {
   }
 
   // Write back to file
+  try {
+    const dir = path.dirname(targetFile);
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
+      console.log(`\x1b[36mℹ Created directory: ${dir}\x1b[0m`);
+    }
+  } catch (mkdirErr) {
+    console.error(
+      `\x1b[31m✗ Failed to ensure directory for ${targetFile}: ${mkdirErr.message}\x1b[0m`
+    );
+  }
   fs.writeFileSync(targetFile, formattedCode, "utf8");
 
   console.log(
@@ -788,6 +852,70 @@ async function handleStreamingAgentRequest({
     "Access-Control-Allow-Headers": "Cache-Control",
   });
 
+  // Apply incremental updates to disk for hot reload
+  async function writeIncrementalUpdate(eventData) {
+    try {
+      if (
+        eventData &&
+        eventData.type === "file_update" &&
+        eventData.file_path &&
+        typeof eventData.content === "string"
+      ) {
+        // Normalize .tmp paths emitted by editors before writing
+        let normalizedPath = eventData.file_path;
+        if (normalizedPath.includes(".tmp.")) {
+          const tmpIdx = normalizedPath.indexOf(".tmp.");
+          normalizedPath = normalizedPath.slice(0, tmpIdx);
+        }
+        const targetFilePath = toAbsolutePath(normalizedPath);
+        let candidate = eventData.content;
+        let formatted = tryFormatWithPrettierOrNull(candidate, targetFilePath);
+        if (!formatted) {
+          const closed = closeUnclosedJsxTags(candidate);
+          formatted = tryFormatWithPrettierOrNull(closed, targetFilePath);
+        }
+        if (formatted) {
+          await applyFullFileReplacement(formatted, targetFilePath);
+        } else {
+          console.warn(
+            "Skipping incremental write due to unparseable content for",
+            targetFilePath
+          );
+        }
+      }
+      if (
+        eventData &&
+        eventData.type === "final_result" &&
+        eventData.result &&
+        eventData.result.updated_files
+      ) {
+        for (const [filePath, newContent] of Object.entries(
+          eventData.result.updated_files
+        )) {
+          let p = filePath;
+          if (p.includes(".tmp.")) {
+            p = p.slice(0, p.indexOf(".tmp."));
+          }
+          const targetFilePath = toAbsolutePath(p);
+          let formatted = tryFormatWithPrettierOrNull(
+            newContent,
+            targetFilePath
+          );
+          if (!formatted) {
+            const closed = closeUnclosedJsxTags(newContent);
+            formatted = tryFormatWithPrettierOrNull(closed, targetFilePath);
+          }
+          await applyFullFileReplacement(
+            formatted || newContent,
+            targetFilePath
+          );
+        }
+      }
+    } catch (e) {
+      console.error("Failed to apply incremental update:", e);
+    }
+  }
+
   // Function to send SSE data
   function sendEvent(eventData) {
     const data = JSON.stringify(eventData);
@@ -808,7 +936,10 @@ async function handleStreamingAgentRequest({
         user_instruction: user_instruction,
       },
       authHeader,
-      sendEvent
+      async (evt) => {
+        await writeIncrementalUpdate(evt);
+        sendEvent(evt);
+      }
     );
 
     console.log(
@@ -1176,15 +1307,19 @@ function createApp() {
       }
 
       const writtenFiles = [];
-      for (const [filePath, newContent] of Object.entries(updated_files)) {
+      for (const [rawPath, newContent] of Object.entries(updated_files)) {
         try {
+          let filePath = rawPath;
+          if (filePath.includes(".tmp.")) {
+            filePath = filePath.slice(0, filePath.indexOf(".tmp."));
+          }
           const targetFilePath = toAbsolutePath(filePath);
           await applyFullFileReplacement(newContent, targetFilePath);
           writtenFiles.push(targetFilePath);
           console.log(`\x1b[32m✓ Wrote ${targetFilePath} to disk\x1b[0m`);
         } catch (writeErr) {
           console.error(
-            `\x1b[31m✗ Failed to write ${filePath}: ${writeErr.message}\x1b[0m`
+            `\x1b[31m✗ Failed to write ${rawPath}: ${writeErr.message}\x1b[0m`
           );
         }
       }
