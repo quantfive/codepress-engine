@@ -1,11 +1,121 @@
 // Codepress Dev Server
-const fastify = require("fastify");
-const os = require("os");
-const fs = require("fs");
-const path = require("path");
-const prettier = require("prettier");
-// Use built-in fetch in Node.js 18+ which supports streaming
-const { decode } = require("./index");
+import fastify, { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
+import cors from "@fastify/cors";
+import os from "os";
+import fs from "fs";
+import path from "path";
+import prettier from "prettier";
+import { decode } from "./index";
+
+interface TextChangeOperation {
+  type: "insert" | "delete" | "replace";
+  line?: number;
+  startLine?: number;
+  endLine?: number;
+  codeChange?: string;
+}
+
+interface PatternChangeOperation {
+  type: "replace" | "insertAfter" | "insertBefore" | "delete";
+  find?: string;
+  replaceWith?: string;
+  insert?: string;
+  explanation?: string;
+}
+
+interface VisualEditorTextChange {
+  type: string;
+  line?: number;
+  startLine?: number;
+  endLine?: number;
+  codeChange?: string;
+  old_text?: string;
+  new_text?: string;
+  encoded_location?: string;
+  style_changes?: unknown[];
+}
+
+interface VisualEditorChange {
+  encoded_location: string;
+  old_html?: string;
+  new_html?: string;
+  old_text?: string;
+  new_text?: string;
+  text_changes?: VisualEditorTextChange[];
+  pattern_changes?: PatternChangeOperation[];
+  use_pattern_changes?: boolean;
+  style_changes?: unknown[];
+  move_changes?: unknown[];
+  browser_width?: number;
+  browser_height?: number;
+  image_data?: string;
+  filename?: string;
+  ai_instruction?: string;
+  aiInstruction?: string;
+  [key: string]: unknown;
+}
+
+interface BackendFileChange {
+  encoded_location: string;
+  file_content: string;
+  style_changes?: unknown[];
+  text_changes?: VisualEditorTextChange[];
+  pattern_changes?: PatternChangeOperation[];
+  changes?: Array<{
+    style_changes?: unknown[];
+    text_changes?: VisualEditorTextChange[];
+    move_changes?: unknown[];
+  }>;
+  browser_width?: number;
+  browser_height?: number;
+}
+
+interface StreamingEvent {
+  type: string;
+  file_path?: string;
+  content?: string;
+  message?: string;
+  success?: boolean;
+  ephemeral?: boolean;
+  filename?: string;
+  result?: {
+    updated_files?: Record<string, string>;
+    [key: string]: unknown;
+  };
+  [key: string]: unknown;
+}
+
+interface StartServerOptions {
+  port?: number;
+}
+
+type FullFileReplacement = string | { type: "binary"; base64: string };
+
+interface ValidationResult {
+  isValid: boolean;
+  error?: string;
+  errorData?: Record<string, unknown>;
+}
+
+interface StreamingAgentRequestArgs {
+  reply: FastifyReply;
+  data: VisualEditorChange;
+  authHeader?: string;
+  fileContent: string;
+}
+
+interface VisualEditorApiBody {
+  changes: VisualEditorChange[];
+  github_repo_name?: string;
+}
+
+interface VisualEditorAgentBody extends VisualEditorChange {
+  github_repo_name?: string;
+}
+
+interface WriteFilesBody {
+  updated_files?: Record<string, string>;
+}
 
 /**
  * Normalizes a possibly-relative or malformed absolute path into an absolute path.
@@ -14,8 +124,8 @@ const { decode } = require("./index");
  * @param {string} inputPath
  * @returns {string}
  */
-function toAbsolutePath(inputPath) {
-  if (!inputPath) return inputPath;
+function toAbsolutePath(inputPath: string | null | undefined): string {
+  if (!inputPath) return process.cwd();
   const trimmedPath = String(inputPath).trim();
 
   // Fix macOS-like absolute paths missing the leading slash, e.g. "Users/..."
@@ -37,7 +147,7 @@ function toAbsolutePath(inputPath) {
  * Gets the port to use for the server
  * @returns {number} The configured port
  */
-function getServerPort() {
+function getServerPort(): number {
   // Use environment variable or default to 4321
   return parseInt(process.env.CODEPRESS_DEV_PORT || "4321", 10);
 }
@@ -46,7 +156,7 @@ function getServerPort() {
  * Create a lock file to ensure only one instance runs
  * @returns {boolean} True if lock was acquired, false otherwise
  */
-function acquireLock() {
+function acquireLock(): boolean {
   try {
     const lockPath = path.join(os.tmpdir(), "codepress-dev-server.lock");
 
@@ -85,7 +195,7 @@ function acquireLock() {
 }
 
 // Track server instance (singleton pattern)
-let serverInstance = null;
+let serverInstance: FastifyInstance | null = null;
 
 /**
  * Apply text-based changes to the file content directly based on the new format.
@@ -97,14 +207,17 @@ let serverInstance = null;
  *        - { type: "replace", startLine: number, endLine: number, codeChange: string }
  * @returns {string} The modified file content
  */
-function applyTextChanges(fileContent, changes) {
+function applyTextChanges(
+  fileContent: string,
+  changes: TextChangeOperation[]
+): string {
   const lines = fileContent.split("\n");
 
   // Sort changes by the highest line number involved (endLine or line) in reverse order
   // to avoid index shifts during modification.
   const sortedChanges = [...changes].sort((a, b) => {
-    const lineA = a.type === "insert" ? a.line : a.endLine;
-    const lineB = b.type === "insert" ? b.line : b.endLine;
+    const lineA = a.type === "insert" ? a.line ?? 0 : a.endLine ?? 0;
+    const lineB = b.type === "insert" ? b.line ?? 0 : b.endLine ?? 0;
     return lineB - lineA;
   });
 
@@ -171,7 +284,10 @@ function applyTextChanges(fileContent, changes) {
  *        - { type: "delete", find: string, explanation: string }
  * @returns {string} The modified file content
  */
-function applyPatternChanges(fileContent, changes) {
+function applyPatternChanges(
+  fileContent: string,
+  changes: PatternChangeOperation[]
+): string {
   let modifiedContent = fileContent;
 
   // Detect potential conflicts by checking for duplicate find patterns
@@ -313,12 +429,12 @@ function applyPatternChanges(fileContent, changes) {
  * @returns {Promise<Object>} Final API response
  */
 async function callBackendApiStreaming(
-  method,
-  endpoint,
-  data,
-  incomingAuthHeader,
-  onStreamEvent,
-) {
+  method: string,
+  endpoint: string,
+  data: unknown,
+  incomingAuthHeader: string | undefined,
+  onStreamEvent?: (event: StreamingEvent) => void
+): Promise<any> {
   // Backend API settings
   const apiHost = process.env.CODEPRESS_BACKEND_HOST || "localhost";
   const apiPort = parseInt(process.env.CODEPRESS_BACKEND_PORT || "8007", 10);
@@ -329,11 +445,15 @@ async function callBackendApiStreaming(
     apiHost === "localhost" || apiHost === "127.0.0.1" ? "http" : "https";
   const url = `${protocol}://${apiHost}:${apiPort}/${apiPath}`;
 
-  const requestOptions = {
+  const requestOptions: {
+    method: string;
+    headers: Record<string, string>;
+    body?: string;
+  } = {
     method,
     headers: {
       "Content-Type": "application/json",
-      Accept: "text/event-stream", // Request streaming
+      Accept: "text/event-stream",
     },
   };
 
@@ -361,9 +481,14 @@ async function callBackendApiStreaming(
       response.headers.get("content-type")?.includes("text/event-stream") &&
       onStreamEvent
     ) {
-      const reader = response.body.getReader();
+      const body = response.body;
+      if (!body) {
+        throw new Error("Backend streaming response has no body");
+      }
+
+      const reader = body.getReader();
       const decoder = new TextDecoder();
-      let finalResult = null;
+      let finalResult: unknown = null;
 
       try {
         while (true) {
@@ -418,7 +543,12 @@ async function callBackendApiStreaming(
   }
 }
 
-async function callBackendApi(method, endpoint, data, incomingAuthHeader) {
+async function callBackendApi(
+  method: string,
+  endpoint: string,
+  data: unknown,
+  incomingAuthHeader: string | undefined
+): Promise<any> {
   // Backend API settings
   const apiHost = process.env.CODEPRESS_BACKEND_HOST || "localhost";
   const apiPort = parseInt(process.env.CODEPRESS_BACKEND_PORT || "8007", 10);
@@ -456,7 +586,7 @@ async function callBackendApi(method, endpoint, data, incomingAuthHeader) {
     }
 
     // Prepare headers with authentication if token exists
-    const headers = {
+    const headers: Record<string, string> = {
       "Content-Type": "application/json",
     };
 
@@ -520,7 +650,10 @@ async function callBackendApi(method, endpoint, data, incomingAuthHeader) {
  * @param {boolean} isAiMode Whether this is AI mode
  * @returns {Object} Validation result with error or success
  */
-function validateRequestData(data, isAiMode) {
+function validateRequestData(
+  data: VisualEditorChange,
+  isAiMode: boolean
+): ValidationResult {
   const {
     encoded_location,
     old_html,
@@ -572,7 +705,13 @@ function validateRequestData(data, isAiMode) {
  * @param {string} params.filename - Optional filename
  * @returns {Promise<string|null>} The saved image path or null if failed
  */
-async function saveImageData({ imageData, filename }) {
+async function saveImageData({
+  imageData,
+  filename,
+}: {
+  imageData?: string;
+  filename?: string;
+}): Promise<string | null> {
   if (!imageData) return null;
 
   try {
@@ -582,8 +721,8 @@ async function saveImageData({ imageData, filename }) {
       console.log(`\x1b[36mℹ Created directory: ${imageDir}\x1b[0m`);
     }
 
-    let imagePath;
-    let base64Data;
+    let imagePath: string;
+    let base64Data: string;
 
     if (filename) {
       imagePath = path.join(imageDir, filename);
@@ -633,7 +772,9 @@ async function saveImageData({ imageData, filename }) {
  * @param {string} encodedLocation The encoded file location
  * @returns {Object} File data with path and content
  */
-function readFileFromEncodedLocation(encodedLocation) {
+function readFileFromEncodedLocation(
+  encodedLocation: string
+): { filePath: string; targetFile: string; fileContent: string } {
   const encodedFilePath = encodedLocation.split(":")[0];
   const filePath = decode(encodedFilePath);
   console.log(`\x1b[36mℹ Decoded file path: ${filePath}\x1b[0m`);
@@ -658,22 +799,22 @@ function readFileFromEncodedLocation(encodedLocation) {
  * @returns {Promise<string>} Formatted code
  */
 async function applyChangesAndFormat(
-  fileContent,
-  changes,
-  targetFile,
+  fileContent: string,
+  changes: Array<PatternChangeOperation | TextChangeOperation>,
+  targetFile: string,
   usePatternChanges = true,
-) {
+): Promise<string> {
   console.log(
     `\x1b[36mℹ Received ${changes.length} changes from backend\x1b[0m`,
   );
 
   // Apply the changes using the appropriate function based on the flag
   const modifiedContent = usePatternChanges
-    ? applyPatternChanges(fileContent, changes)
-    : applyTextChanges(fileContent, changes);
+    ? applyPatternChanges(fileContent, changes as PatternChangeOperation[])
+    : applyTextChanges(fileContent, changes as TextChangeOperation[]);
 
   // Format with Prettier
-  let formattedCode;
+  let formattedCode: string;
   try {
     formattedCode = await prettier.format(modifiedContent, {
       parser: pickPrettierParser(targetFile),
@@ -712,7 +853,15 @@ async function applyChangesAndFormat(
  * @param {string} [params.authHeader] The authorization header for backend API authentication (Bearer token)
  * @returns {Promise<Object>} Backend response containing the processed changes, typically with an 'updated_files' property mapping file paths to their new content
  */
-async function getChanges({ githubRepoName, fileChanges, authHeader }) {
+async function getChanges({
+  githubRepoName,
+  fileChanges,
+  authHeader,
+}: {
+  githubRepoName?: string;
+  fileChanges: BackendFileChange[];
+  authHeader?: string;
+}): Promise<any> {
   console.log(
     `\x1b[36mℹ Getting changes from backend for ${fileChanges.length} files\x1b[0m`,
   );
@@ -734,25 +883,31 @@ async function getChanges({ githubRepoName, fileChanges, authHeader }) {
  * @param {string} targetFile Target file path
  * @returns {Promise<string>} Formatted code
  */
-function pickPrettierParser(filePath) {
+function pickPrettierParser(filePath: string): prettier.BuiltInParserName {
   const lower = (filePath || "").toLowerCase();
   if (lower.endsWith(".ts") || lower.endsWith(".tsx")) return "typescript";
   return "babel"; // default for .js/.jsx and others
 }
 
-function tryFormatWithPrettierOrNull(code, filePath) {
+async function tryFormatWithPrettierOrNull(
+  code: string,
+  filePath: string
+): Promise<string | null> {
   try {
-    return prettier.format(code, {
-      parser: pickPrettierParser(filePath),
-      semi: true,
-      singleQuote: false,
-    });
+    const result = await Promise.resolve(
+      prettier.format(code, {
+        parser: pickPrettierParser(filePath),
+        semi: true,
+        singleQuote: false,
+      })
+    );
+    return result;
   } catch (e) {
     return null;
   }
 }
 
-function closeUnclosedJsxTags(code) {
+function closeUnclosedJsxTags(code: string): string {
   try {
     const tagRegex = /<\/?([A-Za-z][A-Za-z0-9]*)\b[^>]*?\/?>(?!\s*<\!)/g;
     const selfClosingRegex = /<([A-Za-z][A-Za-z0-9]*)\b[^>]*?\/>/;
@@ -787,7 +942,10 @@ function closeUnclosedJsxTags(code) {
   }
 }
 
-async function applyFullFileReplacement(modifiedContent, targetFile) {
+async function applyFullFileReplacement(
+  modifiedContent: FullFileReplacement,
+  targetFile: string
+): Promise<string> {
   console.log(`\x1b[36mℹ Applying full file replacement\x1b[0m`);
 
   // Ensure folder
@@ -803,7 +961,7 @@ async function applyFullFileReplacement(modifiedContent, targetFile) {
     );
   }
 
-  let formattedCode;
+  let formattedCode = "";
   if (typeof modifiedContent === "string") {
     // Format with Prettier
     try {
@@ -824,6 +982,7 @@ async function applyFullFileReplacement(modifiedContent, targetFile) {
     fs.writeFileSync(targetFile, buffer);
   } else {
     console.warn(`Unknown file type for ${targetFile}, skipping`);
+    formattedCode = "";
   }
 
   console.log(
@@ -847,7 +1006,7 @@ async function handleStreamingAgentRequest({
   data,
   authHeader,
   fileContent,
-}) {
+}: StreamingAgentRequestArgs): Promise<void> {
   const { encoded_location, github_repo_name, user_instruction, branch_name } =
     data;
 
@@ -861,7 +1020,9 @@ async function handleStreamingAgentRequest({
   });
 
   // Apply incremental updates to disk for hot reload
-  async function writeIncrementalUpdate(eventData) {
+  async function writeIncrementalUpdate(
+    eventData: StreamingEvent
+  ): Promise<void> {
     try {
       if (
         eventData &&
@@ -877,10 +1038,16 @@ async function handleStreamingAgentRequest({
         }
         const targetFilePath = toAbsolutePath(normalizedPath);
         let candidate = eventData.content;
-        let formatted = tryFormatWithPrettierOrNull(candidate, targetFilePath);
+        let formatted = await tryFormatWithPrettierOrNull(
+          candidate,
+          targetFilePath
+        );
         if (!formatted) {
           const closed = closeUnclosedJsxTags(candidate);
-          formatted = tryFormatWithPrettierOrNull(closed, targetFilePath);
+          formatted = await tryFormatWithPrettierOrNull(
+            closed,
+            targetFilePath
+          );
         }
         if (formatted) {
           await applyFullFileReplacement(formatted, targetFilePath);
@@ -891,30 +1058,34 @@ async function handleStreamingAgentRequest({
           );
         }
       }
-      if (
-        eventData &&
-        eventData.type === "final_result" &&
-        eventData.result &&
-        eventData.result.updated_files
-      ) {
-        for (const [filePath, newContent] of Object.entries(
-          eventData.result.updated_files,
-        )) {
+     if (
+       eventData &&
+       eventData.type === "final_result" &&
+       eventData.result &&
+       eventData.result.updated_files
+     ) {
+        const updatedEntries = Object.entries(
+          eventData.result.updated_files as Record<string, string>
+        );
+        for (const [filePath, newContent] of updatedEntries) {
           let p = filePath;
           if (p.includes(".tmp.")) {
             p = p.slice(0, p.indexOf(".tmp."));
           }
           const targetFilePath = toAbsolutePath(p);
-          let formatted = tryFormatWithPrettierOrNull(
+          let formatted = await tryFormatWithPrettierOrNull(
             newContent,
             targetFilePath,
           );
           if (!formatted) {
             const closed = closeUnclosedJsxTags(newContent);
-            formatted = tryFormatWithPrettierOrNull(closed, targetFilePath);
+            formatted = await tryFormatWithPrettierOrNull(
+              closed,
+              targetFilePath,
+            );
           }
           await applyFullFileReplacement(
-            formatted || newContent,
+            formatted ?? newContent,
             targetFilePath,
           );
         }
@@ -925,7 +1096,7 @@ async function handleStreamingAgentRequest({
   }
 
   // Function to send SSE data
-  function sendEvent(eventData) {
+  function sendEvent(eventData: StreamingEvent): void {
     const data = JSON.stringify(eventData);
     reply.raw.write(`data: ${data}\n\n`);
   }
@@ -956,10 +1127,11 @@ async function handleStreamingAgentRequest({
 
     // Handle the response and apply changes
     if (backendResponse && backendResponse.updated_files) {
-      const updatedFilePaths = [];
-      for (const [filePath, newContent] of Object.entries(
-        backendResponse.updated_files,
-      )) {
+      const updatedFilePaths: string[] = [];
+      const updatedEntries = Object.entries(
+        backendResponse.updated_files as Record<string, string>
+      );
+      for (const [filePath, newContent] of updatedEntries) {
         const targetFilePath = toAbsolutePath(filePath);
         await applyFullFileReplacement(newContent, targetFilePath);
         updatedFilePaths.push(filePath);
@@ -1001,13 +1173,13 @@ async function handleStreamingAgentRequest({
  * Create and configure the Fastify app
  * @returns {Object} The configured Fastify instance
  */
-function createApp() {
+function createApp(): FastifyInstance {
   const app = fastify({
     logger: false, // Disable built-in logging since we have custom logging
   });
 
   // Register CORS plugin
-  app.register(require("@fastify/cors"), {
+  app.register(cors, {
     origin: "*",
     methods: ["GET", "POST", "OPTIONS", "PUT", "PATCH", "DELETE"],
     allowedHeaders: [
@@ -1021,12 +1193,12 @@ function createApp() {
   });
 
   // Ping route
-  app.get("/ping", async (request, reply) => {
+  app.get("/ping", async (_request: FastifyRequest, reply: FastifyReply) => {
     return reply.code(200).type("text/plain").send("pong");
   });
 
   // Meta route
-  app.get("/meta", async (request, reply) => {
+  app.get("/meta", async (_request: FastifyRequest, reply: FastifyReply) => {
     // Try to get package version but don't fail if not available
     let version = "0.0.0";
     try {
@@ -1045,235 +1217,240 @@ function createApp() {
   });
 
   // Project structure route
-  app.get("/project-structure", async (request, reply) => {
-    try {
-      const structure = getProjectStructure();
-      return reply.code(200).send({
-        success: true,
-        structure: structure,
-      });
-    } catch (error) {
-      console.error("Error getting project structure:", error);
-      return reply.code(500).send({
-        success: false,
-        error: "Failed to get project structure",
-        message: error.message,
-      });
+  app.get(
+    "/project-structure",
+    async (_request: FastifyRequest, reply: FastifyReply) => {
+      try {
+        const structure = getProjectStructure();
+        return reply.code(200).send({
+          success: true,
+          structure: structure,
+        });
+      } catch (error) {
+        console.error("Error getting project structure:", error);
+        return reply.code(500).send({
+          success: false,
+          error: "Failed to get project structure",
+          message: error.message,
+        });
+      }
     }
-  });
+  );
 
   // Visual editor API route for regular agent changes
-  app.post("/visual-editor-api", async (request, reply) => {
-    try {
-      const { changes, github_repo_name } = request.body;
-      const authHeader =
-        request.headers.authorization || request.headers["authorization"];
+  app.post(
+    "/visual-editor-api",
+    async (
+      request: FastifyRequest<{ Body: VisualEditorApiBody }>,
+      reply: FastifyReply
+    ) => {
+      try {
+        const { changes, github_repo_name } = request.body;
+        const authHeader =
+          request.headers.authorization || request.headers["authorization"];
 
-      // Debug: Log auth header info
-      console.log(
-        `\x1b[36mℹ Auth header received: ${authHeader ? "[PRESENT]" : "[MISSING]"}\x1b[0m`,
-      );
-
-      if (!Array.isArray(changes)) {
-        return reply.code(400).send({
-          error: "Invalid request format: 'changes' must be an array.",
-        });
-      }
-
-      console.log(
-        `\x1b[36mℹ Visual Editor API Request: Received ${changes.length} changes for repo ${github_repo_name}\x1b[0m`,
-      );
-
-      // Debug: Check if browser dimensions are provided
-      const changesWithDimensions = changes.filter(
-        (change) => change.browser_width && change.browser_height,
-      );
-      if (changesWithDimensions.length > 0) {
-        const sampleChange = changesWithDimensions[0];
         console.log(
-          `\x1b[36mℹ Browser dimensions detected: ${sampleChange.browser_width}x${sampleChange.browser_height}\x1b[0m`,
+          `\x1b[36mℹ Auth header received: ${authHeader ? "[PRESENT]" : "[MISSING]"}\x1b[0m`,
         );
-      } else {
-        console.log(`\x1b[33m⚠ No browser dimensions found in changes\x1b[0m`);
-      }
 
-      // Optimize file reading by pre-fetching unique file contents
-      const uniqueEncodedLocations = new Set();
-      const validChanges = [];
-
-      // First pass: collect unique encoded locations and validate changes
-      for (const change of changes) {
-        console.log(`\x1b[36mℹ change: ${JSON.stringify(change)}\x1b[0m`);
-
-        try {
-          if (!change.encoded_location) {
-            console.warn(
-              `\x1b[33m⚠ Skipping change with missing encoded_location.\x1b[0m`,
-            );
-            continue;
-          }
-
-          const encodedFilePath = change.encoded_location.split(":")[0];
-          const targetFile = decode(encodedFilePath);
-          if (!targetFile) {
-            console.warn(
-              `\x1b[33m⚠ Skipping change with undecodable file from encoded_location: ${change.encoded_location}.\x1b[0m`,
-            );
-            continue;
-          }
-
-          // Check if this change has actual content
-          const hasStyleChanges =
-            change.style_changes && change.style_changes.length > 0;
-          const hasTextChanges =
-            change.text_changes && change.text_changes.length > 0;
-          const hasMoveChanges =
-            change.move_changes && change.move_changes.length > 0;
-
-          if (!hasStyleChanges && !hasTextChanges && !hasMoveChanges) {
-            console.warn(
-              `\x1b[33m⚠ Skipping change with no style, text, or move changes.\x1b[0m`,
-            );
-            continue;
-          }
-
-          // Collect unique encoded locations for batch reading
-          uniqueEncodedLocations.add(change.encoded_location);
-          validChanges.push(change);
-        } catch (e) {
-          console.error(
-            `\x1b[31m✖ Error processing change for location: ${change.encoded_location}\x1b[0m`,
-          );
-        }
-      }
-
-      // Pre-fetch all unique file contents once
-      const fileContentMap = new Map();
-      for (const encodedLocation of uniqueEncodedLocations) {
-        try {
-          const { fileContent } = readFileFromEncodedLocation(encodedLocation);
-          fileContentMap.set(encodedLocation, fileContent);
-        } catch (e) {
-          console.error(
-            `\x1b[31m✖ Error reading file for location: ${encodedLocation}\x1b[0m`,
-          );
-        }
-      }
-
-      console.log(
-        `\x1b[36mℹ Pre-fetched ${fileContentMap.size} unique files for ${validChanges.length} changes\x1b[0m`,
-      );
-
-      // Second pass: process each change with pre-fetched content
-      const fileChangesForBackend = [];
-      for (const change of validChanges) {
-        try {
-          // Get pre-fetched file content from map
-          const fileContent = fileContentMap.get(change.encoded_location);
-          if (!fileContent) {
-            console.warn(
-              `\x1b[33m⚠ Skipping change with missing file content for: ${change.encoded_location}\x1b[0m`,
-            );
-            continue;
-          }
-
-          // Create individual change entry with its specific encoded_location
-          fileChangesForBackend.push({
-            encoded_location: change.encoded_location, // Preserve individual encoded_location
-            file_content: fileContent,
-            changes: [
-              {
-                style_changes: change.style_changes || [],
-                text_changes: change.text_changes || [],
-                move_changes: change.move_changes || [],
-              },
-            ],
-            browser_width: change.browser_width,
-            browser_height: change.browser_height,
-          });
-        } catch (e) {
-          console.error(
-            `\x1b[31m✖ Error processing change for location: ${change.encoded_location}\x1b[0m`,
-          );
-        }
-      }
-
-      // Process image uploads first across all files
-      for (const change of changes) {
-        if (change.image_data && change.filename) {
-          await saveImageData({
-            imageData: change.image_data,
-            filename: change.filename,
+        if (!Array.isArray(changes)) {
+          return reply.code(400).send({
+            error: "Invalid request format: 'changes' must be an array.",
           });
         }
-      }
 
-      if (fileChangesForBackend.length === 0) {
-        return reply.code(200).send({
-          message: "No changes to apply.",
-          updatedFiles: [],
-        });
-      }
-
-      console.log(
-        `\x1b[36mℹ Sending request for ${fileChangesForBackend.length} individual changes (${changes.length} total original changes)\x1b[0m`,
-      );
-
-      // Debug: Log browser dimensions being sent to backend
-      const backendChangesWithDimensions = fileChangesForBackend.filter(
-        (change) => change.browser_width && change.browser_height,
-      );
-      if (backendChangesWithDimensions.length > 0) {
         console.log(
-          `\x1b[36mℹ Sending browser dimensions to backend for ${backendChangesWithDimensions.length} changes\x1b[0m`,
+          `\x1b[36mℹ Visual Editor API Request: Received ${changes.length} changes for repo ${github_repo_name}\x1b[0m`,
         );
-      }
 
-      const backendResponse = await getChanges({
-        githubRepoName: github_repo_name,
-        fileChanges: fileChangesForBackend,
-        authHeader,
-      });
+        const changesWithDimensions = changes.filter(
+          (change) => change.browser_width && change.browser_height,
+        );
+        if (changesWithDimensions.length > 0) {
+          const sampleChange = changesWithDimensions[0];
+          console.log(
+            `\x1b[36mℹ Browser dimensions detected: ${sampleChange.browser_width}x${sampleChange.browser_height}\x1b[0m`,
+          );
+        } else {
+          console.log(
+            `\x1b[33m⚠ No browser dimensions found in changes\x1b[0m`,
+          );
+        }
 
-      const updatedFiles = new Set();
+        const uniqueEncodedLocations = new Set<string>();
+        const validChanges: VisualEditorChange[] = [];
+
+        for (const change of changes) {
+          console.log(`\x1b[36mℹ change: ${JSON.stringify(change)}\x1b[0m`);
+
+          try {
+            if (!change.encoded_location) {
+              console.warn(
+                `\x1b[33m⚠ Skipping change with missing encoded_location.\x1b[0m`,
+              );
+              continue;
+            }
+
+            const encodedFilePath = change.encoded_location.split(":")[0];
+            const targetFile = decode(encodedFilePath);
+            if (!targetFile) {
+              console.warn(
+                `\x1b[33m⚠ Skipping change with undecodable file from encoded_location: ${change.encoded_location}.\x1b[0m`,
+              );
+              continue;
+            }
+
+            const hasStyleChanges =
+              change.style_changes && change.style_changes.length > 0;
+            const hasTextChanges =
+              change.text_changes && change.text_changes.length > 0;
+            const hasMoveChanges =
+              change.move_changes && change.move_changes.length > 0;
+
+            if (!hasStyleChanges && !hasTextChanges && !hasMoveChanges) {
+              console.warn(
+                `\x1b[33m⚠ Skipping change with no style, text, or move changes.\x1b[0m`,
+              );
+              continue;
+            }
+
+            uniqueEncodedLocations.add(change.encoded_location);
+            validChanges.push(change);
+          } catch (e) {
+            console.error(
+              `\x1b[31m✖ Error processing change for location: ${change.encoded_location}\x1b[0m`,
+            );
+          }
+        }
+
+        const fileContentMap = new Map<string, string>();
+        for (const encodedLocation of uniqueEncodedLocations) {
+          try {
+            const { fileContent } = readFileFromEncodedLocation(encodedLocation);
+            fileContentMap.set(encodedLocation, fileContent);
+          } catch (e) {
+            console.error(
+              `\x1b[31m✖ Error reading file for location: ${encodedLocation}\x1b[0m`,
+            );
+          }
+        }
+
+        console.log(
+          `\x1b[36mℹ Pre-fetched ${fileContentMap.size} unique files for ${validChanges.length} changes\x1b[0m`,
+        );
+
+        const fileChangesForBackend: BackendFileChange[] = [];
+        for (const change of validChanges) {
+          try {
+            const fileContent = fileContentMap.get(change.encoded_location);
+            if (!fileContent) {
+              console.warn(
+                `\x1b[33m⚠ Skipping change with missing file content for: ${change.encoded_location}\x1b[0m`,
+              );
+              continue;
+            }
+
+            fileChangesForBackend.push({
+              encoded_location: change.encoded_location,
+              file_content: fileContent,
+              changes: [
+                {
+                  style_changes: change.style_changes || [],
+                  text_changes: change.text_changes || [],
+                  move_changes: change.move_changes || [],
+                },
+              ],
+              browser_width: change.browser_width,
+              browser_height: change.browser_height,
+            });
+          } catch (e) {
+            console.error(
+              `\x1b[31m✖ Error processing change for location: ${change.encoded_location}\x1b[0m`,
+            );
+          }
+        }
+
+        for (const change of changes) {
+          if (change.image_data && change.filename) {
+            await saveImageData({
+              imageData: change.image_data,
+              filename: change.filename,
+            });
+          }
+        }
+
+        if (fileChangesForBackend.length === 0) {
+          return reply.code(200).send({
+            message: "No changes to apply.",
+            updatedFiles: [],
+          });
+        }
+
+        console.log(
+          `\x1b[36mℹ Sending request for ${fileChangesForBackend.length} individual changes (${changes.length} total original changes)\x1b[0m`,
+        );
+
+        const backendChangesWithDimensions = fileChangesForBackend.filter(
+          (change) => change.browser_width && change.browser_height,
+        );
+        if (backendChangesWithDimensions.length > 0) {
+          console.log(
+            `\x1b[36mℹ Sending browser dimensions to backend for ${backendChangesWithDimensions.length} changes\x1b[0m`,
+          );
+        }
+
+        const backendResponse = await getChanges({
+          githubRepoName: github_repo_name,
+          fileChanges: fileChangesForBackend,
+          authHeader,
+        });
+
+      const updatedFiles = new Set<string>();
       if (backendResponse && backendResponse.updated_files) {
         console.log(`\x1b[36mℹ Processing updated_files format\x1b[0m`);
-        for (const [filePath, newContent] of Object.entries(
-          backendResponse.updated_files,
-        )) {
+        const updatedEntries = Object.entries(
+          backendResponse.updated_files as Record<string, string>
+        );
+        for (const [filePath, newContent] of updatedEntries) {
           const targetFile = toAbsolutePath(filePath);
 
           await applyFullFileReplacement(newContent, targetFile);
           updatedFiles.add(targetFile);
         }
-      }
+        }
 
-      if (updatedFiles.size === 0) {
+        if (updatedFiles.size === 0) {
+          return reply.code(200).send({
+            message: "No changes were applied.",
+            updatedFiles: [],
+          });
+        }
+
         return reply.code(200).send({
-          message: "No changes were applied.",
-          updatedFiles: [],
+          message: `Changes applied successfully to ${
+            updatedFiles.size
+          } file(s). Processed ${changes.length} individual changes with preserved line number information.`,
+          updatedFiles: Array.from(updatedFiles),
+        });
+      } catch (err) {
+        console.error(
+          `\x1b[31m✖ Fatal error in /visual-editor-api: ${err.message}\x1b[0m`,
+        );
+        return reply.code(500).send({
+          error: "An internal server error occurred",
+          details: err.message,
         });
       }
-
-      return reply.code(200).send({
-        message: `Changes applied successfully to ${
-          updatedFiles.size
-        } file(s). Processed ${changes.length} individual changes with preserved line number information.`,
-        updatedFiles: Array.from(updatedFiles),
-      });
-    } catch (err) {
-      console.error(
-        `\x1b[31m✖ Fatal error in /visual-editor-api: ${err.message}\x1b[0m`,
-      );
-      return reply.code(500).send({
-        error: "An internal server error occurred",
-        details: err.message,
-      });
     }
-  });
+  );
 
   // Visual editor API route for agent changes
-  app.post("/visual-editor-api-agent", async (request, reply) => {
+  app.post(
+    "/visual-editor-api-agent",
+    async (
+      request: FastifyRequest<{ Body: VisualEditorAgentBody }>,
+      reply: FastifyReply
+    ) => {
     try {
       const data = request.body;
       const { encoded_location, image_data, filename } = data;
@@ -1283,6 +1460,10 @@ function createApp() {
       console.log(
         `\x1b[36mℹ [visual-editor-api-agent] Auth header received: ${authHeader ? "[PRESENT]" : "[MISSING]"}, Always streaming\x1b[0m`,
       );
+
+      if (!encoded_location) {
+        return reply.code(400).send({ error: "Missing encoded_location" });
+      }
 
       const { targetFile, fileContent } =
         readFileFromEncodedLocation(encoded_location);
@@ -1301,10 +1482,16 @@ function createApp() {
       console.error(`Error in /visual-editor-api-agent: ${err.message}`);
       return reply.code(500).send({ error: err.message });
     }
-  });
+  }
+  );
 
   // Endpoint to write files to local filesystem (for local mode)
-  app.post("/write-files", async (request, reply) => {
+  app.post(
+    "/write-files",
+    async (
+      request: FastifyRequest<{ Body: WriteFilesBody }>,
+      reply: FastifyReply
+    ) => {
     try {
       const { updated_files } = request.body;
 
@@ -1314,8 +1501,11 @@ function createApp() {
         });
       }
 
-      const writtenFiles = [];
-      for (const [rawPath, newContent] of Object.entries(updated_files)) {
+      const writtenFiles: string[] = [];
+      const updatedEntries = Object.entries(
+        updated_files as Record<string, string>
+      );
+      for (const [rawPath, newContent] of updatedEntries) {
         try {
           let filePath = rawPath;
           if (filePath.includes(".tmp.")) {
@@ -1340,7 +1530,8 @@ function createApp() {
       console.error(`\x1b[31m✗ Error in /write-files: ${err.message}\x1b[0m`);
       return reply.code(500).send({ error: err.message });
     }
-  });
+  }
+  );
 
   return app;
 }
@@ -1351,7 +1542,9 @@ function createApp() {
  * @param {number} [options.port=4321] Port to run the server on
  * @returns {Object|null} The Fastify instance or null if already running
  */
-async function startServer(options = {}) {
+async function startServer(
+  options: StartServerOptions = {}
+): Promise<FastifyInstance | null> {
   // Only run in development environment
   if (process.env.NODE_ENV === "production") {
     return null;
@@ -1368,7 +1561,7 @@ async function startServer(options = {}) {
   }
 
   // Get the fixed port
-  const port = options.port || getServerPort();
+  const port = options.port ?? getServerPort();
 
   try {
     // Create the Fastify app
@@ -1401,7 +1594,7 @@ async function startServer(options = {}) {
  * Get a list of files in the current project, respecting gitignore patterns
  * @returns {string} List of file paths, one per line
  */
-function getProjectStructure() {
+function getProjectStructure(): string {
   try {
     // Read .gitignore patterns
     const gitignorePath = path.join(process.cwd(), ".gitignore");
@@ -1488,13 +1681,16 @@ function getProjectStructure() {
     }
 
     // Function to check if a path should be excluded
-    function shouldExclude(relativePath) {
+    function shouldExclude(relativePath: string): boolean {
       return excludePatterns.some((pattern) => pattern.test(relativePath));
     }
 
     // Function to recursively get all files
-    function getFilesRecursively(dir, baseDir = dir) {
-      const files = [];
+    function getFilesRecursively(
+      dir: string,
+      baseDir: string = dir
+    ): string[] {
+      const files: string[] = [];
 
       try {
         const entries = fs.readdirSync(dir, { withFileTypes: true });
@@ -1538,14 +1734,20 @@ function getProjectStructure() {
   }
 }
 
-// Create module exports
-const serverModule = {
+interface ServerModule {
+  startServer: typeof startServer;
+  createApp: typeof createApp;
+  getProjectStructure: typeof getProjectStructure;
+  server?: FastifyInstance | null;
+}
+
+const serverModule: ServerModule = {
   startServer,
+  createApp,
+  getProjectStructure,
 };
 
-// Start server automatically if in development mode
 if (process.env.NODE_ENV !== "production") {
-  // Make the auto-start async
   (async () => {
     try {
       serverModule.server = await startServer();
@@ -1555,5 +1757,7 @@ if (process.env.NODE_ENV !== "production") {
   })();
 }
 
-// Export module
+export { startServer, createApp, getProjectStructure };
+export type { ServerModule };
+
 module.exports = serverModule;

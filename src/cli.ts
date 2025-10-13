@@ -1,38 +1,75 @@
 #!/usr/bin/env node
 
-// Codepress CLI
-const { spawn, execSync } = require("child_process");
-const fs = require("fs");
-const path = require("path");
-const { startServer } = require("./server");
+import { execSync, spawn, type ChildProcess } from "child_process";
+import fs from "fs";
+import path from "path";
+import type { FastifyInstance } from "fastify";
+import { startServer } from "./server";
 
-// Get command line arguments
 const args = process.argv.slice(2);
+let activeServer: FastifyInstance | null = null;
+let signalHandlersRegistered = false;
+let currentChildProcess: ChildProcess | undefined;
 
-// Command functions
-function runServer() {
-  const server = startServer();
-  console.log(
-    "\x1b[36mℹ Codepress server running. Press Ctrl+C to stop.\x1b[0m"
-  );
+async function ensureServer(): Promise<FastifyInstance | null> {
+  if (activeServer) {
+    return activeServer;
+  }
 
-  // Handle process signals
-  process.on("SIGINT", () => {
-    console.log("\n\x1b[33mℹ Shutting down Codepress server...\x1b[0m");
-    if (server) {
-      server.close(() => {
-        console.log("\x1b[32m✓ Codepress server stopped\x1b[0m");
-        process.exit(0);
-      });
-    } else {
-      process.exit(0);
-    }
-  });
+  const server = await startServer();
+  activeServer = server ?? null;
 
-  return server;
+  if (activeServer) {
+    console.log(
+      "\x1b[36mℹ Codepress server running. Press Ctrl+C to stop.\x1b[0m"
+    );
+  } else {
+    console.log("\x1b[33mℹ Server already running\x1b[0m");
+  }
+
+  return activeServer;
 }
 
-function setupDependencies() {
+async function shutdown(child?: ChildProcess): Promise<void> {
+  console.log("\n\x1b[33mℹ Shutting down Codepress server...\x1b[0m");
+
+  if (child && !child.killed) {
+    child.kill("SIGINT");
+  }
+
+  if (activeServer) {
+    try {
+      await activeServer.close();
+      console.log("\x1b[32m✓ Codepress server stopped\x1b[0m");
+    } catch (error) {
+      console.error(
+        `\x1b[31m✗ Failed to stop server: ${(error as Error).message}\x1b[0m`
+      );
+    } finally {
+      activeServer = null;
+    }
+  }
+
+  process.exit(0);
+}
+
+function registerSignalHandlers(child?: ChildProcess): void {
+  currentChildProcess = child;
+
+  if (signalHandlersRegistered) {
+    return;
+  }
+
+  const handler = () => {
+    void shutdown(currentChildProcess);
+  };
+
+  process.on("SIGINT", handler);
+  process.on("SIGTERM", handler);
+  signalHandlersRegistered = true;
+}
+
+function setupDependencies(): void {
   console.log(
     "\x1b[36mℹ Setting up dependencies for Codepress visual editor...\x1b[0m"
   );
@@ -51,7 +88,6 @@ function setupDependencies() {
       envContent = fs.readFileSync(envFile, "utf8");
     }
 
-    // Add environment variables if they don't exist
     let envUpdated = false;
 
     if (!envContent.includes("CODEPRESS_BACKEND_HOST")) {
@@ -81,12 +117,12 @@ function setupDependencies() {
       "\x1b[36mℹ You can now start the server with: npx codepress server\x1b[0m"
     );
   } catch (error) {
-    console.error(`\n\x1b[31m✗ Setup failed: ${error.message}\x1b[0m`);
+    console.error(`\n\x1b[31m✗ Setup failed: ${(error as Error).message}\x1b[0m`);
     process.exit(1);
   }
 }
 
-function showHelp() {
+function showHelp(): void {
   console.log(`
 \x1b[1mCodepress CLI\x1b[0m
 
@@ -106,58 +142,54 @@ function showHelp() {
   `);
 }
 
-// Command router
-if (args.length > 0) {
-  const command = args[0];
+async function main(): Promise<void> {
+  if (args.length === 0) {
+    showHelp();
+    return;
+  }
+
+  const [command, ...rest] = args;
 
   switch (command) {
-    case "server":
-      runServer();
+    case "server": {
+      const server = await ensureServer();
+      registerSignalHandlers();
+      if (!server) {
+        console.log("\x1b[33mℹ Server already running in another process\x1b[0m");
+      }
       break;
-
+    }
     case "setup":
       setupDependencies();
       break;
-
     case "help":
       showHelp();
       break;
+    default: {
+      await ensureServer();
 
-    default:
-      // Start server and pass through all arguments to child process
-      const server = startServer();
-
-      const childProcess = spawn(args[0], args.slice(1), {
+      const childProcess = spawn(command, rest, {
         stdio: "inherit",
         shell: true,
       });
 
       childProcess.on("error", (error) => {
         console.error(
-          `\x1b[31m✗ Failed to start process: ${error.message}\x1b[0m`
+          `\x1b[31m✗ Failed to start process: ${(error as Error).message}\x1b[0m`
         );
-        process.exit(1);
+        void shutdown(childProcess);
       });
 
       childProcess.on("close", (code) => {
-        console.log(`\x1b[33mℹ Child process exited with code ${code}\x1b[0m`);
-        // Keep the server running even if the child process exits
+        console.log(
+          `\x1b[33mℹ Child process exited with code ${code}\x1b[0m`
+        );
       });
 
-      // Handle process signals
-      process.on("SIGINT", () => {
-        console.log("\n\x1b[33mℹ Shutting down Codepress server...\x1b[0m");
-        if (server) {
-          server.close(() => {
-            console.log("\x1b[32m✓ Codepress server stopped\x1b[0m");
-            process.exit(0);
-          });
-        } else {
-          process.exit(0);
-        }
-      });
+      registerSignalHandlers(childProcess);
+      break;
+    }
   }
-} else {
-  // No arguments provided, show help
-  showHelp();
 }
+
+void main();
