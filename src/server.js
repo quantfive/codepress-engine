@@ -676,7 +676,7 @@ async function applyChangesAndFormat(
   let formattedCode;
   try {
     formattedCode = await prettier.format(modifiedContent, {
-      parser: "typescript",
+      parser: pickPrettierParser(targetFile),
       semi: true,
       singleQuote: false,
     });
@@ -808,7 +808,7 @@ async function applyFullFileReplacement(modifiedContent, targetFile) {
     // Format with Prettier
     try {
       formattedCode = await prettier.format(modifiedContent, {
-        parser: "typescript",
+        parser: pickPrettierParser(targetFile),
         semi: true,
         singleQuote: false,
       });
