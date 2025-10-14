@@ -15,11 +15,6 @@
       "require": "./dist/index.js",
       "default": "./dist/index.js"
     },
-    "./hash-util": {
-      "types": "./dist/hash-util.d.ts",
-      "require": "./dist/hash-util.js",
-      "default": "./dist/hash-util.js"
-    },
     "./server": {
       "types": "./dist/server.d.ts",
       "require": "./dist/server.js",

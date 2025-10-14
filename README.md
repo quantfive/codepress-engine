@@ -22,13 +22,12 @@ npm install @codepress/codepress-engine
 
 Entry points exposed by the package:
 
-| Export                                  | Description                             |
-| --------------------------------------- | --------------------------------------- |
-| `@codepress/codepress-engine/babel`     | Compiled Babel plugin (CommonJS)        |
-| `@codepress/codepress-engine/swc`       | SWC transform loader & WASM helpers     |
-| `@codepress/codepress-engine/server`    | Fastify development server factory      |
-| `@codepress/codepress-engine/cli`       | CLI used by the `codepress` binary      |
-| `@codepress/codepress-engine/hash-util` | Browser utilities for decoding metadata |
+| Export                               | Description                         |
+| ------------------------------------ | ----------------------------------- |
+| `@codepress/codepress-engine/babel`  | Compiled Babel plugin (CommonJS)    |
+| `@codepress/codepress-engine/swc`    | SWC transform loader & WASM helpers |
+| `@codepress/codepress-engine/server` | Fastify development server factory  |
+| `@codepress/codepress-engine/cli`    | CLI used by the `codepress` binary  |
 
 ---
 

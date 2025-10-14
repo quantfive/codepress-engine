@@ -145,8 +145,8 @@ export default function codePressPlugin(
     branchAttributeName = "codepress-github-branch",
   } = options;
 
-  const repoName = options.repo_name ?? currentRepoName;
-  const branch = options.branch_name ?? currentBranch;
+  const repoName = options.repo_name || currentRepoName;
+  const branch = options.branch_name || currentBranch;
 
   return {
     name: "babel-plugin-codepress-html",

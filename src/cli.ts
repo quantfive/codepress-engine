@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { type ChildProcess, execSync, spawn } from "child_process";
+import { type ChildProcess, execFileSync, spawn } from "child_process";
 import type { FastifyInstance } from "fastify";
 import * as fs from "node:fs";
 import * as os from "node:os";
@@ -97,9 +97,12 @@ function setupDependencies(): void {
 
   try {
     console.log("\x1b[36mℹ Installing dependencies...\x1b[0m");
-    execSync("npm install --save prettier@^3.1.0 node-fetch@^2.6.7", {
-      stdio: "inherit",
-    });
+    const npmCmd = process.platform === "win32" ? "npm.cmd" : "npm";
+    execFileSync(
+      npmCmd,
+      ["install", "--save", "prettier@^3.1.0", "node-fetch@^2.6.7"],
+      { stdio: "inherit" }
+    );
 
     console.log("\n\x1b[36mℹ Setting up environment variables...\x1b[0m");
     const envFile = path.join(process.cwd(), ".env");
