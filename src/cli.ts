@@ -3,6 +3,7 @@
 import { type ChildProcess, execSync, spawn } from "child_process";
 import type { FastifyInstance } from "fastify";
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 
 import { startServer } from "./server";
@@ -49,6 +50,25 @@ async function shutdown(child?: ChildProcess): Promise<void> {
     } finally {
       activeServer = null;
     }
+  }
+
+  // Best-effort: remove lock if owned by this process
+  try {
+    const port = parseInt(process.env.CODEPRESS_DEV_PORT || "4321", 10);
+    const suffix = isFinite(port) ? `-${port}` : "";
+    const lockPath = path.join(
+      os.tmpdir(),
+      `codepress-dev-server${suffix}.lock`
+    );
+    if (fs.existsSync(lockPath)) {
+      const raw = fs.readFileSync(lockPath, "utf8");
+      const data: { pid?: number } = JSON.parse(raw);
+      if (data && data.pid === process.pid) {
+        fs.unlinkSync(lockPath);
+      }
+    }
+  } catch {
+    // ignore
   }
 
   process.exit(0);

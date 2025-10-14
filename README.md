@@ -17,7 +17,7 @@ TypeScript-powered instrumentation for the CodePress visual editor. The package 
 ## Installation
 
 ```bash
-npm install --save-dev @codepress/codepress-engine
+npm install @codepress/codepress-engine
 ```
 
 Entry points exposed by the package:

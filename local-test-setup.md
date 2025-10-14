@@ -102,7 +102,7 @@ You can also test the Babel version in the same project:
 1. **Install as dev dependency:**
 
 ```bash
-npm install --save-dev @codepress/codepress-engine
+npm install @codepress/codepress-engine
 ```
 
 2. **Create a `babel.config.js`:**

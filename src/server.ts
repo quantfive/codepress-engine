@@ -155,47 +155,76 @@ function getServerPort(): number {
   return parseInt(process.env.CODEPRESS_DEV_PORT || "4321", 10);
 }
 
+function getLockPath(port?: number): string {
+  const suffix = port ? `-${port}` : "";
+  return path.join(os.tmpdir(), `codepress-dev-server${suffix}.lock`);
+}
+
+function readLockFile(
+  lockPath: string
+): { pid?: number; timestamp?: number } | null {
+  try {
+    if (!fs.existsSync(lockPath)) return null;
+    const raw = fs.readFileSync(lockPath, "utf8");
+    return JSON.parse(raw) as { pid?: number; timestamp?: number };
+  } catch {
+    return null;
+  }
+}
+
+function isPidAlive(pid: number): boolean {
+  try {
+    // On Unix-like systems, sending signal 0 checks if the process exists
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function writeLockFile(lockPath: string, pid: number): void {
+  fs.writeFileSync(lockPath, JSON.stringify({ pid, timestamp: Date.now() }));
+}
+
+function removeLockFile(lockPath: string): void {
+  try {
+    if (fs.existsSync(lockPath)) {
+      fs.unlinkSync(lockPath);
+    }
+  } catch {
+    // ignore
+  }
+}
+
 /**
- * Create a lock file to ensure only one instance runs
+ * Create a lock file to ensure only one instance runs.
+ * Cleans up stale locks automatically.
  * @returns {boolean} True if lock was acquired, false otherwise
  */
 function acquireLock(): boolean {
+  const lockPath = getLockPath(getServerPort());
+  const existing = readLockFile(lockPath);
+  if (existing?.pid && isPidAlive(existing.pid)) {
+    return false;
+  }
+  removeLockFile(lockPath);
   try {
-    const lockPath = path.join(os.tmpdir(), "codepress-dev-server.lock");
-
-    // Try to read the lock file to check if the server is already running
-    const lockData = fs.existsSync(lockPath)
-      ? JSON.parse(fs.readFileSync(lockPath, "utf8"))
-      : null;
-
-    if (lockData) {
-      // Check if the process in the lock file is still running
-      try {
-        // On Unix-like systems, sending signal 0 checks if process exists
-        process.kill(lockData.pid, 0);
-        // Process exists, lock is valid
-        return false;
-      } catch (err) {
-        console.error("Error checking lock process:", err);
-        // Process doesn't exist, lock is stale
-        // Continue to create a new lock
-      }
-    }
-
-    // Create a new lock file
-    fs.writeFileSync(
-      lockPath,
-      JSON.stringify({
-        pid: process.pid,
-        timestamp: Date.now(),
-      })
-    );
-
+    writeLockFile(lockPath, process.pid);
     return true;
   } catch (err) {
     console.error("Error acquiring lock:", err);
-    // If anything fails, assume we couldn't get the lock
     return false;
+  }
+}
+
+/**
+ * Remove the lock file if this process owns it.
+ */
+function releaseLock(): void {
+  const lockPath = getLockPath(getServerPort());
+  const data = readLockFile(lockPath);
+  if (data?.pid === process.pid) {
+    removeLockFile(lockPath);
   }
 }
 
@@ -1271,6 +1300,11 @@ async function startServer(
     // Save instance
     serverInstance = app;
 
+    // Ensure lock is released when Fastify closes
+    app.addHook("onClose", () => {
+      releaseLock();
+    });
+
     return app;
   } catch (err) {
     if (err.code === "EADDRINUSE") {
@@ -1280,6 +1314,8 @@ async function startServer(
     } else {
       console.error("Codepress Dev Server error:", err);
     }
+    // On startup failure, best-effort release
+    releaseLock();
     return null;
   }
 }
