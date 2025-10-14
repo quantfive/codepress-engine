@@ -1,18 +1,18 @@
-import path from "path";
-import { execSync } from "child_process";
 import type * as Babel from "@babel/core";
+import { execSync } from "child_process";
+import path from "path";
 
 const SECRET = Buffer.from("codepress-file-obfuscation");
 
 const BASE64_URL_SAFE_REPLACEMENTS: Record<string, string> = {
   "+": "-",
   "/": "_",
-  "=": ""
+  "=": "",
 };
 
 const BASE64_URL_SAFE_RESTORE: Record<string, string> = {
   "-": "+",
-  _: "/"
+  _: "/",
 };
 
 export interface CodePressPluginOptions {
@@ -72,13 +72,14 @@ function detectGitBranch(): string {
 
   try {
     const branch = execSync("git rev-parse --abbrev-ref HEAD", {
-      encoding: "utf8"
+      encoding: "utf8",
     }).trim();
 
     return branch || "main";
   } catch (error) {
     console.log(
-      "\x1b[33m⚠ Could not detect git branch, using default: main\x1b[0m"
+      "\x1b[33m⚠ Could not detect git branch, using default: main\x1b[0m",
+      error
     );
     return "main";
   }
@@ -87,7 +88,7 @@ function detectGitBranch(): string {
 function detectGitRepoName(): string | null {
   try {
     const remoteUrl = execSync("git config --get remote.origin.url", {
-      encoding: "utf8"
+      encoding: "utf8",
     }).trim();
 
     if (!remoteUrl) {
@@ -121,7 +122,7 @@ function detectGitRepoName(): string | null {
     );
     return null;
   } catch (error) {
-    console.log("\x1b[33m⚠ Could not detect git repository\x1b[0m");
+    console.log("\x1b[33m⚠ Could not detect git repository\x1b[0m", error);
     return null;
   }
 }
@@ -141,7 +142,7 @@ export default function codePressPlugin(
   const {
     attributeName = "codepress-data-fp",
     repoAttributeName = "codepress-github-repo-name",
-    branchAttributeName = "codepress-github-branch"
+    branchAttributeName = "codepress-github-branch",
   } = options;
 
   const repoName = options.repo_name ?? currentRepoName;
@@ -161,7 +162,7 @@ export default function codePressPlugin(
 
           state.file.encodedPath = encode(relativePath);
           processedFileCount += 1;
-        }
+        },
       },
       JSXOpeningElement(nodePath, state) {
         const encodedPath = state.file.encodedPath;
@@ -252,7 +253,7 @@ export default function codePressPlugin(
         console.log(
           "\x1b[36mℹ Repo/branch attributes added globally. Won't add again.\x1b[0m"
         );
-      }
+      },
     },
     post() {
       if (processedFileCount > 0) {
@@ -262,6 +263,6 @@ export default function codePressPlugin(
       } else {
         console.log("\x1b[33m⚠ No files were processed by CodePress\x1b[0m");
       }
-    }
+    },
   };
 }

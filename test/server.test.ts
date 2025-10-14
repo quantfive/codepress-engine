@@ -1,5 +1,3 @@
-import path from "path";
-
 // Mock dependencies
 jest.mock("node-fetch");
 jest.mock("fs");
@@ -10,7 +8,7 @@ jest.mock("prettier", () => ({
 
 // Mock the decode function from index.js
 jest.mock("../src/index", () => ({
-  decode: jest.fn((encoded) => "src/test-file.js"),
+  decode: jest.fn(() => "src/test-file.js"),
 }));
 
 import type { FastifyInstance } from "fastify";
@@ -25,6 +23,7 @@ let fastifySupported = true;
 try {
   serverModule = require("../src/server");
 } catch (error) {
+  console.error(error);
   fastifySupported = false;
 }
 
@@ -54,7 +53,6 @@ const skipIfNoFastify = () => {
 const describeFastify = fastifySupported ? describe : describe.skip;
 
 describe("Codepress Dev Server", () => {
-
   beforeEach(() => {
     jest.clearAllMocks();
 
@@ -130,7 +128,7 @@ describe("Codepress Dev Server", () => {
       // Test that lock operations work without throwing
       expect(() => {
         // The server will try to create lock files
-        const server = require("../src/server");
+        require("../src/server");
       }).not.toThrow();
     });
   });

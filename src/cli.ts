@@ -1,9 +1,10 @@
 #!/usr/bin/env node
 
-import { execSync, spawn, type ChildProcess } from "child_process";
-import fs from "fs";
-import path from "path";
+import { type ChildProcess, execSync, spawn } from "child_process";
 import type { FastifyInstance } from "fastify";
+import * as fs from "node:fs";
+import * as path from "node:path";
+
 import { startServer } from "./server";
 
 const args = process.argv.slice(2);
@@ -117,7 +118,9 @@ function setupDependencies(): void {
       "\x1b[36mℹ You can now start the server with: npx codepress server\x1b[0m"
     );
   } catch (error) {
-    console.error(`\n\x1b[31m✗ Setup failed: ${(error as Error).message}\x1b[0m`);
+    console.error(
+      `\n\x1b[31m✗ Setup failed: ${(error as Error).message}\x1b[0m`
+    );
     process.exit(1);
   }
 }
@@ -155,7 +158,9 @@ async function main(): Promise<void> {
       const server = await ensureServer();
       registerSignalHandlers();
       if (!server) {
-        console.log("\x1b[33mℹ Server already running in another process\x1b[0m");
+        console.log(
+          "\x1b[33mℹ Server already running in another process\x1b[0m"
+        );
       }
       break;
     }
@@ -181,9 +186,7 @@ async function main(): Promise<void> {
       });
 
       childProcess.on("close", (code) => {
-        console.log(
-          `\x1b[33mℹ Child process exited with code ${code}\x1b[0m`
-        );
+        console.log(`\x1b[33mℹ Child process exited with code ${code}\x1b[0m`);
       });
 
       registerSignalHandlers(childProcess);

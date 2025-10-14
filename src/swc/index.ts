@@ -67,11 +67,8 @@ function detectGitRepoName(): string | null {
   return null;
 }
 
-function readPackageVersion(
-  pkg: string
-): string | null {
+function readPackageVersion(pkg: string): string | null {
   try {
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
     const resolved = require(
       require.resolve(`${pkg}/package.json`, { paths: [process.cwd()] })
     ) as { version?: string };
@@ -164,6 +161,6 @@ const createSWCPlugin = (
   return [wasmSpecifier, config];
 };
 
-export type { SWCConfig };
 export { createSWCPlugin, pickBand, resolveWasmFile };
+export type { SWCConfig };
 export default createSWCPlugin;
