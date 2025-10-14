@@ -24,7 +24,7 @@ npm install @codepress/codepress-engine
 
 ```js
 // next.config.mjs (Next.js 14/15)
-import createSWCPlugin from "@codepress/codepress-engine/swc";
+import { createSWCPlugin } from "@codepress/codepress-engine/swc";
 
 const nextConfig = {
   experimental: {
@@ -36,6 +36,13 @@ const nextConfig = {
 };
 
 export default nextConfig;
+```
+
+Note: When using ESM (`next.config.mjs`), prefer the named import above due to CJS interop. For CommonJS configs you can use:
+
+```js
+// next.config.cjs
+const { createSWCPlugin } = require("@codepress/codepress-engine/swc");
 ```
 
 The SWC plugin auto-detects your repository and branch from `git` and common CI env vars. WASM selection is automatic based on your Next.js / `@swc/core` version; see the WASM exports below for manual overrides.
