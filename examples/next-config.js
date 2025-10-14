@@ -1,5 +1,5 @@
 // next.config.js usage example for Next.js 15 (SWC compiler)
-const createSWCPlugin = require("@quantfive/codepress-engine/swc");
+const createSWCPlugin = require("@codepress/codepress-engine/swc");
 
 module.exports = {
   experimental: {

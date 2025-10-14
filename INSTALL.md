@@ -1,6 +1,6 @@
 # Development & Installation Guide
 
-This document outlines the recommended workflow for working on `@quantfive/codepress-engine`, linking it locally, and preparing releases.
+This document outlines the recommended workflow for working on `@codepress/codepress-engine`, linking it locally, and preparing releases.
 
 ---
 
@@ -36,7 +36,7 @@ The repository expects **Node 18.17.0+**. Earlier runtimes can execute most test
    ```
 3. Inside your application:
    ```bash
-   npm link @quantfive/codepress-engine
+   npm link @codepress/codepress-engine
    ```
 4. Run your build tooling. Babel/SWC will consume the compiled plugin from `dist/`.
 
@@ -100,13 +100,13 @@ After editing sources always run `npm run build`. The Babel/SWC entry points rea
 Set `CODEPRESS_SWC_WASM` to an explicit package export, e.g.:
 
 ```bash
-CODEPRESS_SWC_WASM=@quantfive/codepress-engine/swc/wasm-v42
+CODEPRESS_SWC_WASM=@codepress/codepress-engine/swc/wasm-v42
 ```
 
 ### Cleaning the environment
 
 ```bash
-npm unlink @quantfive/codepress-engine
+npm unlink @codepress/codepress-engine
 npm unlink
 ```
 
@@ -117,4 +117,3 @@ rm -rf node_modules dist
 npm install
 npm run build
 ```
-

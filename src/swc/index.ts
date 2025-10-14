@@ -14,7 +14,7 @@ interface SWCConfig extends SWCUserConfig {
   branch_name: string | null;
 }
 
-const PACKAGE_SCOPE = "@quantfive/codepress-engine";
+const PACKAGE_SCOPE = "@codepress/codepress-engine";
 
 function readGitOutput(command: string): string | null {
   try {
@@ -135,7 +135,7 @@ function resolveWasmFile(selection: BandSelection): string {
       return forced;
     }
     console.warn(
-      "[codepress] Ignoring relative CODEPRESS_SWC_WASM. Use a package export (e.g. @quantfive/codepress-engine/swc/wasm-v26) or an absolute path."
+      "[codepress] Ignoring relative CODEPRESS_SWC_WASM. Use a package export (e.g. @codepress/codepress-engine/swc/wasm-v26) or an absolute path."
     );
   }
 

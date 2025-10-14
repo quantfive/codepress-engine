@@ -1,6 +1,6 @@
-import fs from "fs";
-import path from "path";
 import * as swc from "@swc/core";
+import * as fs from "fs";
+import * as path from "path";
 import createSWCPlugin from "../src/swc";
 
 describe("SWC Plugin Specific Tests", () => {
@@ -136,12 +136,12 @@ export default App;
 
     test("should be loadable as Node.js module export", () => {
       // Test that the wrapper is loadable
-      const swcWrapper = require.resolve("@quantfive/codepress-engine/swc");
+      const swcWrapper = require.resolve("@codepress/codepress-engine/swc");
       expect(fs.existsSync(swcWrapper)).toBe(true);
       expect(swcWrapper.endsWith("index.js")).toBe(true);
 
       // Test that the WASM file is accessible via the wasm export
-      const wasmPath = require.resolve("@quantfive/codepress-engine/swc/wasm");
+      const wasmPath = require.resolve("@codepress/codepress-engine/swc/wasm");
       expect(fs.existsSync(wasmPath)).toBe(true);
       expect(wasmPath.endsWith("codepress_engine.v42.wasm")).toBe(true);
     });
@@ -157,7 +157,7 @@ export default App;
       expect(typeof wasmRef).toBe("string");
       // Accept module specifier (preferred) or absolute path for backward-compat
       const isSpecifierOrPath =
-        wasmRef.startsWith("@quantfive/codepress-engine/swc/wasm") ||
+        wasmRef.startsWith("@codepress/codepress-engine/swc/wasm") ||
         wasmRef.endsWith("codepress_engine.v42.wasm");
       expect(isSpecifierOrPath).toBe(true);
       expect(typeof config).toBe("object");

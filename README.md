@@ -17,30 +17,30 @@ TypeScript-powered instrumentation for the CodePress visual editor. The package 
 ## Installation
 
 ```bash
-npm install --save-dev @quantfive/codepress-engine
+npm install --save-dev @codepress/codepress-engine
 ```
 
 Entry points exposed by the package:
 
-| Export | Description |
-| --- | --- |
-| `@quantfive/codepress-engine/babel` | Compiled Babel plugin (CommonJS) |
-| `@quantfive/codepress-engine/swc` | SWC transform loader & WASM helpers |
-| `@quantfive/codepress-engine/server` | Fastify development server factory |
-| `@quantfive/codepress-engine/cli` | CLI used by the `codepress` binary |
-| `@quantfive/codepress-engine/hash-util` | Browser utilities for decoding metadata |
+| Export                                  | Description                             |
+| --------------------------------------- | --------------------------------------- |
+| `@codepress/codepress-engine/babel`     | Compiled Babel plugin (CommonJS)        |
+| `@codepress/codepress-engine/swc`       | SWC transform loader & WASM helpers     |
+| `@codepress/codepress-engine/server`    | Fastify development server factory      |
+| `@codepress/codepress-engine/cli`       | CLI used by the `codepress` binary      |
+| `@codepress/codepress-engine/hash-util` | Browser utilities for decoding metadata |
 
 ---
 
 ## Project layout
 
-| Path | Details |
-| --- | --- |
-| `src/` | TypeScript sources for the Babel plugin, CLI, dev server, and utils |
-| `dist/` | Compiled JavaScript + declaration files (`npm run build`) |
-| `babel/` | Lightweight proxy that re-exports the compiled Babel plugin |
-| `swc/` | WASM binaries (`wasm-v42`, `wasm-v26`, `wasm-v0_82_87`) and transform entry |
-| `tests/`, `test/` | Jest suites covering Babel, SWC, and server helpers |
+| Path              | Details                                                                     |
+| ----------------- | --------------------------------------------------------------------------- |
+| `src/`            | TypeScript sources for the Babel plugin, CLI, dev server, and utils         |
+| `dist/`           | Compiled JavaScript + declaration files (`npm run build`)                   |
+| `babel/`          | Lightweight proxy that re-exports the compiled Babel plugin                 |
+| `swc/`            | WASM binaries (`wasm-v42`, `wasm-v26`, `wasm-v0_82_87`) and transform entry |
+| `tests/`, `test/` | Jest suites covering Babel, SWC, and server helpers                         |
 
 ---
 
@@ -79,12 +79,12 @@ npx codepress npm start
 
 Environment variables (loaded from `.env` when present):
 
-| Variable | Default | Purpose |
-| --- | --- | --- |
-| `CODEPRESS_DEV_PORT` | `4321` | Fastify listen port |
-| `CODEPRESS_BACKEND_HOST` | `localhost` | CodePress backend hostname |
-| `CODEPRESS_BACKEND_PORT` | `8007` | Backend REST port |
-| `CODEPRESS_API_TOKEN` | _unset_ | API token used for authenticated proxy calls |
+| Variable                 | Default     | Purpose                                      |
+| ------------------------ | ----------- | -------------------------------------------- |
+| `CODEPRESS_DEV_PORT`     | `4321`      | Fastify listen port                          |
+| `CODEPRESS_BACKEND_HOST` | `localhost` | CodePress backend hostname                   |
+| `CODEPRESS_BACKEND_PORT` | `8007`      | Backend REST port                            |
+| `CODEPRESS_API_TOKEN`    | _unset_     | API token used for authenticated proxy calls |
 
 The server performs git-aware writes, forwards requests to the CodePress backend, and enriches responses with repository metadata. It never runs in production builds.
 
@@ -97,7 +97,7 @@ The server performs git-aware writes, forwards requests to the CodePress backend
 module.exports = {
   plugins: [
     [
-      "@quantfive/codepress-engine",
+      "@codepress/codepress-engine",
       {
         attributeName: "codepress-data-fp",
         repoAttributeName: "codepress-github-repo-name",
@@ -115,7 +115,9 @@ Each JSX element receives a `codepress-data-fp` attribute whose value encodes th
 ## SWC transform usage
 
 ```js
-const { transformWithCodePress } = require("@quantfive/codepress-engine/swc-plugin");
+const {
+  transformWithCodePress,
+} = require("@codepress/codepress-engine/swc-plugin");
 
 async function transform(source, filePath) {
   const result = await transformWithCodePress(source, filePath, {
@@ -130,12 +132,12 @@ async function transform(source, filePath) {
 
 `package.json` exports:
 
-| Export | Target |
-| --- | --- |
-| `./swc` | `./dist/swc/index.js` |
-| `./swc/wasm` | `./swc/codepress_engine.v42.wasm` |
-| `./swc/wasm-v42` | `./swc/codepress_engine.v42.wasm` |
-| `./swc/wasm-v26` | `./swc/codepress_engine.v26.wasm` |
+| Export                | Target                                 |
+| --------------------- | -------------------------------------- |
+| `./swc`               | `./dist/swc/index.js`                  |
+| `./swc/wasm`          | `./swc/codepress_engine.v42.wasm`      |
+| `./swc/wasm-v42`      | `./swc/codepress_engine.v42.wasm`      |
+| `./swc/wasm-v26`      | `./swc/codepress_engine.v26.wasm`      |
 | `./swc/wasm-v0_82_87` | `./swc/codepress_engine.v0_82_87.wasm` |
 
 The helper automatically selects the correct WASM binary based on detected Next.js / `@swc/core` versions. Override detection with `CODEPRESS_SWC_WASM=<package specifier>` or `CODEPRESS_SWC_ABI_BAND=<v42|v26|v0_82_87>`.
@@ -144,13 +146,13 @@ The helper automatically selects the correct WASM binary based on detected Next.
 
 ## Feature comparison
 
-| Capability | Babel plugin | SWC transform |
-| --- | --- | --- |
-| Git-aware attributes | ✅ | ✅ |
-| Encoded path security | XOR + base64 | XOR + base64 |
-| Line number tracking | ✅ start–end range | ✅ (optional) |
-| Performance | Baseline | **20–70× faster** |
-| Output medium | String literal attribute | `[wasmSpecifier, config]` array |
+| Capability            | Babel plugin             | SWC transform                   |
+| --------------------- | ------------------------ | ------------------------------- |
+| Git-aware attributes  | ✅                       | ✅                              |
+| Encoded path security | XOR + base64             | XOR + base64                    |
+| Line number tracking  | ✅ start–end range       | ✅ (optional)                   |
+| Performance           | Baseline                 | **20–70× faster**               |
+| Output medium         | String literal attribute | `[wasmSpecifier, config]` array |
 
 ---
 

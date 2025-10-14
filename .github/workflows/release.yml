@@ -31,7 +31,7 @@ jobs:
         with:
           fetch-depth: 0
 
-      # Configure npmjs.org as registry (scoped for @quantfive)
+      # Configure npmjs.org as registry (scoped for @codepress)
       - name: Setup Node (scoped registry)
         uses: actions/setup-node@v4
         with:
@@ -81,7 +81,7 @@ jobs:
           fi
 
           if [[ "$BRANCH_NAME" == "main" ]]; then
-            LATEST_PUBLISHED=$(npm view @quantfive/codepress-engine version 2>/dev/null || echo "0.0.0")
+            LATEST_PUBLISHED=$(npm view @codepress/codepress-engine version 2>/dev/null || echo "0.0.0")
             if [ "$RELEASE_VERSION" != "$LATEST_PUBLISHED" ]; then
               echo "changed=true" >> $GITHUB_OUTPUT
             else
@@ -159,7 +159,7 @@ jobs:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           TARGET_VERSION: ${{ needs.check-version.outputs.release_version }}
         run: |
-          PUBLISHED=$(npm view @quantfive/codepress-engine versions --json 2>/dev/null || echo '[]')
+          PUBLISHED=$(npm view @codepress/codepress-engine versions --json 2>/dev/null || echo '[]')
           if printf '%s' "$PUBLISHED" | grep -F "\"$TARGET_VERSION\"" >/dev/null; then
             echo "already=true" >> $GITHUB_OUTPUT
           else
@@ -203,10 +203,10 @@ jobs:
 
             ```bash
             # Install the published dist-tag from npm (defaults to latest on main)
-            npm install @quantfive/codepress-engine@${{ needs.check-version.outputs.release_tag }}
+            npm install @codepress/codepress-engine@${{ needs.check-version.outputs.release_tag }}
 
             # Pin to this exact release version from npm
-            npm install @quantfive/codepress-engine@${{ needs.check-version.outputs.release_version }}
+            npm install @codepress/codepress-engine@${{ needs.check-version.outputs.release_version }}
             ```
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
