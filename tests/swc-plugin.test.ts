@@ -84,31 +84,19 @@ export default App;
 
   describe("Plugin Configuration Tests", () => {
     test("should handle default configuration", () => {
-      // Test that our plugin would use default config correctly
-      const defaultConfig = {
-        attributeName: "codepress-data-fp",
-        repoAttributeName: "codepress-github-repo-name",
-        branchAttributeName: "codepress-github-branch",
-      };
-
-      expect(defaultConfig.attributeName).toBe("codepress-data-fp");
-      expect(defaultConfig.repoAttributeName).toBe(
-        "codepress-github-repo-name"
-      );
-      expect(defaultConfig.branchAttributeName).toBe("codepress-github-branch");
+      // SWC plugin config is minimal and auto-detected
+      const [, config] = createSWCPlugin();
+      expect(config).toHaveProperty("repo_name");
+      expect(config).toHaveProperty("branch_name");
     });
 
     test("should handle custom configuration", () => {
-      // Test that our plugin would use custom config correctly
-      const customConfig = {
-        attributeName: "custom-fp",
-        repoAttributeName: "custom-repo",
-        branchAttributeName: "custom-branch",
-      };
-
-      expect(customConfig.attributeName).toBe("custom-fp");
-      expect(customConfig.repoAttributeName).toBe("custom-repo");
-      expect(customConfig.branchAttributeName).toBe("custom-branch");
+      const [, config] = createSWCPlugin({
+        repo_name: "owner/repo",
+        branch_name: "branch",
+      });
+      expect(config.repo_name).toBe("owner/repo");
+      expect(config.branch_name).toBe("branch");
     });
   });
 

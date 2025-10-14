@@ -1,6 +1,6 @@
 ## CodePress Engine
 
-TypeScript-powered instrumentation for the CodePress visual editor. The package ships a Babel plugin, SWC transform, development server, and CLI so React or Next.js projects can expose file-level context to the editor.
+TypeScript-powered instrumentation for the CodePress visual editor. The package ships a Babel plugin, SWC plugin, development server, and CLI so React or Next.js projects can expose file-level context to the editor.
 
 ---
 
@@ -20,26 +20,73 @@ TypeScript-powered instrumentation for the CodePress visual editor. The package 
 npm install @codepress/codepress-engine
 ```
 
+## SWC plugin (Next.js) usage
+
+```js
+// next.config.mjs (Next.js 14/15)
+import createSWCPlugin from "@codepress/codepress-engine/swc";
+
+const nextConfig = {
+  experimental: {
+    swcPlugins: [
+      // Auto-detects repo/branch; no options required
+      createSWCPlugin(),
+    ],
+  },
+};
+
+export default nextConfig;
+```
+
+The SWC plugin auto-detects your repository and branch from `git` and common CI env vars. WASM selection is automatic based on your Next.js / `@swc/core` version; see the WASM exports below for manual overrides.
+
+Optional options for `createSWCPlugin` (all are optional; omit to use auto-detection):
+
+| Option        | Type   | Default                         | Purpose                                  |
+| ------------- | ------ | ------------------------------- | ---------------------------------------- |
+| `repo_name`   | string | auto-detected from `git remote` | Force repository id in `owner/repo` form |
+| `branch_name` | string | auto-detected from env/`git`    | Force branch name                        |
+
+---
+
+## Babel plugin usage
+
+```js
+// babel.config.mjs
+export default {
+  plugins: ["@codepress/codepress-engine"],
+};
+```
+
+Each JSX element receives a `codepress-data-fp` attribute whose value encodes the relative path and start/end line numbers. On the first root container (`html`, `body`, or `div`), the plugin also injects repository and branch metadata.
+
+Optional options for the Babel plugin (all are optional; omit to use auto-detection):
+
+| Option        | Type   | Default                         | Purpose                                  |
+| ------------- | ------ | ------------------------------- | ---------------------------------------- |
+| `repo_name`   | string | auto-detected from `git remote` | Force repository id in `owner/repo` form |
+| `branch_name` | string | auto-detected from env/`git`    | Force branch name                        |
+
 Entry points exposed by the package:
 
-| Export                               | Description                         |
-| ------------------------------------ | ----------------------------------- |
-| `@codepress/codepress-engine/babel`  | Compiled Babel plugin (CommonJS)    |
-| `@codepress/codepress-engine/swc`    | SWC transform loader & WASM helpers |
-| `@codepress/codepress-engine/server` | Fastify development server factory  |
-| `@codepress/codepress-engine/cli`    | CLI used by the `codepress` binary  |
+| Export                               | Description                        |
+| ------------------------------------ | ---------------------------------- |
+| `@codepress/codepress-engine/babel`  | Compiled Babel plugin (CommonJS)   |
+| `@codepress/codepress-engine/swc`    | SWC plugin factory & WASM helpers  |
+| `@codepress/codepress-engine/server` | Fastify development server factory |
+| `@codepress/codepress-engine/cli`    | CLI used by the `codepress` binary |
 
 ---
 
 ## Project layout
 
-| Path              | Details                                                                     |
-| ----------------- | --------------------------------------------------------------------------- |
-| `src/`            | TypeScript sources for the Babel plugin, CLI, dev server, and utils         |
-| `dist/`           | Compiled JavaScript + declaration files (`npm run build`)                   |
-| `babel/`          | Lightweight proxy that re-exports the compiled Babel plugin                 |
-| `swc/`            | WASM binaries (`wasm-v42`, `wasm-v26`, `wasm-v0_82_87`) and transform entry |
-| `tests/`, `test/` | Jest suites covering Babel, SWC, and server helpers                         |
+| Path              | Details                                                                  |
+| ----------------- | ------------------------------------------------------------------------ |
+| `src/`            | TypeScript sources for the Babel plugin, CLI, dev server, and utils      |
+| `dist/`           | Compiled JavaScript + declaration files (`npm run build`)                |
+| `babel/`          | Lightweight proxy that re-exports the compiled Babel plugin              |
+| `swc/`            | WASM binaries (`wasm-v42`, `wasm-v26`, `wasm-v0_82_87`) and plugin entry |
+| `tests/`, `test/` | Jest suites covering Babel, SWC, and server helpers                      |
 
 ---
 
@@ -60,23 +107,35 @@ The build step must run before publishing or linking locally because Babel and C
 
 ---
 
-## CLI & development server
+## Local development
+
+Run the local CodePress server alongside your app to visually edit code on disk (no GitHub commits):
+
+```bash
+# npm
+npx codepress && npm start
+
+# pnpm
+pnpm dlx codepress && pnpm start
+
+# yarn
+yarn dlx codepress && yarn start
+```
+
+Useful commands:
 
 ```bash
 # Show available commands
 npx codepress help
 
-# Launch the Fastify dev server on port 4321
+# Launch the server explicitly on port 4321
 npx codepress server
 
-# Scaffold .env entries and install prettiers required by the dev server
+# Scaffold .env entries required by the server
 npx codepress setup
-
-# Run your own command with the dev server in the background
-npx codepress npm start
 ```
 
-Environment variables (loaded from `.env` when present):
+Environment variables (from `.env` when present):
 
 | Variable                 | Default     | Purpose                                      |
 | ------------------------ | ----------- | -------------------------------------------- |
@@ -85,51 +144,11 @@ Environment variables (loaded from `.env` when present):
 | `CODEPRESS_BACKEND_PORT` | `8007`      | Backend REST port                            |
 | `CODEPRESS_API_TOKEN`    | _unset_     | API token used for authenticated proxy calls |
 
-The server performs git-aware writes, forwards requests to the CodePress backend, and enriches responses with repository metadata. It never runs in production builds.
+The server performs git-aware writes and enriches responses with repository metadata. It writes changes to your local filesystem and is not used in production builds.
 
 ---
 
-## Babel plugin usage
-
-```js
-// babel.config.js
-module.exports = {
-  plugins: [
-    [
-      "@codepress/codepress-engine",
-      {
-        attributeName: "codepress-data-fp",
-        repoAttributeName: "codepress-github-repo-name",
-        branchAttributeName: "codepress-github-branch",
-      },
-    ],
-  ],
-};
-```
-
-Each JSX element receives a `codepress-data-fp` attribute whose value encodes the relative path and start/end line numbers. Repository and branch metadata are attached to container elements (`html`, `body`, `div`) to help the visual editor route updates.
-
----
-
-## SWC transform usage
-
-```js
-const {
-  transformWithCodePress,
-} = require("@codepress/codepress-engine/swc-plugin");
-
-async function transform(source, filePath) {
-  const result = await transformWithCodePress(source, filePath, {
-    attributeName: "codepress-data-fp",
-    repoAttributeName: "codepress-github-repo-name",
-    branchAttributeName: "codepress-github-branch",
-  });
-
-  return result.code;
-}
-```
-
-`package.json` exports:
+## SWC package exports and WASM selection
 
 | Export                | Target                                 |
 | --------------------- | -------------------------------------- |
@@ -145,7 +164,7 @@ The helper automatically selects the correct WASM binary based on detected Next.
 
 ## Feature comparison
 
-| Capability            | Babel plugin             | SWC transform                   |
+| Capability            | Babel plugin             | SWC plugin                      |
 | --------------------- | ------------------------ | ------------------------------- |
 | Git-aware attributes  | ✅                       | ✅                              |
 | Encoded path security | XOR + base64             | XOR + base64                    |

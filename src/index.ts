@@ -2,6 +2,8 @@ import type * as Babel from "@babel/core";
 import { execSync } from "child_process";
 import path from "path";
 
+import type { CodePressPluginOptions } from "./types";
+
 const SECRET = Buffer.from("codepress-file-obfuscation");
 
 const BASE64_URL_SAFE_REPLACEMENTS: Record<string, string> = {
@@ -14,14 +16,6 @@ const BASE64_URL_SAFE_RESTORE: Record<string, string> = {
   "-": "+",
   _: "/",
 };
-
-export interface CodePressPluginOptions {
-  attributeName?: string;
-  repoAttributeName?: string;
-  branchAttributeName?: string;
-  repo_name?: string;
-  branch_name?: string;
-}
 
 interface CodePressPluginState extends Babel.PluginPass {
   file: Babel.BabelFile & { encodedPath?: string };
@@ -139,11 +133,9 @@ export default function codePressPlugin(
   let globalAttributesAdded = false;
   let processedFileCount = 0;
 
-  const {
-    attributeName = "codepress-data-fp",
-    repoAttributeName = "codepress-github-repo-name",
-    branchAttributeName = "codepress-github-branch",
-  } = options;
+  const FILE_PATH_ATTRIBUTE_NAME = "codepress-data-fp";
+  const REPO_ATTRIBUTE_NAME = "codepress-github-repo-name";
+  const BRANCH_ATTRIBUTE_NAME = "codepress-github-branch";
 
   const repoName = options.repo_name || currentRepoName;
   const branch = options.branch_name || currentBranch;
@@ -180,7 +172,7 @@ export default function codePressPlugin(
         const existingAttribute = node.attributes.find(
           (attr): attr is Babel.types.JSXAttribute =>
             t.isJSXAttribute(attr) &&
-            t.isJSXIdentifier(attr.name, { name: attributeName })
+            t.isJSXIdentifier(attr.name, { name: FILE_PATH_ATTRIBUTE_NAME })
         );
 
         if (existingAttribute) {
@@ -188,7 +180,7 @@ export default function codePressPlugin(
         } else {
           node.attributes.push(
             t.jsxAttribute(
-              t.jsxIdentifier(attributeName),
+              t.jsxIdentifier(FILE_PATH_ATTRIBUTE_NAME),
               t.stringLiteral(attributeValue)
             )
           );
@@ -212,7 +204,7 @@ export default function codePressPlugin(
         const hasRepoAttribute = node.attributes.some(
           (attr) =>
             t.isJSXAttribute(attr) &&
-            t.isJSXIdentifier(attr.name, { name: repoAttributeName })
+            t.isJSXIdentifier(attr.name, { name: REPO_ATTRIBUTE_NAME })
         );
 
         if (!hasRepoAttribute) {
@@ -223,7 +215,7 @@ export default function codePressPlugin(
           );
           node.attributes.push(
             t.jsxAttribute(
-              t.jsxIdentifier(repoAttributeName),
+              t.jsxIdentifier(REPO_ATTRIBUTE_NAME),
               t.stringLiteral(repoName)
             )
           );
@@ -232,7 +224,7 @@ export default function codePressPlugin(
         const hasBranchAttribute = node.attributes.some(
           (attr) =>
             t.isJSXAttribute(attr) &&
-            t.isJSXIdentifier(attr.name, { name: branchAttributeName })
+            t.isJSXIdentifier(attr.name, { name: BRANCH_ATTRIBUTE_NAME })
         );
 
         if (!hasBranchAttribute && branch) {
@@ -243,7 +235,7 @@ export default function codePressPlugin(
           );
           node.attributes.push(
             t.jsxAttribute(
-              t.jsxIdentifier(branchAttributeName),
+              t.jsxIdentifier(BRANCH_ATTRIBUTE_NAME),
               t.stringLiteral(branch)
             )
           );

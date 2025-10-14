@@ -7,12 +7,11 @@ interface BandSelection {
   wasmPath?: string;
 }
 
+import type { CodePressPluginOptions } from "../types";
+
 interface SWCUserConfig extends Record<string, unknown> {}
 
-interface SWCConfig extends SWCUserConfig {
-  repo_name: string | null;
-  branch_name: string | null;
-}
+interface SWCConfig extends SWCUserConfig, Required<CodePressPluginOptions> {}
 
 const PACKAGE_SCOPE = "@codepress/codepress-engine";
 
@@ -154,8 +153,8 @@ const createSWCPlugin = (
   const config: SWCConfig = {
     repo_name: detectGitRepoName(),
     branch_name: detectGitBranch(),
-    ...userConfig,
-  };
+    ...(userConfig as CodePressPluginOptions),
+  } as SWCConfig;
 
   const wasmSpecifier = resolveWasmFile(pickBand());
   return [wasmSpecifier, config];

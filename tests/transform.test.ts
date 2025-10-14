@@ -1,10 +1,13 @@
+import * as babel from "@babel/core";
 import fs from "fs";
 import path from "path";
-import * as babel from "@babel/core";
 
 const babelPlugin = require("../babel");
 
-function transformCode(source: string, options: babel.TransformOptions): string {
+function transformCode(
+  source: string,
+  options: babel.TransformOptions
+): string {
   const result = babel.transform(source, options);
   if (!result || !result.code) {
     throw new Error("Babel transform did not produce output");
@@ -33,17 +36,7 @@ export default App;
   describe("Babel Plugin", () => {
     test("should add codepress attributes to JSX elements", () => {
       const code = transformCode(testJSX, {
-        plugins: [
-          ["@babel/plugin-syntax-jsx"],
-          [
-            babelPlugin,
-            {
-              attributeName: "codepress-data-fp",
-              repoAttributeName: "codepress-github-repo-name",
-              branchAttributeName: "codepress-github-branch",
-            },
-          ],
-        ],
+        plugins: [["@babel/plugin-syntax-jsx"], [babelPlugin]],
         filename: "test.jsx",
       });
 

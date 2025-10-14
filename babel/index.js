@@ -1,13 +1,13 @@
-'use strict';
+"use strict";
 
-const compiled = require('../dist/index.js');
+const compiled = require("../dist/index.js");
 const exported = compiled && compiled.default ? compiled.default : compiled;
 
 module.exports = exported;
 
-if (compiled && typeof compiled === 'object') {
+if (compiled && typeof compiled === "object") {
   Object.keys(compiled).forEach((key) => {
-    if (key !== 'default') {
+    if (key !== "default") {
       module.exports[key] = compiled[key];
     }
   });

@@ -92,22 +92,7 @@ describe("codepress-html-babel-plugin", () => {
       expect(code).toMatch(/\"codepress-data-fp\":\s*\"[^\"]+:\d+-\d+\"/);
     });
 
-    it("respects custom attribute name option", () => {
-      const example = `
-        function Button() {
-          return <button>Click me</button>;
-        }
-      `;
-
-      const code = transformWithPlugin(example, {
-        filename: "src/Button.js",
-        plugins: [[plugin, { attributeName: "data-custom" }]],
-        presets: ["@babel/preset-react"],
-      });
-
-      expect(code).toContain("data-custom");
-      expect(code).not.toContain("codepress-data-fp");
-    });
+    // Removed: custom attribute name option is no longer supported to maintain compatibility with the extension
 
     it("processes elements and applies file path attributes", () => {
       const example = `
