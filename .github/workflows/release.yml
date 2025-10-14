@@ -11,8 +11,8 @@ concurrency:
 
 env:
   NODE_VERSION: "20"
-  REGISTRY_URL: "https://npm.pkg.github.com"
-  SCOPE: "@quantfive"
+  REGISTRY_URL: "https://registry.npmjs.org"
+  SCOPE: "@codepress"
 
 jobs:
   check-version:
@@ -31,7 +31,7 @@ jobs:
         with:
           fetch-depth: 0
 
-      # Scope registry to @quantfive so public deps still come from npmjs.org
+      # Configure npmjs.org as registry (scoped for @quantfive)
       - name: Setup Node (scoped registry)
         uses: actions/setup-node@v4
         with:
@@ -43,12 +43,12 @@ jobs:
       - name: Install dependencies
         run: npm ci
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - name: Compute release metadata
         id: release_info
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           CURRENT_VERSION=$(node -p "require('./package.json').version")
           BRANCH_NAME=${GITHUB_REF#refs/heads/}
@@ -118,7 +118,7 @@ jobs:
       - name: Install deps
         run: npm ci
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - name: Update package version for release
         env:
@@ -156,7 +156,7 @@ jobs:
       - name: Ensure version not yet published
         id: recheck
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           TARGET_VERSION: ${{ needs.check-version.outputs.release_version }}
         run: |
           PUBLISHED=$(npm view @quantfive/codepress-engine versions --json 2>/dev/null || echo '[]')
@@ -166,10 +166,10 @@ jobs:
             echo "already=false" >> $GITHUB_OUTPUT
           fi
 
-      - name: Publish to GitHub Packages
+      - name: Publish to npm
         if: steps.recheck.outputs.already == 'false'
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           RELEASE_TAG: ${{ needs.check-version.outputs.release_tag }}
         run: |
           if [ "$RELEASE_TAG" = "latest" ]; then
@@ -202,13 +202,10 @@ jobs:
             **Dist Tag**: `${{ needs.check-version.outputs.release_tag }}`
 
             ```bash
-            # Configure npm to use the GitHub Packages registry once per machine
-            npm config set @quantfive:registry https://npm.pkg.github.com
-
-            # Install the published dist-tag (defaults to latest on main)
+            # Install the published dist-tag from npm (defaults to latest on main)
             npm install @quantfive/codepress-engine@${{ needs.check-version.outputs.release_tag }}
 
-            # Pin to this exact release
+            # Pin to this exact release version from npm
             npm install @quantfive/codepress-engine@${{ needs.check-version.outputs.release_version }}
             ```
         env:
