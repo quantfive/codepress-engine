@@ -1290,6 +1290,11 @@ async function startServer(
     // Create the Fastify app
     const app = createApp();
 
+    // Ensure lock is released when Fastify closes
+    app.addHook("onClose", () => {
+      releaseLock();
+    });
+
     // Start the server
     await app.listen({ port, host: "0.0.0.0" });
 
@@ -1299,11 +1304,6 @@ async function startServer(
 
     // Save instance
     serverInstance = app;
-
-    // Ensure lock is released when Fastify closes
-    app.addHook("onClose", () => {
-      releaseLock();
-    });
 
     return app;
   } catch (err) {
