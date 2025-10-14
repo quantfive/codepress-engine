@@ -1,19 +1,17 @@
 // Codepress Dev Server
-import fastify, { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
-import cors from "@fastify/cors";
-import os from "os";
-import fs from "fs";
-import path from "path";
-import prettier from "prettier";
-import { decode } from "./index";
 
-interface TextChangeOperation {
-  type: "insert" | "delete" | "replace";
-  line?: number;
-  startLine?: number;
-  endLine?: number;
-  codeChange?: string;
-}
+import cors from "@fastify/cors";
+import fastify, {
+  type FastifyInstance,
+  type FastifyReply,
+  type FastifyRequest,
+} from "fastify";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
+import * as prettier from "prettier";
+
+import { decode } from "./index";
 
 interface PatternChangeOperation {
   type: "replace" | "insertAfter" | "insertBefore" | "delete";
@@ -91,12 +89,6 @@ interface StartServerOptions {
 
 type FullFileReplacement = string | { type: "binary"; base64: string };
 
-interface ValidationResult {
-  isValid: boolean;
-  error?: string;
-  errorData?: Record<string, unknown>;
-}
-
 interface StreamingAgentRequestArgs {
   reply: FastifyReply;
   data: VisualEditorChange;
@@ -115,6 +107,17 @@ interface VisualEditorAgentBody extends VisualEditorChange {
 
 interface WriteFilesBody {
   updated_files?: Record<string, string>;
+}
+
+// Backend response types
+interface GetChangesResponsePayload {
+  updated_files: Record<string, string>;
+  success?: boolean;
+  message?: string;
+}
+
+interface GetAgentChangesStreamingFinal {
+  updated_files: Record<string, string>;
 }
 
 /**
@@ -172,7 +175,8 @@ function acquireLock(): boolean {
         process.kill(lockData.pid, 0);
         // Process exists, lock is valid
         return false;
-      } catch (e) {
+      } catch (err) {
+        console.error("Error checking lock process:", err);
         // Process doesn't exist, lock is stale
         // Continue to create a new lock
       }
@@ -184,11 +188,12 @@ function acquireLock(): boolean {
       JSON.stringify({
         pid: process.pid,
         timestamp: Date.now(),
-      }),
+      })
     );
 
     return true;
   } catch (err) {
+    console.error("Error acquiring lock:", err);
     // If anything fails, assume we couldn't get the lock
     return false;
   }
@@ -196,219 +201,6 @@ function acquireLock(): boolean {
 
 // Track server instance (singleton pattern)
 let serverInstance: FastifyInstance | null = null;
-
-/**
- * Apply text-based changes to the file content directly based on the new format.
- * @param {string} fileContent The original file content
- * @param {Array<Object>} changes The changes to apply in the new format.
- *        Each change object can have:
- *        - { type: "insert", line: number, codeChange: string }
- *        - { type: "delete", startLine: number, endLine: number }
- *        - { type: "replace", startLine: number, endLine: number, codeChange: string }
- * @returns {string} The modified file content
- */
-function applyTextChanges(
-  fileContent: string,
-  changes: TextChangeOperation[]
-): string {
-  const lines = fileContent.split("\n");
-
-  // Sort changes by the highest line number involved (endLine or line) in reverse order
-  // to avoid index shifts during modification.
-  const sortedChanges = [...changes].sort((a, b) => {
-    const lineA = a.type === "insert" ? a.line ?? 0 : a.endLine ?? 0;
-    const lineB = b.type === "insert" ? b.line ?? 0 : b.endLine ?? 0;
-    return lineB - lineA;
-  });
-
-  for (const change of sortedChanges) {
-    const { type } = change;
-
-    // Convert line numbers to 0-based indices for array operations
-    const startIdx = change.startLine ? change.startLine - 1 : undefined;
-    const endIdx = change.endLine ? change.endLine - 1 : undefined;
-    const lineIdx = change.line ? change.line - 1 : undefined; // For insert
-
-    switch (type) {
-      case "replace":
-        if (
-          startIdx !== undefined &&
-          endIdx !== undefined &&
-          change.codeChange !== undefined
-        ) {
-          // Decode newline characters within the codeChange string
-          const decodedCodeChange = change.codeChange.replace(/\\n/g, "\n");
-          const replacementLines = decodedCodeChange.split("\n");
-          lines.splice(startIdx, endIdx - startIdx + 1, ...replacementLines);
-        } else {
-          console.warn("Invalid 'replace' change object:", change);
-        }
-        break;
-
-      case "delete":
-        if (startIdx !== undefined && endIdx !== undefined) {
-          lines.splice(startIdx, endIdx - startIdx + 1);
-        } else {
-          console.warn("Invalid 'delete' change object:", change);
-        }
-        break;
-
-      case "insert":
-        if (lineIdx !== undefined && change.codeChange !== undefined) {
-          // Decode newline characters within the codeChange string
-          const decodedCodeChange = change.codeChange.replace(/\\n/g, "\n");
-          // Insert *after* the specified line index
-          const insertionLines = decodedCodeChange.split("\n");
-          lines.splice(lineIdx + 1, 0, ...insertionLines);
-        } else {
-          console.warn("Invalid 'insert' change object:", change);
-        }
-        break;
-
-      default:
-        console.warn(`Unknown change type: ${type}`);
-    }
-  }
-
-  return lines.join("\n");
-}
-
-/**
- * Apply pattern-based changes to the file content based on the new format.
- * @param {string} fileContent The original file content
- * @param {Array<Object>} changes The changes to apply in the new format.
- *        Each change object can have:
- *        - { type: "replace", find: string, replaceWith: string, explanation: string }
- *        - { type: "insertAfter", find: string, insert: string, explanation: string }
- *        - { type: "insertBefore", find: string, insert: string, explanation: string }
- *        - { type: "delete", find: string, explanation: string }
- * @returns {string} The modified file content
- */
-function applyPatternChanges(
-  fileContent: string,
-  changes: PatternChangeOperation[]
-): string {
-  let modifiedContent = fileContent;
-
-  // Detect potential conflicts by checking for duplicate find patterns
-  const findPatterns = new Map();
-  changes.forEach((change, index) => {
-    if (change.find) {
-      if (findPatterns.has(change.find)) {
-        const existingIndex = findPatterns.get(change.find);
-        console.warn(
-          `\x1b[33m⚠ CONFLICT DETECTED: Multiple changes target the same pattern\x1b[0m`,
-        );
-        console.warn(
-          `  Change ${existingIndex + 1}: ${changes[existingIndex].explanation}`,
-        );
-        console.warn(`  Change ${index + 1}: ${change.explanation}`);
-        console.warn(`  Pattern: ${change.find.substring(0, 100)}...`);
-        console.warn(
-          `\x1b[33m  → Only the first change will be applied\x1b[0m`,
-        );
-      } else {
-        findPatterns.set(change.find, index);
-      }
-    }
-  });
-
-  for (const change of changes) {
-    const { type, find, replaceWith, insert, explanation } = change;
-
-    console.log(`\x1b[36mℹ Applying ${type} change: ${explanation}\x1b[0m`);
-
-    switch (type) {
-      case "replace":
-        if (find && replaceWith !== undefined) {
-          if (modifiedContent.includes(find)) {
-            // Check if replaceWith contains malformed JSX
-            const openTags = (replaceWith.match(/<[^\/][^>]*>/g) || []).length;
-            const closeTags = (replaceWith.match(/<\/[^>]*>/g) || []).length;
-
-            if (openTags !== closeTags) {
-              console.warn(
-                `\x1b[33m⚠ POTENTIAL JSX MALFORMATION: Unmatched tags in replacement\x1b[0m`,
-              );
-              console.warn(
-                `  Open tags: ${openTags}, Close tags: ${closeTags}`,
-              );
-              console.warn(
-                `  Replacement: ${replaceWith.substring(0, 200)}...`,
-              );
-            }
-
-            modifiedContent = modifiedContent.replace(find, replaceWith);
-            console.log(`\x1b[32m✓ Replaced pattern successfully\x1b[0m`);
-          } else {
-            console.warn(
-              `\x1b[33m⚠ Pattern not found for replace: ${find.substring(0, 50)}...\x1b[0m`,
-            );
-            console.warn(
-              `\x1b[33m  This might be due to a previous change modifying the content\x1b[0m`,
-            );
-          }
-        } else {
-          console.warn("Invalid 'replace' change object:", change);
-        }
-        break;
-
-      case "insertAfter":
-        if (find && insert !== undefined) {
-          if (modifiedContent.includes(find)) {
-            modifiedContent = modifiedContent.replace(find, find + insert);
-            console.log(
-              `\x1b[32m✓ Inserted content after pattern successfully\x1b[0m`,
-            );
-          } else {
-            console.warn(
-              `\x1b[33m⚠ Pattern not found for insertAfter: ${find.substring(0, 50)}...\x1b[0m`,
-            );
-          }
-        } else {
-          console.warn("Invalid 'insertAfter' change object:", change);
-        }
-        break;
-
-      case "insertBefore":
-        if (find && insert !== undefined) {
-          if (modifiedContent.includes(find)) {
-            modifiedContent = modifiedContent.replace(find, insert + find);
-            console.log(
-              `\x1b[32m✓ Inserted content before pattern successfully\x1b[0m`,
-            );
-          } else {
-            console.warn(
-              `\x1b[33m⚠ Pattern not found for insertBefore: ${find.substring(0, 50)}...\x1b[0m`,
-            );
-          }
-        } else {
-          console.warn("Invalid 'insertBefore' change object:", change);
-        }
-        break;
-
-      case "delete":
-        if (find) {
-          if (modifiedContent.includes(find)) {
-            modifiedContent = modifiedContent.replace(find, "");
-            console.log(`\x1b[32m✓ Deleted pattern successfully\x1b[0m`);
-          } else {
-            console.warn(
-              `\x1b[33m⚠ Pattern not found for delete: ${find.substring(0, 50)}...\x1b[0m`,
-            );
-          }
-        } else {
-          console.warn("Invalid 'delete' change object:", change);
-        }
-        break;
-
-      default:
-        console.warn(`Unknown change type: ${type}`);
-    }
-  }
-
-  return modifiedContent;
-}
 
 /**
  * Make an HTTP request to the FastAPI backend using fetch
@@ -428,13 +220,13 @@ function applyPatternChanges(
  * @param {Function} onStreamEvent Callback for stream events
  * @returns {Promise<Object>} Final API response
  */
-async function callBackendApiStreaming(
+async function callBackendApiStreaming<TReturn>(
   method: string,
   endpoint: string,
   data: unknown,
   incomingAuthHeader: string | undefined,
   onStreamEvent?: (event: StreamingEvent) => void
-): Promise<any> {
+): Promise<TReturn> {
   // Backend API settings
   const apiHost = process.env.CODEPRESS_BACKEND_HOST || "localhost";
   const apiPort = parseInt(process.env.CODEPRESS_BACKEND_PORT || "8007", 10);
@@ -467,7 +259,7 @@ async function callBackendApiStreaming(
 
   try {
     console.log(
-      `\x1b[36mℹ Calling backend streaming API: ${method} ${url}\x1b[0m`,
+      `\x1b[36mℹ Calling backend streaming API: ${method} ${url}\x1b[0m`
     );
     const response = await fetch(url, requestOptions);
 
@@ -520,7 +312,7 @@ async function callBackendApiStreaming(
                   "Error parsing SSE data:",
                   parseError,
                   "Line:",
-                  line,
+                  line
                 );
               }
             }
@@ -530,25 +322,26 @@ async function callBackendApiStreaming(
         reader.releaseLock();
       }
 
-      return finalResult || { message: "Streaming completed successfully" };
+      // Return the agent's final result payload; may be undefined if no final_result arrived
+      return finalResult as TReturn;
     } else {
       // Fallback to regular JSON response
-      return await response.json();
+      return (await response.json()) as TReturn;
     }
   } catch (error) {
     console.error(
-      `\x1b[31m✗ Backend streaming API call failed: ${error.message}\x1b[0m`,
+      `\x1b[31m✗ Backend streaming API call failed: ${error.message}\x1b[0m`
     );
     throw error;
   }
 }
 
-async function callBackendApi(
+async function callBackendApi<TReturn>(
   method: string,
   endpoint: string,
   data: unknown,
   incomingAuthHeader: string | undefined
-): Promise<any> {
+): Promise<TReturn> {
   // Backend API settings
   const apiHost = process.env.CODEPRESS_BACKEND_HOST || "localhost";
   const apiPort = parseInt(process.env.CODEPRESS_BACKEND_PORT || "8007", 10);
@@ -571,17 +364,17 @@ async function callBackendApi(
 
     // Debug: Log environment token status
     console.log(
-      `\x1b[36mℹ Environment API token: ${authToken ? "[PRESENT]" : "[NOT SET]"}\x1b[0m`,
+      `\x1b[36mℹ Environment API token: ${authToken ? "[PRESENT]" : "[NOT SET]"}\x1b[0m`
     );
     console.log(
-      `\x1b[36mℹ Incoming auth header: ${incomingAuthHeader ? "[PRESENT]" : "[NOT PROVIDED]"}\x1b[0m`,
+      `\x1b[36mℹ Incoming auth header: ${incomingAuthHeader ? "[PRESENT]" : "[NOT PROVIDED]"}\x1b[0m`
     );
 
     // If no API token, try to use the incoming Authorization header
     if (!authToken && incomingAuthHeader) {
       authToken = incomingAuthHeader.split(" ")[1]; // Extract token part
       console.log(
-        `\x1b[36mℹ Using incoming Authorization header for authentication\x1b[0m`,
+        `\x1b[36mℹ Using incoming Authorization header for authentication\x1b[0m`
       );
     }
 
@@ -596,10 +389,10 @@ async function callBackendApi(
       console.log(
         `\x1b[36mℹ Using ${
           process.env.CODEPRESS_API_TOKEN ? "API Token" : "GitHub OAuth Token"
-        } for authentication\x1b[0m`,
+        } for authentication\x1b[0m`
       );
       console.log(
-        `\x1b[36mℹ Final auth header: Bearer ${authToken.substring(0, 10)}...\x1b[0m`,
+        `\x1b[36mℹ Final auth header: Bearer ${authToken.substring(0, 10)}...\x1b[0m`
       );
     } else {
       console.log("\x1b[33m⚠ No authentication token available\x1b[0m");
@@ -617,19 +410,19 @@ async function callBackendApi(
     // Debug: Log response status and preview
     console.log(`\x1b[36mℹ Response status: ${response.status}\x1b[0m`);
     console.log(
-      `\x1b[36mℹ Response preview: ${responseText.substring(0, 100)}...\x1b[0m`,
+      `\x1b[36mℹ Response preview: ${responseText.substring(0, 100)}...\x1b[0m`
     );
 
     // Check if response is successful
     if (!response.ok) {
       throw new Error(
-        `API request failed with status ${response.status}: ${responseText}`,
+        `API request failed with status ${response.status}: ${responseText}`
       );
     }
 
     // Try to parse the response as JSON
     try {
-      return JSON.parse(responseText);
+      return JSON.parse(responseText) as TReturn;
     } catch (err) {
       throw new Error(`Invalid JSON response: ${err.message}`);
     }
@@ -642,60 +435,6 @@ async function callBackendApi(
     // Re-throw the original error
     throw err;
   }
-}
-
-/**
- * Service: Validate request data based on mode
- * @param {Object} data The request data
- * @param {boolean} isAiMode Whether this is AI mode
- * @returns {Object} Validation result with error or success
- */
-function validateRequestData(
-  data: VisualEditorChange,
-  isAiMode: boolean
-): ValidationResult {
-  const {
-    encoded_location,
-    old_html,
-    new_html,
-    aiInstruction,
-    ai_instruction,
-  } = data;
-
-  const actualAiInstruction = ai_instruction || aiInstruction;
-  if (!encoded_location) {
-    return {
-      isValid: false,
-      error: "Missing encoded_location field",
-      errorData: { encoded_location: encoded_location || undefined },
-    };
-  }
-
-  if (isAiMode) {
-    // AI mode validation
-    if (!actualAiInstruction) {
-      return {
-        isValid: false,
-        error: "Missing aiInstruction field in AI mode",
-        errorData: { encoded_location, mode: "ai" },
-      };
-    }
-  } else {
-    // Regular mode validation
-    const missingFields = [];
-    if (!old_html) missingFields.push("old_html");
-    if (!new_html) missingFields.push("new_html");
-
-    if (missingFields.length > 0) {
-      return {
-        isValid: false,
-        error: `Missing required fields: ${missingFields.join(", ")}`,
-        errorData: { encoded_location, missingFields },
-      };
-    }
-  }
-
-  return { isValid: true };
 }
 
 /**
@@ -728,7 +467,7 @@ async function saveImageData({
       imagePath = path.join(imageDir, filename);
       // When filename is provided, assume image_data is just the base64 string
       const match = imageData.match(/^data:image\/[\w+]+\;base64,(.+)$/);
-      if (match && match[1]) {
+      if (match?.[1]) {
         base64Data = match[1]; // Extract if full data URI is sent
       } else {
         base64Data = imageData; // Assume raw base64
@@ -737,16 +476,16 @@ async function saveImageData({
     } else {
       // Fallback to existing logic if filename is not provided
       const match = imageData.match(/^data:image\/([\w+]+);base64,(.+)$/);
-      let imageExtension;
+      let imageExtension: string;
 
-      if (match && match[1] && match[2]) {
+      if (match?.[1] && match?.[2]) {
         imageExtension = match[1];
         base64Data = match[2];
       } else {
         base64Data = imageData;
         imageExtension = "png";
         console.log(
-          "\x1b[33m⚠ Image data URI prefix not found and no filename provided, defaulting to .png extension.\x1b[0m",
+          "\x1b[33m⚠ Image data URI prefix not found and no filename provided, defaulting to .png extension.\x1b[0m"
         );
       }
 
@@ -772,9 +511,11 @@ async function saveImageData({
  * @param {string} encodedLocation The encoded file location
  * @returns {Object} File data with path and content
  */
-function readFileFromEncodedLocation(
-  encodedLocation: string
-): { filePath: string; targetFile: string; fileContent: string } {
+function readFileFromEncodedLocation(encodedLocation: string): {
+  filePath: string;
+  targetFile: string;
+  fileContent: string;
+} {
   const encodedFilePath = encodedLocation.split(":")[0];
   const filePath = decode(encodedFilePath);
   console.log(`\x1b[36mℹ Decoded file path: ${filePath}\x1b[0m`);
@@ -788,53 +529,6 @@ function readFileFromEncodedLocation(
   const fileContent = fs.readFileSync(targetFile, "utf8");
 
   return { filePath, targetFile, fileContent };
-}
-
-/**
- * Service: Apply changes and format code
- * @param {string} fileContent Original file content
- * @param {Array} changes Array of changes to apply
- * @param {string} targetFile Target file path
- * @param {boolean} usePatternChanges Whether to use pattern-based changes (true) or text-based changes (false)
- * @returns {Promise<string>} Formatted code
- */
-async function applyChangesAndFormat(
-  fileContent: string,
-  changes: Array<PatternChangeOperation | TextChangeOperation>,
-  targetFile: string,
-  usePatternChanges = true,
-): Promise<string> {
-  console.log(
-    `\x1b[36mℹ Received ${changes.length} changes from backend\x1b[0m`,
-  );
-
-  // Apply the changes using the appropriate function based on the flag
-  const modifiedContent = usePatternChanges
-    ? applyPatternChanges(fileContent, changes as PatternChangeOperation[])
-    : applyTextChanges(fileContent, changes as TextChangeOperation[]);
-
-  // Format with Prettier
-  let formattedCode: string;
-  try {
-    formattedCode = await prettier.format(modifiedContent, {
-      parser: pickPrettierParser(targetFile),
-      semi: true,
-      singleQuote: false,
-    });
-  } catch (prettierError) {
-    console.error("Prettier formatting failed:", prettierError);
-    // If formatting fails, use the unformatted code
-    formattedCode = modifiedContent;
-  }
-
-  // Write back to file
-  fs.writeFileSync(targetFile, formattedCode, "utf8");
-
-  console.log(
-    `\x1b[32m✓ Updated file ${targetFile} with ${changes.length} changes using ${usePatternChanges ? "pattern-based" : "text-based"} approach\x1b[0m`,
-  );
-
-  return formattedCode;
 }
 
 /**
@@ -861,19 +555,19 @@ async function getChanges({
   githubRepoName?: string;
   fileChanges: BackendFileChange[];
   authHeader?: string;
-}): Promise<any> {
+}): Promise<GetChangesResponsePayload> {
   console.log(
-    `\x1b[36mℹ Getting changes from backend for ${fileChanges.length} files\x1b[0m`,
+    `\x1b[36mℹ Getting changes from backend for ${fileChanges.length} files\x1b[0m`
   );
 
-  return await callBackendApi(
+  return await callBackendApi<GetChangesResponsePayload>(
     "POST",
     "code-sync/get-changes",
     {
       github_repo_name: githubRepoName,
       file_changes: fileChanges,
     },
-    authHeader,
+    authHeader
   );
 }
 
@@ -902,7 +596,8 @@ async function tryFormatWithPrettierOrNull(
       })
     );
     return result;
-  } catch (e) {
+  } catch (err) {
+    console.error("Error formatting code with Prettier:", err);
     return null;
   }
 }
@@ -912,10 +607,11 @@ function closeUnclosedJsxTags(code: string): string {
     const tagRegex = /<\/?([A-Za-z][A-Za-z0-9]*)\b[^>]*?\/?>(?!\s*<\!)/g;
     const selfClosingRegex = /<([A-Za-z][A-Za-z0-9]*)\b[^>]*?\/>/;
     const stack = [];
-    let match;
-    while ((match = tagRegex.exec(code)) !== null) {
-      const full = match[0];
-      const name = match[1];
+    while (true) {
+      const nextMatch = tagRegex.exec(code);
+      if (nextMatch === null) break;
+      const full = nextMatch[0];
+      const name = nextMatch[1];
       const isClose = full.startsWith("</");
       const isSelfClosing = selfClosingRegex.test(full);
       if (isSelfClosing) continue;
@@ -957,7 +653,7 @@ async function applyFullFileReplacement(
     }
   } catch (mkdirErr) {
     console.error(
-      `\x1b[31m✗ Failed to ensure directory for ${targetFile}: ${mkdirErr.message}\x1b[0m`,
+      `\x1b[31m✗ Failed to ensure directory for ${targetFile}: ${mkdirErr.message}\x1b[0m`
     );
   }
 
@@ -986,7 +682,7 @@ async function applyFullFileReplacement(
   }
 
   console.log(
-    `\x1b[32m✓ Updated file ${targetFile} with complete file replacement\x1b[0m`,
+    `\x1b[32m✓ Updated file ${targetFile} with complete file replacement\x1b[0m`
   );
 
   return formattedCode;
@@ -1037,33 +733,30 @@ async function handleStreamingAgentRequest({
           normalizedPath = normalizedPath.slice(0, tmpIdx);
         }
         const targetFilePath = toAbsolutePath(normalizedPath);
-        let candidate = eventData.content;
+        const candidate = eventData.content;
         let formatted = await tryFormatWithPrettierOrNull(
           candidate,
           targetFilePath
         );
         if (!formatted) {
           const closed = closeUnclosedJsxTags(candidate);
-          formatted = await tryFormatWithPrettierOrNull(
-            closed,
-            targetFilePath
-          );
+          formatted = await tryFormatWithPrettierOrNull(closed, targetFilePath);
         }
         if (formatted) {
           await applyFullFileReplacement(formatted, targetFilePath);
         } else {
           console.warn(
             "Skipping incremental write due to unparseable content for",
-            targetFilePath,
+            targetFilePath
           );
         }
       }
-     if (
-       eventData &&
-       eventData.type === "final_result" &&
-       eventData.result &&
-       eventData.result.updated_files
-     ) {
+      if (
+        eventData &&
+        eventData.type === "final_result" &&
+        eventData.result &&
+        eventData.result.updated_files
+      ) {
         const updatedEntries = Object.entries(
           eventData.result.updated_files as Record<string, string>
         );
@@ -1075,18 +768,18 @@ async function handleStreamingAgentRequest({
           const targetFilePath = toAbsolutePath(p);
           let formatted = await tryFormatWithPrettierOrNull(
             newContent,
-            targetFilePath,
+            targetFilePath
           );
           if (!formatted) {
             const closed = closeUnclosedJsxTags(newContent);
             formatted = await tryFormatWithPrettierOrNull(
               closed,
-              targetFilePath,
+              targetFilePath
             );
           }
           await applyFullFileReplacement(
             formatted ?? newContent,
-            targetFilePath,
+            targetFilePath
           );
         }
       }
@@ -1104,33 +797,32 @@ async function handleStreamingAgentRequest({
   try {
     // Call the backend for agent changes with streaming
     // The backend will handle all streaming events from the agent
-    const backendResponse = await callBackendApiStreaming(
-      "POST",
-      "v1/code-sync/get-agent-changes",
-      {
-        github_repo_name: github_repo_name,
-        encoded_location: encoded_location,
-        file_content: fileContent,
-        branch_name: branch_name,
-        user_instruction: user_instruction,
-      },
-      authHeader,
-      async (evt) => {
-        await writeIncrementalUpdate(evt);
-        sendEvent(evt);
-      },
-    );
+    const backendResponse =
+      await callBackendApiStreaming<GetAgentChangesStreamingFinal>(
+        "POST",
+        "v1/code-sync/get-agent-changes",
+        {
+          github_repo_name: github_repo_name,
+          encoded_location: encoded_location,
+          file_content: fileContent,
+          branch_name: branch_name,
+          user_instruction: user_instruction,
+        },
+        authHeader,
+        async (evt) => {
+          await writeIncrementalUpdate(evt);
+          sendEvent(evt);
+        }
+      );
 
     console.log(
-      `\x1b[36mℹ backendResponse to agent: ${JSON.stringify(backendResponse)}\x1b[0m`,
+      `\x1b[36mℹ backendResponse to agent: ${JSON.stringify(backendResponse)}\x1b[0m`
     );
 
     // Handle the response and apply changes
-    if (backendResponse && backendResponse.updated_files) {
+    if (backendResponse?.updated_files) {
       const updatedFilePaths: string[] = [];
-      const updatedEntries = Object.entries(
-        backendResponse.updated_files as Record<string, string>
-      );
+      const updatedEntries = Object.entries(backendResponse.updated_files);
       for (const [filePath, newContent] of updatedEntries) {
         const targetFilePath = toAbsolutePath(filePath);
         await applyFullFileReplacement(newContent, targetFilePath);
@@ -1157,7 +849,7 @@ async function handleStreamingAgentRequest({
     sendEvent({ type: "complete" });
   } catch (error) {
     console.error(
-      `\x1b[31m✗ Error in streaming agent: ${error.message}\x1b[0m`,
+      `\x1b[31m✗ Error in streaming agent: ${error.message}\x1b[0m`
     );
     sendEvent({
       type: "error",
@@ -1204,7 +896,8 @@ function createApp(): FastifyInstance {
     try {
       // In production builds, use a relative path that works with the installed package structure
       version = require("../package.json").version;
-    } catch (e) {
+    } catch (err) {
+      console.error("Error getting package version:", err);
       // Ignore error, use default version
     }
 
@@ -1250,7 +943,7 @@ function createApp(): FastifyInstance {
           request.headers.authorization || request.headers["authorization"];
 
         console.log(
-          `\x1b[36mℹ Auth header received: ${authHeader ? "[PRESENT]" : "[MISSING]"}\x1b[0m`,
+          `\x1b[36mℹ Auth header received: ${authHeader ? "[PRESENT]" : "[MISSING]"}\x1b[0m`
         );
 
         if (!Array.isArray(changes)) {
@@ -1260,20 +953,20 @@ function createApp(): FastifyInstance {
         }
 
         console.log(
-          `\x1b[36mℹ Visual Editor API Request: Received ${changes.length} changes for repo ${github_repo_name}\x1b[0m`,
+          `\x1b[36mℹ Visual Editor API Request: Received ${changes.length} changes for repo ${github_repo_name}\x1b[0m`
         );
 
         const changesWithDimensions = changes.filter(
-          (change) => change.browser_width && change.browser_height,
+          (change) => change.browser_width && change.browser_height
         );
         if (changesWithDimensions.length > 0) {
           const sampleChange = changesWithDimensions[0];
           console.log(
-            `\x1b[36mℹ Browser dimensions detected: ${sampleChange.browser_width}x${sampleChange.browser_height}\x1b[0m`,
+            `\x1b[36mℹ Browser dimensions detected: ${sampleChange.browser_width}x${sampleChange.browser_height}\x1b[0m`
           );
         } else {
           console.log(
-            `\x1b[33m⚠ No browser dimensions found in changes\x1b[0m`,
+            `\x1b[33m⚠ No browser dimensions found in changes\x1b[0m`
           );
         }
 
@@ -1286,7 +979,7 @@ function createApp(): FastifyInstance {
           try {
             if (!change.encoded_location) {
               console.warn(
-                `\x1b[33m⚠ Skipping change with missing encoded_location.\x1b[0m`,
+                `\x1b[33m⚠ Skipping change with missing encoded_location.\x1b[0m`
               );
               continue;
             }
@@ -1295,7 +988,7 @@ function createApp(): FastifyInstance {
             const targetFile = decode(encodedFilePath);
             if (!targetFile) {
               console.warn(
-                `\x1b[33m⚠ Skipping change with undecodable file from encoded_location: ${change.encoded_location}.\x1b[0m`,
+                `\x1b[33m⚠ Skipping change with undecodable file from encoded_location: ${change.encoded_location}.\x1b[0m`
               );
               continue;
             }
@@ -1309,34 +1002,37 @@ function createApp(): FastifyInstance {
 
             if (!hasStyleChanges && !hasTextChanges && !hasMoveChanges) {
               console.warn(
-                `\x1b[33m⚠ Skipping change with no style, text, or move changes.\x1b[0m`,
+                `\x1b[33m⚠ Skipping change with no style, text, or move changes.\x1b[0m`
               );
               continue;
             }
 
             uniqueEncodedLocations.add(change.encoded_location);
             validChanges.push(change);
-          } catch (e) {
+          } catch (err) {
             console.error(
               `\x1b[31m✖ Error processing change for location: ${change.encoded_location}\x1b[0m`,
+              err
             );
           }
         }
 
         const fileContentMap = new Map<string, string>();
-        for (const encodedLocation of uniqueEncodedLocations) {
+        uniqueEncodedLocations.forEach((encodedLocation) => {
           try {
-            const { fileContent } = readFileFromEncodedLocation(encodedLocation);
+            const { fileContent } =
+              readFileFromEncodedLocation(encodedLocation);
             fileContentMap.set(encodedLocation, fileContent);
-          } catch (e) {
+          } catch (err) {
             console.error(
               `\x1b[31m✖ Error reading file for location: ${encodedLocation}\x1b[0m`,
+              err
             );
           }
-        }
+        });
 
         console.log(
-          `\x1b[36mℹ Pre-fetched ${fileContentMap.size} unique files for ${validChanges.length} changes\x1b[0m`,
+          `\x1b[36mℹ Pre-fetched ${fileContentMap.size} unique files for ${validChanges.length} changes\x1b[0m`
         );
 
         const fileChangesForBackend: BackendFileChange[] = [];
@@ -1345,7 +1041,7 @@ function createApp(): FastifyInstance {
             const fileContent = fileContentMap.get(change.encoded_location);
             if (!fileContent) {
               console.warn(
-                `\x1b[33m⚠ Skipping change with missing file content for: ${change.encoded_location}\x1b[0m`,
+                `\x1b[33m⚠ Skipping change with missing file content for: ${change.encoded_location}\x1b[0m`
               );
               continue;
             }
@@ -1363,9 +1059,10 @@ function createApp(): FastifyInstance {
               browser_width: change.browser_width,
               browser_height: change.browser_height,
             });
-          } catch (e) {
+          } catch (err) {
             console.error(
               `\x1b[31m✖ Error processing change for location: ${change.encoded_location}\x1b[0m`,
+              err
             );
           }
         }
@@ -1387,15 +1084,15 @@ function createApp(): FastifyInstance {
         }
 
         console.log(
-          `\x1b[36mℹ Sending request for ${fileChangesForBackend.length} individual changes (${changes.length} total original changes)\x1b[0m`,
+          `\x1b[36mℹ Sending request for ${fileChangesForBackend.length} individual changes (${changes.length} total original changes)\x1b[0m`
         );
 
         const backendChangesWithDimensions = fileChangesForBackend.filter(
-          (change) => change.browser_width && change.browser_height,
+          (change) => change.browser_width && change.browser_height
         );
         if (backendChangesWithDimensions.length > 0) {
           console.log(
-            `\x1b[36mℹ Sending browser dimensions to backend for ${backendChangesWithDimensions.length} changes\x1b[0m`,
+            `\x1b[36mℹ Sending browser dimensions to backend for ${backendChangesWithDimensions.length} changes\x1b[0m`
           );
         }
 
@@ -1405,18 +1102,16 @@ function createApp(): FastifyInstance {
           authHeader,
         });
 
-      const updatedFiles = new Set<string>();
-      if (backendResponse && backendResponse.updated_files) {
-        console.log(`\x1b[36mℹ Processing updated_files format\x1b[0m`);
-        const updatedEntries = Object.entries(
-          backendResponse.updated_files as Record<string, string>
-        );
-        for (const [filePath, newContent] of updatedEntries) {
-          const targetFile = toAbsolutePath(filePath);
+        const updatedFiles = new Set<string>();
+        if (backendResponse?.updated_files) {
+          console.log(`\x1b[36mℹ Processing updated_files format\x1b[0m`);
+          const updatedEntries = Object.entries(backendResponse.updated_files);
+          for (const [filePath, newContent] of updatedEntries) {
+            const targetFile = toAbsolutePath(filePath);
 
-          await applyFullFileReplacement(newContent, targetFile);
-          updatedFiles.add(targetFile);
-        }
+            await applyFullFileReplacement(newContent, targetFile);
+            updatedFiles.add(targetFile);
+          }
         }
 
         if (updatedFiles.size === 0) {
@@ -1434,7 +1129,7 @@ function createApp(): FastifyInstance {
         });
       } catch (err) {
         console.error(
-          `\x1b[31m✖ Fatal error in /visual-editor-api: ${err.message}\x1b[0m`,
+          `\x1b[31m✖ Fatal error in /visual-editor-api: ${err.message}\x1b[0m`
         );
         return reply.code(500).send({
           error: "An internal server error occurred",
@@ -1451,38 +1146,37 @@ function createApp(): FastifyInstance {
       request: FastifyRequest<{ Body: VisualEditorAgentBody }>,
       reply: FastifyReply
     ) => {
-    try {
-      const data = request.body;
-      const { encoded_location, image_data, filename } = data;
-      const authHeader =
-        request.headers.authorization || request.headers["authorization"];
+      try {
+        const data = request.body;
+        const { encoded_location, image_data, filename } = data;
+        const authHeader =
+          request.headers.authorization || request.headers["authorization"];
 
-      console.log(
-        `\x1b[36mℹ [visual-editor-api-agent] Auth header received: ${authHeader ? "[PRESENT]" : "[MISSING]"}, Always streaming\x1b[0m`,
-      );
+        console.log(
+          `\x1b[36mℹ [visual-editor-api-agent] Auth header received: ${authHeader ? "[PRESENT]" : "[MISSING]"}, Always streaming\x1b[0m`
+        );
 
-      if (!encoded_location) {
-        return reply.code(400).send({ error: "Missing encoded_location" });
+        if (!encoded_location) {
+          return reply.code(400).send({ error: "Missing encoded_location" });
+        }
+
+        const { fileContent } = readFileFromEncodedLocation(encoded_location);
+
+        // Save image data before processing
+        await saveImageData({ imageData: image_data, filename });
+
+        // Always use streaming for agent requests
+        return await handleStreamingAgentRequest({
+          reply,
+          data,
+          authHeader,
+          fileContent,
+        });
+      } catch (err) {
+        console.error(`Error in /visual-editor-api-agent: ${err.message}`);
+        return reply.code(500).send({ error: err.message });
       }
-
-      const { targetFile, fileContent } =
-        readFileFromEncodedLocation(encoded_location);
-
-      // Save image data before processing
-      await saveImageData({ imageData: image_data, filename });
-
-      // Always use streaming for agent requests
-      return await handleStreamingAgentRequest({
-        reply,
-        data,
-        authHeader,
-        fileContent,
-      });
-    } catch (err) {
-      console.error(`Error in /visual-editor-api-agent: ${err.message}`);
-      return reply.code(500).send({ error: err.message });
     }
-  }
   );
 
   // Endpoint to write files to local filesystem (for local mode)
@@ -1492,45 +1186,45 @@ function createApp(): FastifyInstance {
       request: FastifyRequest<{ Body: WriteFilesBody }>,
       reply: FastifyReply
     ) => {
-    try {
-      const { updated_files } = request.body;
+      try {
+        const { updated_files } = request.body;
 
-      if (!updated_files || typeof updated_files !== "object") {
-        return reply.code(400).send({
-          error: "Missing or invalid updated_files object",
-        });
-      }
-
-      const writtenFiles: string[] = [];
-      const updatedEntries = Object.entries(
-        updated_files as Record<string, string>
-      );
-      for (const [rawPath, newContent] of updatedEntries) {
-        try {
-          let filePath = rawPath;
-          if (filePath.includes(".tmp.")) {
-            filePath = filePath.slice(0, filePath.indexOf(".tmp."));
-          }
-          const targetFilePath = toAbsolutePath(filePath);
-          await applyFullFileReplacement(newContent, targetFilePath);
-          writtenFiles.push(targetFilePath);
-          console.log(`\x1b[32m✓ Wrote ${targetFilePath} to disk\x1b[0m`);
-        } catch (writeErr) {
-          console.error(
-            `\x1b[31m✗ Failed to write ${rawPath}: ${writeErr.message}\x1b[0m`,
-          );
+        if (!updated_files || typeof updated_files !== "object") {
+          return reply.code(400).send({
+            error: "Missing or invalid updated_files object",
+          });
         }
-      }
 
-      return reply.code(200).send({
-        success: true,
-        written_files: writtenFiles,
-      });
-    } catch (err) {
-      console.error(`\x1b[31m✗ Error in /write-files: ${err.message}\x1b[0m`);
-      return reply.code(500).send({ error: err.message });
+        const writtenFiles: string[] = [];
+        const updatedEntries = Object.entries(
+          updated_files as Record<string, string>
+        );
+        for (const [rawPath, newContent] of updatedEntries) {
+          try {
+            let filePath = rawPath;
+            if (filePath.includes(".tmp.")) {
+              filePath = filePath.slice(0, filePath.indexOf(".tmp."));
+            }
+            const targetFilePath = toAbsolutePath(filePath);
+            await applyFullFileReplacement(newContent, targetFilePath);
+            writtenFiles.push(targetFilePath);
+            console.log(`\x1b[32m✓ Wrote ${targetFilePath} to disk\x1b[0m`);
+          } catch (writeErr) {
+            console.error(
+              `\x1b[31m✗ Failed to write ${rawPath}: ${writeErr.message}\x1b[0m`
+            );
+          }
+        }
+
+        return reply.code(200).send({
+          success: true,
+          written_files: writtenFiles,
+        });
+      } catch (err) {
+        console.error(`\x1b[31m✗ Error in /write-files: ${err.message}\x1b[0m`);
+        return reply.code(500).send({ error: err.message });
+      }
     }
-  }
   );
 
   return app;
@@ -1571,7 +1265,7 @@ async function startServer(
     await app.listen({ port, host: "0.0.0.0" });
 
     console.log(
-      `\x1b[32m✅ Codepress Dev Server running at http://localhost:${port}\x1b[0m`,
+      `\x1b[32m✅ Codepress Dev Server running at http://localhost:${port}\x1b[0m`
     );
 
     // Save instance
@@ -1581,13 +1275,66 @@ async function startServer(
   } catch (err) {
     if (err.code === "EADDRINUSE") {
       console.log(
-        `\x1b[33mℹ Codepress Dev Server: Port ${port} is already in use, server is likely already running\x1b[0m`,
+        `\x1b[33mℹ Codepress Dev Server: Port ${port} is already in use, server is likely already running\x1b[0m`
       );
     } else {
       console.error("Codepress Dev Server error:", err);
     }
     return null;
   }
+}
+
+/**
+ * Check if a relative path should be excluded based on ignore patterns.
+ * @param {string} relativePath - The path relative to the base directory.
+ * @param {RegExp[]} excludePatterns - Compiled ignore patterns.
+ * @returns {boolean} True if the path matches any exclude pattern.
+ */
+function shouldExclude(
+  relativePath: string,
+  excludePatterns: RegExp[]
+): boolean {
+  return excludePatterns.some((pattern) => pattern.test(relativePath));
+}
+
+/**
+ * Recursively collects file paths from a directory, respecting exclude patterns.
+ * @param {string} dir - Directory to traverse.
+ * @param {RegExp[]} excludePatterns - Compiled ignore patterns.
+ * @param {string} [baseDir=dir] - Base directory used to compute relative paths.
+ * @returns {string[]} A list of file paths relative to baseDir.
+ */
+function getFilesRecursively(
+  dir: string,
+  excludePatterns: RegExp[],
+  baseDir: string = dir
+): string[] {
+  const files: string[] = [];
+
+  try {
+    const entries = fs.readdirSync(dir, { withFileTypes: true });
+
+    for (const entry of entries) {
+      const fullPath = path.join(dir, entry.name);
+      const relativePath = path.relative(baseDir, fullPath);
+
+      if (shouldExclude(relativePath, excludePatterns)) {
+        continue;
+      }
+
+      if (entry.isDirectory()) {
+        files.push(...getFilesRecursively(fullPath, excludePatterns, baseDir));
+      } else if (entry.isFile()) {
+        files.push(relativePath);
+      }
+    }
+  } catch (error) {
+    console.warn(
+      `\x1b[33m⚠ Error reading directory ${dir}: ${error.message}\x1b[0m`
+    );
+  }
+
+  return files;
 }
 
 /**
@@ -1661,69 +1408,28 @@ function getProjectStructure(): string {
             return new RegExp(regexPattern);
           } catch (error) {
             console.warn(
-              `\x1b[33m⚠ Invalid regex pattern for "${pattern}": ${error.message}\x1b[0m`,
+              `\x1b[33m⚠ Invalid regex pattern for "${pattern}": ${error.message}\x1b[0m`
             );
             return null;
           }
         })
-        .filter((regex) => regex !== null); // Remove null entries
+        .filter((regex): regex is RegExp => regex !== null); // Remove null entries with type guard
 
       // Combine default patterns with gitignore patterns
       excludePatterns = [...excludePatterns, ...gitignorePatterns];
 
       console.log(
-        `\x1b[36mℹ Found ${gitignorePatterns.length} valid gitignore patterns\x1b[0m`,
+        `\x1b[36mℹ Found ${gitignorePatterns.length} valid gitignore patterns\x1b[0m`
       );
     } else {
       console.log(
-        `\x1b[33m⚠ No .gitignore file found, no exclusions applied\x1b[0m`,
+        `\x1b[33m⚠ No .gitignore file found, no exclusions applied\x1b[0m`
       );
     }
 
-    // Function to check if a path should be excluded
-    function shouldExclude(relativePath: string): boolean {
-      return excludePatterns.some((pattern) => pattern.test(relativePath));
-    }
-
-    // Function to recursively get all files
-    function getFilesRecursively(
-      dir: string,
-      baseDir: string = dir
-    ): string[] {
-      const files: string[] = [];
-
-      try {
-        const entries = fs.readdirSync(dir, { withFileTypes: true });
-
-        for (const entry of entries) {
-          const fullPath = path.join(dir, entry.name);
-          const relativePath = path.relative(baseDir, fullPath);
-
-          // Skip if excluded by gitignore patterns
-          if (shouldExclude(relativePath)) {
-            continue;
-          }
-
-          if (entry.isDirectory()) {
-            // Recursively get files from subdirectory
-            files.push(...getFilesRecursively(fullPath, baseDir));
-          } else if (entry.isFile()) {
-            // Add file to list
-            files.push(relativePath);
-          }
-        }
-      } catch (error) {
-        console.warn(
-          `\x1b[33m⚠ Error reading directory ${dir}: ${error.message}\x1b[0m`,
-        );
-      }
-
-      return files;
-    }
-
-    const fileList = getFilesRecursively(process.cwd());
+    const fileList = getFilesRecursively(process.cwd(), excludePatterns);
     console.log(
-      `\x1b[36mℹ Generated file list with ${fileList.length} files\x1b[0m`,
+      `\x1b[36mℹ Generated file list with ${fileList.length} files\x1b[0m`
     );
 
     // Return as a formatted string with one file per line
@@ -1757,7 +1463,7 @@ if (process.env.NODE_ENV !== "production") {
   })();
 }
 
-export { startServer, createApp, getProjectStructure };
+export { createApp, getProjectStructure, startServer };
 export type { ServerModule };
 
 module.exports = serverModule;
