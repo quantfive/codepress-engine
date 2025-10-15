@@ -1,4 +1,4 @@
-# Local Testing Guide for @quantfive/codepress-engine
+# Local Testing Guide for @codepress/codepress-engine
 
 ## Method 1: Using npm link (Recommended)
 
@@ -11,7 +11,7 @@ npm link
 2. **In your Next.js project directory:**
 
 ```bash
-npm link @quantfive/codepress-engine
+npm link @codepress/codepress-engine
 ```
 
 3. **Configure your `next.config.js`:**
@@ -23,7 +23,7 @@ const nextConfig = {
     swcPlugins: [
       // Use the SWC plugin
       [
-        "@quantfive/codepress-engine/swc",
+        "@codepress/codepress-engine/swc",
         {
           // Optional configuration
           attributeName: "codepress-data-fp",
@@ -82,7 +82,7 @@ npm run dev
 ```json
 {
   "dependencies": {
-    "@quantfive/codepress-engine": "file:../path/to/codepress-engine"
+    "@codepress/codepress-engine": "file:../path/to/codepress-engine"
   }
 }
 ```
@@ -102,7 +102,7 @@ You can also test the Babel version in the same project:
 1. **Install as dev dependency:**
 
 ```bash
-npm install --save-dev @quantfive/codepress-engine
+npm install @codepress/codepress-engine
 ```
 
 2. **Create a `babel.config.js`:**
@@ -113,7 +113,7 @@ module.exports = {
   plugins: [
     // Use the Babel plugin
     [
-      "@quantfive/codepress-engine/babel",
+      "@codepress/codepress-engine/babel",
       {
         attributeName: "codepress-data-fp",
         repoAttributeName: "codepress-github-repo-name",
@@ -176,7 +176,7 @@ When done testing, unlink the package:
 
 ```bash
 # In your Next.js project
-npm unlink @quantfive/codepress-engine
+npm unlink @codepress/codepress-engine
 
 # In the codepress-engine directory
 npm unlink

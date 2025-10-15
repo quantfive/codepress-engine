@@ -1,10 +1,20 @@
-const babel = require("@babel/core");
-const plugin = require("../src/index");
-const { decode } = require("../src/index");
+import * as babel from "@babel/core";
+import plugin, { decode } from "../src/index";
+
+function transformWithPlugin(
+  source: string,
+  options: babel.TransformOptions
+): string {
+  const result = babel.transform(source, options);
+  if (!result || !result.code) {
+    throw new Error("Babel transform produced no output");
+  }
+  return result.code;
+}
 
 // Mock child_process.execSync for git detection
 jest.mock("child_process", () => ({
-  execSync: jest.fn((command) => {
+  execSync: jest.fn((command: string) => {
     if (command.includes("rev-parse --abbrev-ref HEAD")) {
       return "test-branch";
     }
@@ -16,16 +26,16 @@ jest.mock("child_process", () => ({
 }));
 
 describe("codepress-html-babel-plugin", () => {
-  let mockExecSync;
+  let mockExecSync: jest.Mock;
 
   beforeEach(() => {
-    // Get the mocked execSync function
-    const { execSync } = require("child_process");
+    const { execSync } = jest.requireMock("child_process") as {
+      execSync: jest.Mock;
+    };
     mockExecSync = execSync;
 
-    // Clear mocks between tests and set default git responses
     jest.clearAllMocks();
-    mockExecSync.mockImplementation((command) => {
+    mockExecSync.mockImplementation((command: string) => {
       if (command.includes("rev-parse --abbrev-ref HEAD")) {
         return "test-branch";
       }
@@ -51,7 +61,7 @@ describe("codepress-html-babel-plugin", () => {
         }
       `;
 
-      const { code } = babel.transform(example, {
+      const code = transformWithPlugin(example, {
         filename: "src/App.js",
         plugins: [plugin],
         presets: ["@babel/preset-react"],
@@ -72,7 +82,7 @@ describe("codepress-html-babel-plugin", () => {
         }
       `;
 
-      const { code } = babel.transform(example, {
+      const code = transformWithPlugin(example, {
         filename: "src/Button.js",
         plugins: [plugin],
         presets: ["@babel/preset-react"],
@@ -82,22 +92,7 @@ describe("codepress-html-babel-plugin", () => {
       expect(code).toMatch(/\"codepress-data-fp\":\s*\"[^\"]+:\d+-\d+\"/);
     });
 
-    it("respects custom attribute name option", () => {
-      const example = `
-        function Button() {
-          return <button>Click me</button>;
-        }
-      `;
-
-      const { code } = babel.transform(example, {
-        filename: "src/Button.js",
-        plugins: [[plugin, { attributeName: "data-custom" }]],
-        presets: ["@babel/preset-react"],
-      });
-
-      expect(code).toContain("data-custom");
-      expect(code).not.toContain("codepress-data-fp");
-    });
+    // Removed: custom attribute name option is no longer supported to maintain compatibility with the extension
 
     it("processes elements and applies file path attributes", () => {
       const example = `
@@ -110,7 +105,7 @@ describe("codepress-html-babel-plugin", () => {
         }
       `;
 
-      const { code } = babel.transform(example, {
+      const code = transformWithPlugin(example, {
         filename: "src/App.js",
         plugins: [plugin],
         presets: ["@babel/preset-react"],
@@ -136,7 +131,7 @@ describe("codepress-html-babel-plugin", () => {
         }
       `;
 
-      const { code } = babel.transform(example, {
+      const code = transformWithPlugin(example, {
         filename: "src/App.js",
         plugins: [plugin],
         presets: ["@babel/preset-react"],
@@ -160,7 +155,7 @@ describe("codepress-html-babel-plugin", () => {
         }
       `;
 
-      const { code } = babel.transform(example, {
+      const code = transformWithPlugin(example, {
         filename: "src/App.js",
         plugins: [plugin],
         presets: ["@babel/preset-react"],
@@ -177,7 +172,7 @@ describe("codepress-html-babel-plugin", () => {
     it("skips files in node_modules", () => {
       const example = "<div></div>";
 
-      const { code } = babel.transform(example, {
+      const code = transformWithPlugin(example, {
         filename: "node_modules/some-lib/index.js",
         plugins: [plugin],
         presets: ["@babel/preset-react"],
@@ -190,7 +185,7 @@ describe("codepress-html-babel-plugin", () => {
     it("handles files without valid paths gracefully", () => {
       const example = "<div></div>";
 
-      const { code } = babel.transform(example, {
+      const code = transformWithPlugin(example, {
         filename: "", // Empty filename
         plugins: [plugin],
         presets: ["@babel/preset-react"],
@@ -205,7 +200,7 @@ describe("codepress-html-babel-plugin", () => {
     it("works without throwing errors", () => {
       // Transform code which will trigger git detection
       expect(() => {
-        babel.transform("<div></div>", {
+        transformWithPlugin("<div></div>", {
           filename: "src/Test.js",
           plugins: [plugin],
           presets: ["@babel/preset-react"],
@@ -219,7 +214,7 @@ describe("codepress-html-babel-plugin", () => {
         throw new Error("Not a git repository");
       });
 
-      const { code } = babel.transform("<div></div>", {
+      const code = transformWithPlugin("<div></div>", {
         filename: "src/Test.js",
         plugins: [plugin],
         presets: ["@babel/preset-react"],
@@ -242,7 +237,7 @@ describe("codepress-html-babel-plugin", () => {
       });
 
       expect(() => {
-        babel.transform("<div></div>", {
+        transformWithPlugin("<div></div>", {
           filename: "src/Test.js",
           plugins: [plugin],
           presets: ["@babel/preset-react"],
@@ -253,7 +248,7 @@ describe("codepress-html-babel-plugin", () => {
     it("handles HTTPS format git URLs", () => {
       // Use default mock which returns HTTPS URL
       expect(() => {
-        babel.transform("<div></div>", {
+        transformWithPlugin("<div></div>", {
           filename: "src/Test.js",
           plugins: [plugin],
           presets: ["@babel/preset-react"],
@@ -266,7 +261,7 @@ describe("codepress-html-babel-plugin", () => {
     it("respects custom repo attribute name", () => {
       const example = "<div></div>";
 
-      const { code } = babel.transform(example, {
+      const code = transformWithPlugin(example, {
         filename: "src/Test.js",
         plugins: [[plugin, { repoAttributeName: "data-repo" }]],
         presets: ["@babel/preset-react"],
@@ -279,7 +274,7 @@ describe("codepress-html-babel-plugin", () => {
     it("respects custom branch attribute name", () => {
       const example = "<div></div>";
 
-      const { code } = babel.transform(example, {
+      const code = transformWithPlugin(example, {
         filename: "src/Test.js",
         plugins: [[plugin, { branchAttributeName: "data-branch" }]],
         presets: ["@babel/preset-react"],
@@ -294,7 +289,7 @@ describe("codepress-html-babel-plugin", () => {
 
       // Should work without any configuration - repo and branch are auto-detected
       expect(() => {
-        babel.transform(example, {
+        transformWithPlugin(example, {
           filename: "src/Test.js",
           plugins: [plugin],
           presets: ["@babel/preset-react"],
@@ -310,7 +305,7 @@ describe("codepress-html-babel-plugin", () => {
 
       const example = "<div></div>";
 
-      const { code } = babel.transform(example, {
+      const code = transformWithPlugin(example, {
         filename: "src/Test.js",
         plugins: [plugin],
         presets: ["@babel/preset-react"],
@@ -331,7 +326,7 @@ describe("codepress-html-babel-plugin", () => {
       const example = "<div></div>";
 
       // Transform a file - each transform creates a new plugin instance
-      babel.transform(example, {
+      transformWithPlugin(example, {
         filename: "src/File1.js",
         plugins: [plugin],
         presets: ["@babel/preset-react"],
@@ -356,7 +351,7 @@ describe("codepress-html-babel-plugin", () => {
       // Since it's not exported, we'll test through the transformation
       const example = "<div></div>";
 
-      const { code } = babel.transform(example, {
+      const code = transformWithPlugin(example, {
         filename: "src/TestFile.js",
         plugins: [plugin],
         presets: ["@babel/preset-react"],
@@ -398,7 +393,7 @@ describe("codepress-html-babel-plugin", () => {
         }
       `;
 
-      const { code } = babel.transform(example, {
+      const code = transformWithPlugin(example, {
         filename: "src/Component.js",
         plugins: [plugin],
         presets: ["@babel/preset-react"],
@@ -421,7 +416,7 @@ describe("codepress-html-babel-plugin", () => {
         }
       `;
 
-      const { code } = babel.transform(example, {
+      const code = transformWithPlugin(example, {
         filename: "src/Component.js",
         plugins: [plugin],
         presets: ["@babel/preset-react"],
@@ -443,7 +438,7 @@ describe("codepress-html-babel-plugin", () => {
         }
       `;
 
-      const { code } = babel.transform(example, {
+      const code = transformWithPlugin(example, {
         filename: "src/Component.js",
         plugins: [plugin],
         presets: ["@babel/preset-react"],
@@ -466,7 +461,7 @@ describe("codepress-html-babel-plugin", () => {
         }
       `;
 
-      const { code } = babel.transform(example, {
+      const code = transformWithPlugin(example, {
         filename: "src/Component.js",
         plugins: [plugin],
         presets: ["@babel/preset-react"],

@@ -1,6 +1,7 @@
-const fs = require("fs");
-const path = require("path");
-const swc = require("@swc/core");
+import * as swc from "@swc/core";
+import * as fs from "fs";
+import * as path from "path";
+import createSWCPlugin from "../src/swc";
 
 describe("SWC Plugin Specific Tests", () => {
   const wasmPath = path.join(__dirname, "../swc/codepress_engine.wasm");
@@ -83,31 +84,19 @@ export default App;
 
   describe("Plugin Configuration Tests", () => {
     test("should handle default configuration", () => {
-      // Test that our plugin would use default config correctly
-      const defaultConfig = {
-        attributeName: "codepress-data-fp",
-        repoAttributeName: "codepress-github-repo-name",
-        branchAttributeName: "codepress-github-branch",
-      };
-
-      expect(defaultConfig.attributeName).toBe("codepress-data-fp");
-      expect(defaultConfig.repoAttributeName).toBe(
-        "codepress-github-repo-name"
-      );
-      expect(defaultConfig.branchAttributeName).toBe("codepress-github-branch");
+      // SWC plugin config is minimal and auto-detected
+      const [, config] = createSWCPlugin();
+      expect(config).toHaveProperty("repo_name");
+      expect(config).toHaveProperty("branch_name");
     });
 
     test("should handle custom configuration", () => {
-      // Test that our plugin would use custom config correctly
-      const customConfig = {
-        attributeName: "custom-fp",
-        repoAttributeName: "custom-repo",
-        branchAttributeName: "custom-branch",
-      };
-
-      expect(customConfig.attributeName).toBe("custom-fp");
-      expect(customConfig.repoAttributeName).toBe("custom-repo");
-      expect(customConfig.branchAttributeName).toBe("custom-branch");
+      const [, config] = createSWCPlugin({
+        repo_name: "owner/repo",
+        branch_name: "branch",
+      });
+      expect(config.repo_name).toBe("owner/repo");
+      expect(config.branch_name).toBe("branch");
     });
   });
 
@@ -123,26 +112,29 @@ export default App;
 
     test("package.json should have correct SWC exports", () => {
       const packageJson = require("../package.json");
-      expect(packageJson.exports["./swc"]).toBe("./swc/index.js");
+      expect(packageJson.exports["./swc"]).toEqual({
+        types: "./dist/swc/index.d.ts",
+        require: "./dist/swc/index.js",
+        default: "./dist/swc/index.js",
+      });
       expect(packageJson.exports["./swc/wasm"]).toBe(
-        "./swc/codepress_engine.wasm"
+        "./swc/codepress_engine.v42.wasm"
       );
     });
 
     test("should be loadable as Node.js module export", () => {
       // Test that the wrapper is loadable
-      const swcWrapper = require.resolve("@quantfive/codepress-engine/swc");
+      const swcWrapper = require.resolve("@codepress/codepress-engine/swc");
       expect(fs.existsSync(swcWrapper)).toBe(true);
       expect(swcWrapper.endsWith("index.js")).toBe(true);
 
       // Test that the WASM file is accessible via the wasm export
-      const wasmPath = require.resolve("@quantfive/codepress-engine/swc/wasm");
+      const wasmPath = require.resolve("@codepress/codepress-engine/swc/wasm");
       expect(fs.existsSync(wasmPath)).toBe(true);
-      expect(wasmPath.endsWith("codepress_engine.wasm")).toBe(true);
+      expect(wasmPath.endsWith("codepress_engine.v42.wasm")).toBe(true);
     });
 
     test("SWC wrapper should auto-detect git information", () => {
-      const createSWCPlugin = require("../swc/index.js");
       const pluginConfig = createSWCPlugin();
 
       // Should return array with WASM path and config
@@ -153,8 +145,8 @@ export default App;
       expect(typeof wasmRef).toBe("string");
       // Accept module specifier (preferred) or absolute path for backward-compat
       const isSpecifierOrPath =
-        wasmRef === "@quantfive/codepress-engine/swc/wasm" ||
-        wasmRef.endsWith("codepress_engine.wasm");
+        wasmRef.startsWith("@codepress/codepress-engine/swc/wasm") ||
+        wasmRef.endsWith("codepress_engine.v42.wasm");
       expect(isSpecifierOrPath).toBe(true);
       expect(typeof config).toBe("object");
 
