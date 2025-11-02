@@ -7,6 +7,10 @@ import * as os from "node:os";
 import * as path from "node:path";
 
 import { startServer } from "./server";
+import {
+  previewBundle,
+  type PreviewBundleResult,
+} from "./previewBundle";
 
 const args = process.argv.slice(2);
 let activeServer: FastifyInstance | null = null;
@@ -158,6 +162,7 @@ function showHelp(): void {
 \x1b[1mCommands:\x1b[0m
   server          Start the development server
   setup           Setup dependencies for the visual editor
+  preview-bundle  Bundle entries for Codepress preview
   <command>       Run any command with the server running in background
   help            Show this help message
 
@@ -165,7 +170,86 @@ function showHelp(): void {
   codepress server              Start the server only
   codepress setup               Install required dependencies
   codepress npm start           Run npm start with server in background
+  codepress preview-bundle --entry src/components/Button.tsx --json
   `);
+}
+
+interface PreviewBundleCLIOptions {
+  entries: string[];
+  repoName?: string;
+  branchName?: string;
+  tsconfigPath?: string;
+  json: boolean;
+}
+
+function parsePreviewBundleArgs(args: string[]): PreviewBundleCLIOptions {
+  const entries: string[] = [];
+  let repoName: string | undefined;
+  let branchName: string | undefined;
+  let tsconfigPath: string | undefined;
+  let json = false;
+
+  for (let i = 0; i < args.length; i += 1) {
+    const arg = args[i];
+    if (arg === "--entry" || arg === "-e") {
+      const value = args[i + 1];
+      if (!value) {
+        throw new Error("--entry requires a value");
+      }
+      entries.push(value);
+      i += 1;
+    } else if (arg.startsWith("--entry=")) {
+      entries.push(arg.slice("--entry=".length));
+    } else if (arg === "--repo-name") {
+      repoName = args[i + 1];
+      if (!repoName) throw new Error("--repo-name requires a value");
+      i += 1;
+    } else if (arg.startsWith("--repo-name=")) {
+      repoName = arg.slice("--repo-name=".length);
+    } else if (arg === "--branch-name") {
+      branchName = args[i + 1];
+      if (!branchName) throw new Error("--branch-name requires a value");
+      i += 1;
+    } else if (arg.startsWith("--branch-name=")) {
+      branchName = arg.slice("--branch-name=".length);
+    } else if (arg === "--tsconfig") {
+      tsconfigPath = args[i + 1];
+      if (!tsconfigPath) throw new Error("--tsconfig requires a value");
+      i += 1;
+    } else if (arg.startsWith("--tsconfig=")) {
+      tsconfigPath = arg.slice("--tsconfig=".length);
+    } else if (arg === "--json") {
+      json = true;
+    } else if (!arg.startsWith("-")) {
+      entries.push(arg);
+    } else {
+      throw new Error(`Unknown option: ${arg}`);
+    }
+  }
+
+  return { entries, repoName, branchName, tsconfigPath, json };
+}
+
+function printPreviewBundleResult(
+  result: PreviewBundleResult,
+  json: boolean
+): void {
+  if (json) {
+    process.stdout.write(JSON.stringify(result));
+    return;
+  }
+  for (const mod of result.modules) {
+    if (mod.error) {
+      console.error(`✗ ${mod.entry} (${mod.error}): ${mod.buildError ?? ""}`);
+    } else {
+      console.log(`✓ ${mod.entry}`);
+      if (mod.warnings.length) {
+        for (const warning of mod.warnings) {
+          console.warn(`  warning: ${warning}`);
+        }
+      }
+    }
+  }
 }
 
 async function main(): Promise<void> {
@@ -177,6 +261,45 @@ async function main(): Promise<void> {
   const [command, ...rest] = args;
 
   switch (command) {
+    case "preview-bundle": {
+      let parsed: PreviewBundleCLIOptions;
+      try {
+        parsed = parsePreviewBundleArgs(rest);
+      } catch (error) {
+        console.error(
+          `\x1b[31m✗ ${(error as Error).message}\x1b[0m`
+        );
+        process.exit(1);
+        return;
+      }
+      if (parsed.entries.length === 0) {
+        console.error(
+          "\x1b[31m✗ preview-bundle requires at least one --entry\x1b[0m"
+        );
+        process.exit(1);
+      }
+      try {
+        const result = await previewBundle({
+          entries: parsed.entries,
+          absWorkingDir: process.cwd(),
+          repoName: parsed.repoName,
+          branchName: parsed.branchName,
+          tsconfigPath: parsed.tsconfigPath,
+          quiet: parsed.json,
+        });
+        printPreviewBundleResult(result, parsed.json);
+        const hasError = result.modules.some((mod) => mod.error);
+        if (hasError) {
+          process.exit(1);
+        }
+      } catch (error) {
+        console.error(
+          `\x1b[31m✗ ${(error as Error).message}\x1b[0m`
+        );
+        process.exit(1);
+      }
+      break;
+    }
     case "server": {
       const server = await ensureServer();
       registerSignalHandlers();

@@ -735,6 +735,17 @@ async function handleStreamingAgentRequest({
   const { encoded_location, github_repo_name, user_instruction, branch_name } =
     data;
 
+  // Debug request
+  console.log("[engine] handleStreamingAgentRequest start", {
+    encoded_location,
+    github_repo_name,
+    branch_name,
+    user_instruction_len:
+      typeof user_instruction === "string"
+        ? user_instruction.length
+        : undefined,
+    hasAuth: !!authHeader,
+  });
   // Set up Server-Sent Events headers
   reply.raw.writeHead(200, {
     "Content-Type": "text/event-stream",
@@ -749,6 +760,10 @@ async function handleStreamingAgentRequest({
     eventData: StreamingEvent
   ): Promise<void> {
     try {
+      console.log("[engine] writeIncrementalUpdate begin", {
+        type: eventData?.type,
+        file_path: eventData?.file_path,
+      });
       if (
         eventData &&
         eventData.type === "file_update" &&
@@ -839,6 +854,11 @@ async function handleStreamingAgentRequest({
         },
         authHeader,
         async (evt) => {
+          console.log("[engine] stream event", {
+            type: (evt as any)?.type,
+            file_path: (evt as any)?.file_path,
+            success: (evt as any)?.success,
+          });
           await writeIncrementalUpdate(evt);
           sendEvent(evt);
         }
@@ -1184,6 +1204,11 @@ function createApp(): FastifyInstance {
         console.log(
           `\x1b[36mℹ [visual-editor-api-agent] Auth header received: ${authHeader ? "[PRESENT]" : "[MISSING]"}, Always streaming\x1b[0m`
         );
+        console.log("[engine] /visual-editor-api-agent", {
+          encoded_location,
+          hasImage: !!image_data,
+          filename,
+        });
 
         if (!encoded_location) {
           return reply.code(400).send({ error: "Missing encoded_location" });
@@ -1217,6 +1242,9 @@ function createApp(): FastifyInstance {
     ) => {
       try {
         const { updated_files } = request.body;
+        console.log("[engine] /write-files incoming", {
+          files: updated_files ? Object.keys(updated_files).length : 0,
+        });
 
         if (!updated_files || typeof updated_files !== "object") {
           return reply.code(400).send({
