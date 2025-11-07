@@ -606,6 +606,60 @@ async function getChanges({
  * @param {string} targetFile Target file path
  * @returns {Promise<string>} Formatted code
  */
+function isNonCodeAsset(filePath: string): boolean {
+  const lower = (filePath || "").toLowerCase();
+  const nonCodeExts = [
+    // images
+    "svg",
+    "png",
+    "jpg",
+    "jpeg",
+    "gif",
+    "webp",
+    "avif",
+    "bmp",
+    "ico",
+    "tif",
+    "tiff",
+    // media
+    "mp3",
+    "wav",
+    "ogg",
+    "mp4",
+    "webm",
+    "mov",
+    "avi",
+    "mkv",
+    // documents/archives/binary
+    "pdf",
+    "zip",
+    "tar",
+    "gz",
+    "bz2",
+    "7z",
+    // fonts
+    "woff",
+    "woff2",
+    "ttf",
+    "otf",
+    "eot",
+    // other
+    "wasm",
+    "psd",
+    "ai",
+    "sketch",
+    "heic",
+    "dmg",
+    "icns",
+  ];
+  return nonCodeExts.some((ext) => lower.endsWith("." + ext));
+}
+
+function shouldSkipPrettier(filePath: string): boolean {
+  // Treat SVG and other non-code assets as raw content; do not format
+  return isNonCodeAsset(filePath);
+}
+
 function pickPrettierParser(filePath: string): prettier.BuiltInParserName {
   const lower = (filePath || "").toLowerCase();
   if (lower.endsWith(".ts") || lower.endsWith(".tsx")) return "typescript";
@@ -616,6 +670,9 @@ async function tryFormatWithPrettierOrNull(
   code: string,
   filePath: string
 ): Promise<string | null> {
+  if (shouldSkipPrettier(filePath)) {
+    return code; // leave non-code assets untouched
+  }
   try {
     const result = await Promise.resolve(
       prettier.format(code, {
@@ -688,17 +745,21 @@ async function applyFullFileReplacement(
 
   let formattedCode = "";
   if (typeof modifiedContent === "string") {
-    // Format with Prettier
-    try {
-      formattedCode = await prettier.format(modifiedContent, {
-        parser: pickPrettierParser(targetFile),
-        semi: true,
-        singleQuote: false,
-      });
-    } catch (prettierError) {
-      console.error("Prettier formatting failed:", prettierError);
-      // If formatting fails, use the unformatted code
+    // Format with Prettier unless this is a non-code asset (e.g., svg, images, fonts)
+    if (shouldSkipPrettier(targetFile)) {
       formattedCode = modifiedContent;
+    } else {
+      try {
+        formattedCode = await prettier.format(modifiedContent, {
+          parser: pickPrettierParser(targetFile),
+          semi: true,
+          singleQuote: false,
+        });
+      } catch (prettierError) {
+        console.error("Prettier formatting failed:", prettierError);
+        // If formatting fails, use the unformatted code
+        formattedCode = modifiedContent;
+      }
     }
     fs.writeFileSync(targetFile, formattedCode, "utf8");
   } else if (modifiedContent.type === "binary" && modifiedContent.base64) {
