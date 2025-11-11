@@ -1175,6 +1175,13 @@ impl CodePressTransform {
         if self.inserted_stamp_helper {
             return;
         }
+        // Do not inject into third-party bundles (e.g., node_modules, next/dist)
+        let _ = self.file_from_span(m.span);
+        let file = self.current_file();
+        let lower = file.to_lowercase();
+        if lower.contains("node_modules/") || lower.contains("\\node_modules\\") || lower.contains("next/dist/") {
+            return;
+        }
         // Inject helper via a small runtime snippet executed with new Function
         let js = "try{var g=(typeof globalThis!=='undefined'?globalThis:window);if(!g.__CP_stamp)g.__CP_stamp=function(v,id,fp){try{if(v&&(typeof v==='function'||typeof v==='object')&&Object.isExtensible(v)){v.__cp_id=id;v.__cp_fp=fp;}}catch(_e){}return v;}}catch(_e){}";
         let stmt = ModuleItem::Stmt(Stmt::Expr(ExprStmt {
@@ -1195,7 +1202,9 @@ impl CodePressTransform {
                 ctxt: SyntaxContext::empty(),
             })),
         }));
-        m.body.insert(0, stmt);
+        // Place AFTER directive prologue (e.g., "use client"; "use strict")
+        let insert_at = self.directive_insert_index(m);
+        m.body.insert(insert_at, stmt);
         self.inserted_stamp_helper = true;
     }
 }
