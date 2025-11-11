@@ -1,133 +1,119 @@
-# Installation Guide
+# Development & Installation Guide
 
-This package uses a **build branch** approach to keep the main branch clean. All build artifacts (compiled WASM, transpiled JS) are automatically built and deployed to the `build` branch.
+This document outlines the recommended workflow for working on `@codepress/codepress-engine`, linking it locally, and preparing releases.
 
-## For Team Members (GitHub Install)
+---
 
-### Install from Build Branch
-
-```bash
-# Install the latest build from GitHub
-npm install github:quantfive/codepress-engine#build
-
-# Or with yarn
-yarn add github:quantfive/codepress-engine#build
-
-# Alternative shorthand syntax
-npm install quantfive/codepress-engine#build
-```
-
-### Local Development Setup
+## 1. Local setup
 
 ```bash
-# Clone and set up for local development
 git clone https://github.com/quantfive/codepress-engine.git
 cd codepress-engine
 
 # Install dependencies
 npm install
 
-# Build everything locally (creates dist/ and swc/ folders)
-npm run dev:link
+# Compile TypeScript into dist/
+npm run build
 
-# Link for local testing
-# (This runs build + build:rust + npm link)
+# (Optional) rebuild the SWC WASM binaries
+npm run build:rust
 ```
 
-## For End Users (NPM Install)
+The repository expects **Node 18.17.0+**. Earlier runtimes can execute most tests but will skip Fastify-specific assertions.
 
-Once published to npm:
+---
+
+## 2. Linking into another project
+
+1. Build the package in the repository root:
+   ```bash
+   npm run build
+   ```
+2. Expose it globally via `npm link`:
+   ```bash
+   npm link
+   ```
+3. Inside your application:
+   ```bash
+   npm link @codepress/codepress-engine
+   ```
+4. Run your build tooling. Babel/SWC will consume the compiled plugin from `dist/`.
+
+Whenever you make local changes, run `npm run build` again before re-running the consumer project.
+
+---
+
+## 3. CLI quick start
 
 ```bash
-npm install @quantfive/codepress-engine
+# Show commands
+npx codepress help
+
+# Generate or update .env entries
+npx codepress setup
+
+# Launch development server
+npx codepress server
 ```
 
-## Usage
+The CLI scaffolds `.env` entries (`CODEPRESS_BACKEND_HOST`, `CODEPRESS_API_TOKEN`, etc.) and runs the Fastify dev server on port `4321` by default.
 
-### Next.js (SWC Plugin)
+---
 
-```javascript
-// next.config.js
-/** @type {import('next').NextConfig} */
-const nextConfig = {
-  experimental: {
-    swcPlugins: [["@quantfive/codepress-engine/swc", {}]],
-  },
-};
+## 4. Publishing checklist
 
-module.exports = nextConfig;
-```
+1. Ensure the TypeScript build and tests succeed:
+   ```bash
+   npm run build
+   npm test
+   ```
+2. Rebuild the SWC binaries if changes landed under `codepress-swc-plugin/`:
+   ```bash
+   npm run build:rust
+   ```
+3. Bump the version:
+   ```bash
+   npm version <patch|minor|major>
+   ```
+4. Publish to npm (ensure you are logged in and targeting the correct registry):
+   ```bash
+   npm publish
+   ```
 
-### Babel Plugin
+> The historical "build" branch flow is no longer required—the package now ships TypeScript sources and produces artifacts during `npm run build`.
 
-```javascript
-// babel.config.js
-module.exports = {
-  plugins: [["@quantfive/codepress-engine/babel", {}]],
-};
-```
-
-## Development Workflow
-
-### Main Branch
-
-- ✅ Source code only
-- ✅ Clean PRs without build artifacts
-- ✅ Easy to review changes
-
-### Build Branch (Auto-updated)
-
-- ✅ Contains all build artifacts
-- ✅ Ready-to-use package
-- ✅ Updated automatically on every push to main
-
-### Local Testing
-
-```bash
-# Make changes to source code
-# Then rebuild and test locally:
-npm run dev:link
-
-# In your test project:
-npm link @quantfive/codepress-engine
-```
-
-## Branch Structure
-
-```
-main branch (source code)
-├── src/           (JavaScript source)
-├── babel/         (Babel plugin source)
-├── codepress-swc-plugin/  (Rust source)
-├── tests/         (Test files)
-└── package.json
-
-build branch (artifacts) - Auto-generated
-├── dist/          (Built JavaScript)
-├── babel/         (Babel plugin)
-├── swc/           (Built WASM)
-├── examples/      (Usage examples)
-└── package.json
-```
+---
 
 ## Troubleshooting
 
-### "Module not found" Error
+### Missing Fastify diagnostics channel
 
-Make sure you're installing from the `build` branch:
+If you see `diagnostics.tracingChannel is not a function`, upgrade to Node 18+. The tests guard against this by skipping Fastify integration suites on unsupported runtimes.
+
+### Local link not picking up changes
+
+After editing sources always run `npm run build`. The Babel/SWC entry points read from `dist/`, not directly from `src/`.
+
+### Unable to resolve SWC WASM
+
+Set `CODEPRESS_SWC_WASM` to an explicit package export, e.g.:
 
 ```bash
-npm install github:quantfive/codepress-engine#build
+CODEPRESS_SWC_WASM=@codepress/codepress-engine/swc/wasm-v42
 ```
 
-### Local Development Issues
-
-If local linking isn't working:
+### Cleaning the environment
 
 ```bash
-# Rebuild everything
-npm run dev:link
+npm unlink @codepress/codepress-engine
+npm unlink
+```
 
-# Check what's linked globally
-npm list -g --depth=0 | grep codepress
+or reinstall dependencies from scratch:
+
+```bash
+rm -rf node_modules dist
+npm install
+npm run build
 ```

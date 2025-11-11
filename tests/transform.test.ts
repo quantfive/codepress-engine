@@ -1,10 +1,19 @@
-const fs = require("fs");
-const path = require("path");
-const babel = require("@babel/core");
-const swc = require("@swc/core");
+import * as babel from "@babel/core";
+import fs from "fs";
+import path from "path";
 
-// Import our plugins
-const babelPlugin = require("../babel/index.js");
+const babelPlugin = require("../babel");
+
+function transformCode(
+  source: string,
+  options: babel.TransformOptions
+): string {
+  const result = babel.transform(source, options);
+  if (!result || !result.code) {
+    throw new Error("Babel transform did not produce output");
+  }
+  return result.code;
+}
 
 describe("CodePress Transform Plugins", () => {
   const testJSX = `
@@ -26,34 +35,24 @@ export default App;
 
   describe("Babel Plugin", () => {
     test("should add codepress attributes to JSX elements", () => {
-      const result = babel.transformSync(testJSX, {
-        plugins: [
-          ["@babel/plugin-syntax-jsx"],
-          [
-            babelPlugin,
-            {
-              attributeName: "codepress-data-fp",
-              repoAttributeName: "codepress-github-repo-name",
-              branchAttributeName: "codepress-github-branch",
-            },
-          ],
-        ],
+      const code = transformCode(testJSX, {
+        plugins: [["@babel/plugin-syntax-jsx"], [babelPlugin]],
         filename: "test.jsx",
       });
 
-      expect(result.code).toContain("codepress-data-fp=");
-      expect(result.code).toMatch(/codepress-data-fp="[^"]+"/);
+      expect(code).toContain("codepress-data-fp=");
+      expect(code).toMatch(/codepress-data-fp="[^"]+"/);
     });
 
     test("should handle empty JSX correctly", () => {
       const emptyJSX = "<div />";
 
-      const result = babel.transformSync(emptyJSX, {
+      const code = transformCode(emptyJSX, {
         plugins: [["@babel/plugin-syntax-jsx"], [babelPlugin]],
         filename: "empty.jsx",
       });
 
-      expect(result.code).toContain("codepress-data-fp=");
+      expect(code).toContain("codepress-data-fp=");
     });
   });
 
@@ -76,8 +75,8 @@ export default App;
 
   describe("Package Exports", () => {
     test("should export babel plugin correctly", () => {
-      const babel = require("../babel/index.js");
-      expect(typeof babel).toBe("function");
+      const exportedPlugin = require("../babel");
+      expect(typeof exportedPlugin).toBe("function");
     });
 
     test("should have correct file structure", () => {

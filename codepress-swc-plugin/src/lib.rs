@@ -135,9 +135,28 @@ pub struct CodePressTransform {
     // -------- module graph (this module only) --------
     module_file: Option<String>,
     graph: ModuleGraph,
+
+    // Skips: components we should not wrap (to avoid interfering with pass-through libs)
+    skip_components: std::collections::HashSet<String>,      // e.g., ["Slot", "Link"]
+    skip_member_roots: std::collections::HashSet<String>,    // e.g., ["Primitive"] for <Primitive.*>
 }
 
 impl CodePressTransform {
+    /// Finds the index immediately after the directive prologue (e.g. "use client", "use strict").
+    /// Any injected statements should be inserted at this index to avoid preceding directives.
+    fn directive_insert_index(&self, m: &Module) -> usize {
+        let mut idx = 0;
+        for item in &m.body {
+            if let ModuleItem::Stmt(Stmt::Expr(ExprStmt { expr, .. })) = item {
+                if let Expr::Lit(Lit::Str(_)) = &**expr {
+                    idx += 1;
+                    continue;
+                }
+            }
+            break;
+        }
+        idx
+    }
     pub fn new(
         mut config: HashMap<String, serde_json::Value>,
         source_map: Option<std::sync::Arc<dyn SourceMapper>>,
@@ -155,6 +174,39 @@ impl CodePressTransform {
             .remove("stampCallsites")
             .and_then(|v| v.as_bool())
             .unwrap_or(true);
+
+        // Parse optional skip lists from config
+        fn read_string_set(map: &mut HashMap<String, serde_json::Value>, key: &str) -> std::collections::HashSet<String> {
+            let mut out: std::collections::HashSet<String> = Default::default();
+            if let Some(raw) = map.remove(key) {
+                if let Some(arr) = raw.as_array() {
+                    for v in arr {
+                        if let Some(s) = v.as_str() {
+                            out.insert(s.to_string());
+                        }
+                    }
+                } else if let Some(s) = raw.as_str() {
+                    // allow comma-separated string for convenience
+                    for part in s.split(',') {
+                        let p = part.trim();
+                        if !p.is_empty() { out.insert(p.to_string()); }
+                    }
+                }
+            }
+            out
+        }
+
+        let mut skip_components = read_string_set(&mut config, "skip_components");
+        let mut skip_member_roots = read_string_set(&mut config, "skip_member_roots");
+        if skip_components.is_empty() {
+            // Safe defaults: Radix Slot, Next.js Link
+            skip_components.insert("Slot".to_string());
+            skip_components.insert("Link".to_string());
+        }
+        if skip_member_roots.is_empty() {
+            // Radix Primitive.* family
+            skip_member_roots.insert("Primitive".to_string());
+        }
 
         Self {
             repo_name,
@@ -176,6 +228,8 @@ impl CodePressTransform {
                 mutations: vec![],
                 literal_index: vec![],
             },
+            skip_components,
+            skip_member_roots,
         }
     }
 
@@ -276,7 +330,42 @@ impl CodePressTransform {
         }
     }
 
+    /// Return true if this element is a custom component we should skip wrapping.
+    fn is_skip_component(&self, name: &JSXElementName) -> bool {
+        match name {
+            JSXElementName::Ident(ident) => {
+                let n = ident.sym.as_ref();
+                self.skip_components.contains(n)
+            }
+            JSXElementName::JSXMemberExpr(m) => {
+                // check root object of chain
+                let mut obj = &m.obj;
+                while let JSXObject::JSXMemberExpr(inner) = obj { obj = &inner.obj; }
+                if let JSXObject::Ident(root) = obj {
+                    let n = root.sym.as_ref();
+                    self.skip_member_roots.contains(n)
+                } else { false }
+            }
+            JSXElementName::JSXNamespacedName(_) => false,
+        }
+    }
+
+    fn has_attr_key(attrs: &[JSXAttrOrSpread], key: &str) -> bool {
+        attrs.iter().any(|a| {
+            if let JSXAttrOrSpread::JSXAttr(attr) = a {
+                if let JSXAttrName::Ident(id) = &attr.name {
+                    return id.sym.as_ref() == key;
+                }
+            }
+            false
+        })
+    }
+
     fn attach_attr_string(attrs: &mut Vec<JSXAttrOrSpread>, key: &str, val: String) {
+        // Do not override existing props; only add if absent
+        if Self::has_attr_key(attrs, key) {
+            return;
+        }
         attrs.push(JSXAttrOrSpread::JSXAttr(JSXAttr {
             span: DUMMY_SP,
             name: JSXAttrName::Ident(cp_ident_name(key.into())),
@@ -391,7 +480,8 @@ impl CodePressTransform {
                 ctxt: SyntaxContext::empty(),
             })),
         }));
-        m.body.insert(0, stmt);
+        let insert_at = self.directive_insert_index(m);
+        m.body.insert(insert_at, stmt);
     }
 
     fn get_line_info(
@@ -909,6 +999,14 @@ impl CodePressTransform {
         if self.inserted_provider_import {
             return;
         }
+
+        // Only inject into TSX files to avoid emitting JSX into .ts modules
+        // Establish current file from the module span if available
+        let _ = self.file_from_span(m.span);
+        let file = self.current_file();
+        if !file.ends_with(".tsx") {
+            return;
+        }
         // import { createContext } from "react";
         let import_decl = ModuleItem::ModuleDecl(ModuleDecl::Import(ImportDecl {
             span: DUMMY_SP,
@@ -1061,11 +1159,13 @@ impl CodePressTransform {
             })))
         };
 
-        // Prepend in order
-        m.body.insert(0, provider_fn);
-        m.body.insert(0, cpx_name_stmt);
-        m.body.insert(0, cpx_decl);
-        m.body.insert(0, import_decl);
+        // Insert after any top-of-file directives, preserving order: import, const, displayName, function
+        let insert_at = self.directive_insert_index(m);
+        // Insert in reverse so the final order is preserved
+        m.body.insert(insert_at, provider_fn);
+        m.body.insert(insert_at, cpx_name_stmt);
+        m.body.insert(insert_at, cpx_decl);
+        m.body.insert(insert_at, import_decl);
         self.inserted_provider_import = true;
     }
 
@@ -2016,11 +2116,14 @@ impl VisitMut for CodePressTransform {
         };
 
         // Preserve your original attribute on EVERY JSX element
-        node.opening.attrs.push(self.create_encoded_path_attr(
-            &filename,
-            node.opening.span,
-            Some(node.span),
-        ));
+        // Only add our fingerprint if it does not already exist
+        if !Self::has_attr_key(&node.opening.attrs, "codepress-data-fp") {
+            node.opening.attrs.push(self.create_encoded_path_attr(
+                &filename,
+                node.opening.span,
+                Some(node.span),
+            ));
+        }
 
         // Optional: stamp callsites for local identifiers used as components
         if self.stamp_callsites {
@@ -2186,8 +2289,10 @@ impl VisitMut for CodePressTransform {
         let symrefs_json = serde_json::to_string(&symrefs).unwrap_or_else(|_| "[]".into());
         let symrefs_enc = xor_encode(&symrefs_json);
 
-        // Always-on behavior for custom component callsites:
-        let is_custom_call = !is_host && Self::is_custom_component_name(&node.opening.name);
+        // Always-on behavior for custom component callsites (excluding skip list):
+        let is_custom_call = !is_host
+            && Self::is_custom_component_name(&node.opening.name)
+            && !self.is_skip_component(&node.opening.name);
 
         if is_custom_call {
             // DOM wrapper (display: contents) carrying callsite; we also duplicate metadata on the invocation
@@ -2210,36 +2315,16 @@ impl VisitMut for CodePressTransform {
                 },
             );
 
-            // Duplicate metadata on invocation
-            CodePressTransform::attach_attr_string(
-                &mut original.opening.attrs,
-                "data-codepress-edit-candidates",
-                cands_enc.clone(),
-            );
-            CodePressTransform::attach_attr_string(
-                &mut original.opening.attrs,
-                "data-codepress-source-kinds",
-                kinds_enc.clone(),
-            );
-            if let JSXAttrOrSpread::JSXAttr(a) =
-                self.create_encoded_path_attr(&filename, orig_open_span, Some(orig_full_span))
-            {
-                original
-                    .opening
-                    .attrs
-                    .push(JSXAttrOrSpread::JSXAttr(JSXAttr {
-                        span: DUMMY_SP,
-                        name: JSXAttrName::Ident(cp_ident_name("data-codepress-callsite".into())),
-                        value: a.value,
-                    }));
-            }
+            // Intentionally avoid duplicating metadata onto the custom component invocation
+            // to prevent interfering with component prop forwarding (e.g., Radix Slot).
 
             wrapper
                 .children
                 .push(JSXElementChild::JSXElement(Box::new(original)));
             *node = wrapper;
 
-            // Also wrap with non-DOM Provider carrying same payload (context crosses portals, no DOM added)
+            /*
+            // Provider wrapping temporarily disabled; to re-enable, uncomment this block.
             let cs_enc = if let JSXAttrOrSpread::JSXAttr(a) =
                 self.create_encoded_path_attr(&filename, orig_open_span, Some(orig_full_span))
             {
@@ -2271,23 +2356,13 @@ impl VisitMut for CodePressTransform {
                 fp: fp_enc,
             };
             self.wrap_with_provider(node, meta);
+            */
 
             let attrs = &mut node.opening.attrs;
-            CodePressTransform::attach_attr_string(
-                attrs,
-                "data-codepress-edit-candidates",
-                cands_enc.clone(),
-            );
-            CodePressTransform::attach_attr_string(
-                attrs,
-                "data-codepress-source-kinds",
-                kinds_enc.clone(),
-            );
-            CodePressTransform::attach_attr_string(
-                attrs,
-                "data-codepress-symbol-refs",
-                symrefs_enc.clone(),
-            );
+            // Only annotate the injected wrappers (provider or host wrapper), not the invocation element
+            CodePressTransform::attach_attr_string(attrs, "data-codepress-edit-candidates", cands_enc.clone());
+            CodePressTransform::attach_attr_string(attrs, "data-codepress-source-kinds", kinds_enc.clone());
+            CodePressTransform::attach_attr_string(attrs, "data-codepress-symbol-refs", symrefs_enc.clone());
         } else {
             // Host element → tag directly
             CodePressTransform::attach_attr_string(
@@ -2305,14 +2380,18 @@ impl VisitMut for CodePressTransform {
                 "data-codepress-symbol-refs",
                 symrefs_enc.clone(),
             );
-            if let JSXAttrOrSpread::JSXAttr(a) =
-                self.create_encoded_path_attr(&filename, node.opening.span, Some(node.span))
-            {
-                node.opening.attrs.push(JSXAttrOrSpread::JSXAttr(JSXAttr {
-                    span: DUMMY_SP,
-                    name: JSXAttrName::Ident(cp_ident_name("data-codepress-callsite".into())),
-                    value: a.value,
-                }));
+            if !Self::has_attr_key(&node.opening.attrs, "data-codepress-callsite") {
+                if let JSXAttrOrSpread::JSXAttr(a) = self.create_encoded_path_attr(
+                    &filename,
+                    node.opening.span,
+                    Some(node.span),
+                ) {
+                    node.opening.attrs.push(JSXAttrOrSpread::JSXAttr(JSXAttr {
+                        span: DUMMY_SP,
+                        name: JSXAttrName::Ident(cp_ident_name("data-codepress-callsite".into())),
+                        value: a.value,
+                    }));
+                }
             }
         }
     }
