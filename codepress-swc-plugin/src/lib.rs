@@ -1234,16 +1234,34 @@ impl CodePressTransform {
                 #[cfg(not(feature = "compat_0_87"))]
                 ctxt: SyntaxContext::empty(),
             })));
-            // if (!window.__CP_triggerRefresh) window.__CP_triggerRefresh = function(){ window.dispatchEvent(new CustomEvent("CP_PREVIEW_REFRESH")); }
+            // if (typeof window !== "undefined" && !window.__CP_triggerRefresh) window.__CP_triggerRefresh = function(){ window.dispatchEvent(new CustomEvent("CP_PREVIEW_REFRESH")); }
             let if_stmt = Stmt::If(IfStmt {
                 span: DUMMY_SP,
-                test: Box::new(Expr::Unary(UnaryExpr {
+                test: Box::new(Expr::Logical(LogicalExpr {
                     span: DUMMY_SP,
-                    op: UnaryOp::Bang,
-                    arg: Box::new(Expr::Member(MemberExpr {
+                    op: LogicalOp::And,
+                    left: Box::new(Expr::Bin(BinExpr {
                         span: DUMMY_SP,
-                        obj: Box::new(Expr::Ident(cp_ident("window".into()))),
-                        prop: MemberProp::Ident(cp_ident_name("__CP_triggerRefresh".into())),
+                        op: BinaryOp::NotEqEq,
+                        left: Box::new(Expr::Unary(UnaryExpr {
+                            span: DUMMY_SP,
+                            op: UnaryOp::TypeOf,
+                            arg: Box::new(Expr::Ident(cp_ident("window".into()))),
+                        })),
+                        right: Box::new(Expr::Lit(Lit::Str(Str {
+                            span: DUMMY_SP,
+                            value: "undefined".into(),
+                            raw: None,
+                        }))),
+                    })),
+                    right: Box::new(Expr::Unary(UnaryExpr {
+                        span: DUMMY_SP,
+                        op: UnaryOp::Bang,
+                        arg: Box::new(Expr::Member(MemberExpr {
+                            span: DUMMY_SP,
+                            obj: Box::new(Expr::Ident(cp_ident("window".into()))),
+                            prop: MemberProp::Ident(cp_ident_name("__CP_triggerRefresh".into())),
+                        })),
                     })),
                 })),
                 cons: Box::new(Stmt::Expr(ExprStmt {
