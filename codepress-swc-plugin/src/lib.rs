@@ -2187,6 +2187,24 @@ impl VisitMut for CodePressTransform {
                     span: self.span_file_lines(ea.span),
                 });
             }
+            ModuleDecl::ExportDefaultExpr(edx) => {
+                // Wrap default export expression with __CP_stamp(expr, "<fp>#default", "<fp>")
+                let file = self.current_file();
+                let enc = xor_encode(&file);
+                let original = edx.expr.take();
+                edx.expr = Box::new(Expr::Call(CallExpr {
+                    span: DUMMY_SP,
+                    callee: Callee::Expr(Box::new(Expr::Ident(cp_ident("__CP_stamp".into())))),
+                    args: vec![
+                        ExprOrSpread { spread: None, expr: original },
+                        ExprOrSpread { spread: None, expr: Box::new(Expr::Lit(Lit::Str(Str { span: DUMMY_SP, value: format!("{}#{}", enc, "default").into(), raw: None }))) },
+                        ExprOrSpread { spread: None, expr: Box::new(Expr::Lit(Lit::Str(Str { span: DUMMY_SP, value: enc.into(), raw: None }))) },
+                    ],
+                    type_args: None,
+                    #[cfg(not(feature = "compat_0_87"))]
+                    ctxt: SyntaxContext::empty(),
+                }));
+            }
             ModuleDecl::ExportDefaultDecl(ed) => {
                 if let DefaultDecl::Fn(f) = &ed.decl {
                     if let Some(id) = &f.ident {
