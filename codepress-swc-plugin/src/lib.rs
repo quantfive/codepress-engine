@@ -234,6 +234,30 @@ impl CodePressTransform {
     }
 
     // ---------- helpers ----------
+    fn normalize_repo_relative(&self, filename: &str) -> String {
+        let mut s = normalize_filename(filename);
+        let mut s_norm = s.replace('\\', "/");
+        if let Some(repo_full) = &self.repo_name {
+            // Fallback: strip up to the last "/<repo>/" segment when repo_root isn't provided
+            let repo_seg = repo_full.split('/').last().unwrap_or(repo_full);
+            if !repo_seg.is_empty() {
+                let needle = format!("/{}/", repo_seg);
+                if let Some(idx) = s_norm.find(&needle) {
+                    let cut = idx + needle.len();
+                    if cut <= s_norm.len() {
+                        s_norm = s_norm[cut..].to_string();
+                    }
+                } else {
+                    // Handle trailing "/<repo>"
+                    let trail = format!("/{}", repo_seg);
+                    if s_norm.ends_with(&trail) {
+                        s_norm.clear();
+                    }
+                }
+            }
+        }
+        s_norm
+    }
 
     fn span_file_lines(&self, s: swc_core::common::Span) -> String {
         if s.is_dummy() {
@@ -242,12 +266,8 @@ impl CodePressTransform {
         if let Some(ref cm) = self.source_map {
             let lo = cm.lookup_char_pos(s.lo());
             let hi = cm.lookup_char_pos(s.hi());
-            return format!(
-                "{}:{}-{}",
-                normalize_filename(&lo.file.name.to_string()),
-                lo.line,
-                hi.line
-            );
+            let rel = self.normalize_repo_relative(&lo.file.name.to_string());
+            return format!("{}:{}-{}", rel, lo.line, hi.line);
         }
         "unknown:0-0".to_string()
     }
@@ -258,7 +278,7 @@ impl CodePressTransform {
         }
         if let Some(ref cm) = self.source_map {
             let lo = cm.lookup_char_pos(s.lo());
-            let f = normalize_filename(&lo.file.name.to_string());
+            let f = self.normalize_repo_relative(&lo.file.name.to_string());
             self.module_file.get_or_insert(f.clone());
             return Some(f);
         }
@@ -511,7 +531,7 @@ impl CodePressTransform {
         opening_span: swc_core::common::Span,
         parent_span: Option<swc_core::common::Span>,
     ) -> JSXAttrOrSpread {
-        let normalized = normalize_filename(filename);
+        let normalized = self.normalize_repo_relative(filename);
         let encoded_path = xor_encode(&normalized);
 
         let attr_value = if let Some(line_info) = self.get_line_info(opening_span, parent_span) {
@@ -1861,7 +1881,7 @@ impl VisitMut for CodePressTransform {
         } else {
             "unknown".to_string()
         };
-        let normalized = normalize_filename(&filename);
+        let normalized = self.normalize_repo_relative(&filename);
         let encoded_fp = xor_encode(&normalized);
 
         // Decide whether stamping is safe for an identifier (only for functions/classes/calls/new)
@@ -2511,7 +2531,7 @@ impl VisitMut for CodePressTransform {
         if !orig_full_span.is_dummy() {
             if let Some(line_info) = self.get_line_info(orig_open_span, Some(orig_full_span)) {
                 // Keep the same (file:start-end) shape as other targets produced by span_file_lines
-                let self_target = format!("{}:{}", normalize_filename(&filename), line_info);
+                let self_target = format!("{}:{}", self.normalize_repo_relative(&filename), line_info);
                 // Avoid dupes if it somehow already exists
                 let already = candidates
                     .iter()
