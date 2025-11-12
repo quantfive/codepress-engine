@@ -1232,7 +1232,7 @@ impl CodePressTransform {
                 }],
                 #[cfg(not(feature = "compat_0_87"))]
                 ctxt: SyntaxContext::empty(),
-            }))));
+            })));
             // if (!window.__CP_triggerRefresh) window.__CP_triggerRefresh = function(){ window.dispatchEvent(new CustomEvent("CP_PREVIEW_REFRESH")); }
             let if_stmt = Stmt::If(IfStmt {
                 span: DUMMY_SP,
