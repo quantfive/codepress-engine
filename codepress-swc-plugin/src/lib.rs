@@ -9,6 +9,7 @@ use swc_core::{
     },
     plugin::{plugin_transform, proxies::TransformPluginProgramMetadata},
 };
+use swc_core::common::util::take::Take;
 
 // ---------- Compatibility helpers (per-swccore band) ----------
 
