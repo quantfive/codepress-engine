@@ -1222,6 +1222,7 @@ impl CodePressTransform {
                         callee: Callee::Expr(Box::new(Expr::Ident(cp_ident("useSyncExternalStore".into())))),
                         args: vec![
                             ExprOrSpread { spread: None, expr: Box::new(subscribe_arrow) },
+                            ExprOrSpread { spread: None, expr: Box::new(get_snapshot_arrow.clone()) },
                             ExprOrSpread { spread: None, expr: Box::new(get_snapshot_arrow) },
                         ],
                         type_args: None,
