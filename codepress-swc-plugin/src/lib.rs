@@ -1237,9 +1237,9 @@ impl CodePressTransform {
             // if (typeof window !== "undefined" && !window.__CP_triggerRefresh) window.__CP_triggerRefresh = function(){ window.dispatchEvent(new CustomEvent("CP_PREVIEW_REFRESH")); }
             let if_stmt = Stmt::If(IfStmt {
                 span: DUMMY_SP,
-                test: Box::new(Expr::Logical(LogicalExpr {
+                test: Box::new(Expr::Bin(BinExpr {
                     span: DUMMY_SP,
-                    op: LogicalOp::And,
+                    op: BinaryOp::LogicalAnd,
                     left: Box::new(Expr::Bin(BinExpr {
                         span: DUMMY_SP,
                         op: BinaryOp::NotEqEq,
