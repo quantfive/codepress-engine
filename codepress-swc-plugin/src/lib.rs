@@ -1177,7 +1177,7 @@ impl CodePressTransform {
                             }],
                             #[cfg(not(feature = "compat_0_87"))]
                             ctxt: SyntaxContext::empty(),
-                        })))),
+                        })))), 
                         // const h = () => { __cpvVersion = __cpvVersion + 1; cb(); }
                         Stmt::Decl(Decl::Var(Box::new(VarDecl {
                             span: DUMMY_SP,
@@ -1237,7 +1237,7 @@ impl CodePressTransform {
                             }],
                             #[cfg(not(feature = "compat_0_87"))]
                             ctxt: SyntaxContext::empty(),
-                        })))),
+                        })))), 
                         // window.addEventListener("CP_PREVIEW_REFRESH", cb);
                         Stmt::Expr(ExprStmt {
                             span: DUMMY_SP,
