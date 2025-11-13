@@ -1449,7 +1449,54 @@ impl CodePressTransform {
                 })),
                 alt: None,
             });
-            // <__CPX.Provider value={value}>{children}</__CPX.Provider>
+            // <__CPX.Provider value={value}><div key={__cpv} style={{display:'contents'}}>{children}</div></__CPX.Provider>
+            // Use div with key={__cpv} and display:contents to force re-render without affecting layout
+            let wrapper_div = JSXElement {
+                span: DUMMY_SP,
+                opening: JSXOpeningElement {
+                    span: DUMMY_SP,
+                    name: JSXElementName::Ident(cp_ident("div".into()).into()),
+                    attrs: vec![
+                        JSXAttrOrSpread::JSXAttr(JSXAttr {
+                            span: DUMMY_SP,
+                            name: JSXAttrName::Ident(cp_ident_name("key".into())),
+                            value: Some(JSXAttrValue::JSXExprContainer(JSXExprContainer {
+                                span: DUMMY_SP,
+                                expr: JSXExpr::Expr(Box::new(Expr::Ident(cp_ident("__cpv".into())))),
+                            })),
+                        }),
+                        JSXAttrOrSpread::JSXAttr(JSXAttr {
+                            span: DUMMY_SP,
+                            name: JSXAttrName::Ident(cp_ident_name("style".into())),
+                            value: Some(JSXAttrValue::JSXExprContainer(JSXExprContainer {
+                                span: DUMMY_SP,
+                                expr: JSXExpr::Expr(Box::new(Expr::Object(ObjectLit {
+                                    span: DUMMY_SP,
+                                    props: vec![PropOrSpread::Prop(Box::new(Prop::KeyValue(KeyValueProp {
+                                        key: PropName::Ident(cp_ident_name("display".into())),
+                                        value: Box::new(Expr::Lit(Lit::Str(Str {
+                                            span: DUMMY_SP,
+                                            value: "contents".into(),
+                                            raw: None,
+                                        }))),
+                                    })))],
+                                }))),
+                            })),
+                        }),
+                    ],
+                    self_closing: false,
+                    type_args: None,
+                },
+                children: vec![JSXElementChild::JSXExprContainer(JSXExprContainer {
+                    span: DUMMY_SP,
+                    expr: JSXExpr::Expr(Box::new(Expr::Ident(cp_ident("children".into())))),
+                })],
+                closing: Some(JSXClosingElement {
+                    span: DUMMY_SP,
+                    name: JSXElementName::Ident(cp_ident("div".into()).into()),
+                }),
+            };
+
             let jsx = JSXElement {
                 span: DUMMY_SP,
                 opening: JSXOpeningElement {
@@ -1471,20 +1518,7 @@ impl CodePressTransform {
                     self_closing: false,
                     type_args: None,
                 },
-                children: vec![JSXElementChild::JSXExprContainer(JSXExprContainer {
-                    span: DUMMY_SP,
-                    expr: JSXExpr::Expr(Box::new(Expr::Cond(CondExpr {
-                        span: DUMMY_SP,
-                        test: Box::new(Expr::Bin(BinExpr {
-                            span: DUMMY_SP,
-                            op: BinaryOp::NotEqEq,
-                            left: Box::new(Expr::Ident(cp_ident("__cpv".into()))),
-                            right: Box::new(Expr::Ident(cp_ident("undefined".into()))),
-                        })),
-                        cons: Box::new(Expr::Ident(cp_ident("children".into()))),
-                        alt: Box::new(Expr::Ident(cp_ident("children".into()))),
-                    }))),
-                })],
+                children: vec![JSXElementChild::JSXElement(Box::new(wrapper_div))],
                 closing: Some(JSXClosingElement {
                     span: DUMMY_SP,
                     name: JSXElementName::JSXMemberExpr(JSXMemberExpr {
