@@ -1449,9 +1449,7 @@ impl CodePressTransform {
                 })),
                 alt: None,
             });
-            // <__CPX.Provider value={value} key={__cpv}>{children}</__CPX.Provider>
-            // Add key to Provider to force re-render when __cpv changes
-
+            // <__CPX.Provider value={value}>{children}</__CPX.Provider>
             let jsx = JSXElement {
                 span: DUMMY_SP,
                 opening: JSXOpeningElement {
