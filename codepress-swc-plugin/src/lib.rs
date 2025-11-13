@@ -1117,6 +1117,28 @@ impl CodePressTransform {
             })),
         }));
 
+        // let __cpvVersion = 0; (module-level variable to persist across renders)
+        let module_version_var = ModuleItem::Stmt(Stmt::Decl(Decl::Var(Box::new(VarDecl {
+            span: DUMMY_SP,
+            kind: VarDeclKind::Let,
+            declare: false,
+            decls: vec![VarDeclarator {
+                span: DUMMY_SP,
+                name: Pat::Ident(BindingIdent {
+                    id: cp_ident("__cpvVersion".into()),
+                    type_ann: None,
+                }),
+                init: Some(Box::new(Expr::Lit(Lit::Num(Number {
+                    span: DUMMY_SP,
+                    value: 0.0,
+                    raw: None,
+                })))),
+                definite: false,
+            }],
+            #[cfg(not(feature = "compat_0_87"))]
+            ctxt: SyntaxContext::empty(),
+        }))));
+
         // function __CPProvider({ value, children }) {
         //   const __cpv = useSyncExternalStore(
         //     (cb) => { window.addEventListener("CP_PREVIEW_REFRESH", cb); return () => window.removeEventListener("CP_PREVIEW_REFRESH", cb); },
@@ -1355,7 +1377,89 @@ impl CodePressTransform {
                 #[cfg(not(feature = "compat_0_87"))]
                 ctxt: SyntaxContext::empty(),
             })));
-            // if (typeof window !== "undefined" && !window.__CP_triggerRefresh) window.__CP_triggerRefresh = function(){ window.dispatchEvent(new CustomEvent("CP_PREVIEW_REFRESH")); }
+            // if (typeof window !== "undefined" && !window.__CP_triggerRefresh) window.__CP_triggerRefresh = function(){ window.dispatchEvent(new CustomEvent("CP_PREVIEW_REFRESH")); window.__CP_triggerRefresh.__cp_dispatches_preview = true; }
+            let trigger_member = Expr::Member(MemberExpr {
+                span: DUMMY_SP,
+                obj: Box::new(Expr::Ident(cp_ident("window".into()))),
+                prop: MemberProp::Ident(cp_ident_name("__CP_triggerRefresh".into())),
+            });
+            let assign_trigger_stmt = Stmt::Expr(ExprStmt {
+                span: DUMMY_SP,
+                expr: Box::new(Expr::Assign(AssignExpr {
+                    span: DUMMY_SP,
+                    op: AssignOp::Assign,
+                    left: make_assign_left_member(
+                        Expr::Ident(cp_ident("window")),
+                        cp_ident_name("__CP_triggerRefresh"),
+                    ),
+                    right: Box::new(Expr::Fn(FnExpr {
+                        ident: None,
+                        function: Box::new(Function {
+                            params: vec![],
+                            decorators: vec![],
+                            span: DUMMY_SP,
+                            body: Some(BlockStmt {
+                                span: DUMMY_SP,
+                                stmts: vec![Stmt::Expr(ExprStmt {
+                                    span: DUMMY_SP,
+                                    expr: Box::new(Expr::Call(CallExpr {
+                                        span: DUMMY_SP,
+                                        callee: Callee::Expr(Box::new(Expr::Member(MemberExpr {
+                                            span: DUMMY_SP,
+                                            obj: Box::new(Expr::Ident(cp_ident("window".into()))),
+                                            prop: MemberProp::Ident(cp_ident_name("dispatchEvent".into())),
+                                        }))),
+                                        args: vec![ExprOrSpread {
+                                            spread: None,
+                                            expr: Box::new(Expr::New(NewExpr {
+                                                span: DUMMY_SP,
+                                                callee: Box::new(Expr::Ident(cp_ident("CustomEvent".into()))),
+                                                args: Some(vec![ExprOrSpread {
+                                                    spread: None,
+                                                    expr: Box::new(Expr::Lit(Lit::Str(Str {
+                                                        span: DUMMY_SP,
+                                                        value: "CP_PREVIEW_REFRESH".into(),
+                                                        raw: None,
+                                                    }))),
+                                                }]),
+                                                type_args: None,
+                                                #[cfg(not(feature = "compat_0_87"))]
+                                                ctxt: SyntaxContext::empty(),
+                                            })),
+                                        }],
+                                        type_args: None,
+                                        #[cfg(not(feature = "compat_0_87"))]
+                                        ctxt: SyntaxContext::empty(),
+                                    })),
+                                })],
+                                #[cfg(not(feature = "compat_0_87"))]
+                                ctxt: SyntaxContext::empty(),
+                            }),
+                            is_generator: false,
+                            is_async: false,
+                            type_params: None,
+                            return_type: None,
+                            #[cfg(not(feature = "compat_0_87"))]
+                            ctxt: SyntaxContext::empty(),
+                        }),
+                    })),
+                })),
+            });
+            let mark_trigger_stmt = Stmt::Expr(ExprStmt {
+                span: DUMMY_SP,
+                expr: Box::new(Expr::Assign(AssignExpr {
+                    span: DUMMY_SP,
+                    op: AssignOp::Assign,
+                    left: make_assign_left_member(
+                        trigger_member.clone(),
+                        cp_ident_name("__cp_dispatches_preview".into()),
+                    ),
+                    right: Box::new(Expr::Lit(Lit::Bool(Bool {
+                        span: DUMMY_SP,
+                        value: true,
+                    }))),
+                })),
+            });
             let if_stmt = Stmt::If(IfStmt {
                 span: DUMMY_SP,
                 test: Box::new(Expr::Bin(BinExpr {
@@ -1385,67 +1489,11 @@ impl CodePressTransform {
                         })),
                     })),
                 })),
-                cons: Box::new(Stmt::Expr(ExprStmt {
+                cons: Box::new(Stmt::Block(BlockStmt {
                     span: DUMMY_SP,
-                    expr: Box::new(Expr::Assign(AssignExpr {
-                        span: DUMMY_SP,
-                        op: AssignOp::Assign,
-                        left: make_assign_left_member(
-                            Expr::Ident(cp_ident("window")),
-                            cp_ident_name("__CP_triggerRefresh"),
-                        ),
-                        right: Box::new(Expr::Fn(FnExpr {
-                            ident: None,
-                            function: Box::new(Function {
-                                params: vec![],
-                                decorators: vec![],
-                                span: DUMMY_SP,
-                                body: Some(BlockStmt {
-                                    span: DUMMY_SP,
-                                    stmts: vec![Stmt::Expr(ExprStmt {
-                                        span: DUMMY_SP,
-                                        expr: Box::new(Expr::Call(CallExpr {
-                                            span: DUMMY_SP,
-                                            callee: Callee::Expr(Box::new(Expr::Member(MemberExpr {
-                                                span: DUMMY_SP,
-                                                obj: Box::new(Expr::Ident(cp_ident("window".into()))),
-                                                prop: MemberProp::Ident(cp_ident_name("dispatchEvent".into())),
-                                            }))),
-                                            args: vec![ExprOrSpread {
-                                                spread: None,
-                                                expr: Box::new(Expr::New(NewExpr {
-                                                    span: DUMMY_SP,
-                                                    callee: Box::new(Expr::Ident(cp_ident("CustomEvent".into()))),
-                                                    args: Some(vec![ExprOrSpread {
-                                                        spread: None,
-                                                        expr: Box::new(Expr::Lit(Lit::Str(Str {
-                                                            span: DUMMY_SP,
-                                                            value: "CP_PREVIEW_REFRESH".into(),
-                                                            raw: None,
-                                                        }))),
-                                                    }]),
-                                                    type_args: None,
-                                                    #[cfg(not(feature = "compat_0_87"))]
-                                                    ctxt: SyntaxContext::empty(),
-                                                })),
-                                            }],
-                                            type_args: None,
-                                            #[cfg(not(feature = "compat_0_87"))]
-                                            ctxt: SyntaxContext::empty(),
-                                        })),
-                                    })],
-                                    #[cfg(not(feature = "compat_0_87"))]
-                                    ctxt: SyntaxContext::empty(),
-                                }),
-                                is_generator: false,
-                                is_async: false,
-                                type_params: None,
-                                return_type: None,
-                                #[cfg(not(feature = "compat_0_87"))]
-                                ctxt: SyntaxContext::empty(),
-                            }),
-                        })),
-                    })),
+                    stmts: vec![assign_trigger_stmt, mark_trigger_stmt],
+                    #[cfg(not(feature = "compat_0_87"))]
+                    ctxt: SyntaxContext::empty(),
                 })),
                 alt: None,
             });
@@ -1505,7 +1553,6 @@ impl CodePressTransform {
                     body: Some(BlockStmt {
                         span: DUMMY_SP,
                         stmts: vec![
-                            init_version,
                             init_subscribe,
                             if_stmt,
                             Stmt::Return(ReturnStmt {
@@ -1527,10 +1574,11 @@ impl CodePressTransform {
             provider
         };
 
-        // Insert after any top-of-file directives, preserving order: import, const, displayName, function
+        // Insert after any top-of-file directives, preserving order: import, const, displayName, version, function
         let insert_at = self.directive_insert_index(m);
         // Insert in reverse so the final order is preserved
         m.body.insert(insert_at, provider_fn);
+        m.body.insert(insert_at, module_version_var);
         m.body.insert(insert_at, cpx_name_stmt);
         m.body.insert(insert_at, cpx_decl);
         m.body.insert(insert_at, import_decl);
