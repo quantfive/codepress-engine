@@ -1084,6 +1084,28 @@ impl CodePressTransform {
             ctxt: SyntaxContext::empty(),
         }))));
 
+        // let __CPV = 0; (version store for refresh ticks)
+        let cpv_decl = ModuleItem::Stmt(Stmt::Decl(Decl::Var(Box::new(VarDecl {
+            span: DUMMY_SP,
+            kind: VarDeclKind::Var,
+            declare: false,
+            decls: vec![VarDeclarator {
+                span: DUMMY_SP,
+                name: Pat::Ident(BindingIdent {
+                    id: cp_ident("__CPV".into()),
+                    type_ann: None,
+                }),
+                init: Some(Box::new(Expr::Lit(Lit::Num(Number {
+                    span: DUMMY_SP,
+                    value: 0.0,
+                    raw: None,
+                })))),
+                definite: false,
+            }],
+            #[cfg(not(feature = "compat_0_87"))]
+            ctxt: SyntaxContext::empty(),
+        }))));
+
         // __CPX.displayName = "CPX";
         let cpx_name_stmt = ModuleItem::Stmt(Stmt::Expr(ExprStmt {
             span: DUMMY_SP,
@@ -1135,13 +1157,76 @@ impl CodePressTransform {
                     ],
                 }),
             };
-            // Build: const __cpv = useSyncExternalStore(subscribe, getSnapshot)
+            // Build: const __cpv = useSyncExternalStore(subscribe, getSnapshot, getServerSnapshot)
             let subscribe_arrow = Expr::Arrow(ArrowExpr {
                 span: DUMMY_SP,
                 params: vec![Pat::Ident(BindingIdent { id: cp_ident("cb".into()), type_ann: None }).into()],
                 body: Box::new(BlockStmtOrExpr::BlockStmt(BlockStmt {
                     span: DUMMY_SP,
                     stmts: vec![
+                        // const h = () => { __CPV = __CPV + 1; cb(); }
+                        Stmt::Decl(Decl::Var(Box::new(VarDecl {
+                            span: DUMMY_SP,
+                            kind: VarDeclKind::Const,
+                            declare: false,
+                            decls: vec![VarDeclarator {
+                                span: DUMMY_SP,
+                                name: Pat::Ident(BindingIdent {
+                                    id: cp_ident("h".into()),
+                                    type_ann: None,
+                                }),
+                                init: Some(Box::new(Expr::Arrow(ArrowExpr {
+                                    span: DUMMY_SP,
+                                    params: vec![],
+                                    body: Box::new(BlockStmtOrExpr::BlockStmt(BlockStmt {
+                                        span: DUMMY_SP,
+                                        stmts: vec![
+                                            // __CPV = __CPV + 1;
+                                            Stmt::Expr(ExprStmt {
+                                                span: DUMMY_SP,
+                                                expr: Box::new(Expr::Assign(AssignExpr {
+                                                    span: DUMMY_SP,
+                                                    op: AssignOp::Assign,
+                                                    left: make_assign_left_member(
+                                                        Expr::Ident(cp_ident("__CPV")),
+                                                        cp_ident_name("value_not_used"), // placeholder not used in compat; overwrite left below
+                                                    ),
+                                                    right: Box::new(Expr::Bin(BinExpr {
+                                                        span: DUMMY_SP,
+                                                        op: BinaryOp::Add,
+                                                        left: Box::new(Expr::Ident(cp_ident("__CPV".into()))),
+                                                        right: Box::new(Expr::Lit(Lit::Num(Number { span: DUMMY_SP, value: 1.0, raw: None }))),
+                                                    })),
+                                                })),
+                                            }),
+                                            // cb();
+                                            Stmt::Expr(ExprStmt {
+                                                span: DUMMY_SP,
+                                                expr: Box::new(Expr::Call(CallExpr {
+                                                    span: DUMMY_SP,
+                                                    callee: Callee::Expr(Box::new(Expr::Ident(cp_ident("cb".into())))),
+                                                    args: vec![],
+                                                    type_args: None,
+                                                    #[cfg(not(feature = "compat_0_87"))]
+                                                    ctxt: SyntaxContext::empty(),
+                                                })),
+                                            }),
+                                        ],
+                                        #[cfg(not(feature = "compat_0_87"))]
+                                        ctxt: SyntaxContext::empty(),
+                                    })),
+                                    is_async: false,
+                                    is_generator: false,
+                                    type_params: None,
+                                    return_type: None,
+                                    #[cfg(not(feature = "compat_0_87"))]
+                                    ctxt: SyntaxContext::empty(),
+                                }))),
+                                definite: false,
+                            }],
+                            #[cfg(not(feature = "compat_0_87"))]
+                            ctxt: SyntaxContext::empty(),
+                        })))),
                         // window.addEventListener("CP_PREVIEW_REFRESH", cb);
                         Stmt::Expr(ExprStmt {
                             span: DUMMY_SP,
@@ -1154,7 +1239,7 @@ impl CodePressTransform {
                                 }))),
                                 args: vec![
                                     ExprOrSpread { spread: None, expr: Box::new(Expr::Lit(Lit::Str(Str { span: DUMMY_SP, value: "CP_PREVIEW_REFRESH".into(), raw: None }))) },
-                                    ExprOrSpread { spread: None, expr: Box::new(Expr::Ident(cp_ident("cb".into()))) },
+                                    ExprOrSpread { spread: None, expr: Box::new(Expr::Ident(cp_ident("h".into()))) },
                                 ],
                                 type_args: None,
                                 #[cfg(not(feature = "compat_0_87"))]
@@ -1180,7 +1265,7 @@ impl CodePressTransform {
                                             }))),
                                             args: vec![
                                                 ExprOrSpread { spread: None, expr: Box::new(Expr::Lit(Lit::Str(Str { span: DUMMY_SP, value: "CP_PREVIEW_REFRESH".into(), raw: None }))) },
-                                                ExprOrSpread { spread: None, expr: Box::new(Expr::Ident(cp_ident("cb".into()))) },
+                                                ExprOrSpread { spread: None, expr: Box::new(Expr::Ident(cp_ident("h".into()))) },
                                             ],
                                             type_args: None,
                                             #[cfg(not(feature = "compat_0_87"))]
@@ -1212,18 +1297,22 @@ impl CodePressTransform {
             let get_snapshot_arrow = Expr::Arrow(ArrowExpr {
                 span: DUMMY_SP,
                 params: vec![],
-                body: Box::new(BlockStmtOrExpr::Expr(Box::new(Expr::Call(CallExpr {
+                body: Box::new(BlockStmtOrExpr::Expr(Box::new(Expr::Ident(cp_ident("__CPV".into()))))),
+                is_async: false,
+                is_generator: false,
+                type_params: None,
+                return_type: None,
+                #[cfg(not(feature = "compat_0_87"))]
+                ctxt: SyntaxContext::empty(),
+            });
+            let get_server_snapshot_arrow = Expr::Arrow(ArrowExpr {
+                span: DUMMY_SP,
+                params: vec![],
+                body: Box::new(BlockStmtOrExpr::Expr(Box::new(Expr::Lit(Lit::Num(Number {
                     span: DUMMY_SP,
-                    callee: Callee::Expr(Box::new(Expr::Member(MemberExpr {
-                        span: DUMMY_SP,
-                        obj: Box::new(Expr::Ident(cp_ident("Date".into()))),
-                        prop: MemberProp::Ident(cp_ident_name("now".into())),
-                    }))),
-                    args: vec![],
-                    type_args: None,
-                    #[cfg(not(feature = "compat_0_87"))]
-                    ctxt: SyntaxContext::empty(),
-                })))),
+                    value: 0.0,
+                    raw: None,
+                }))))),
                 is_async: false,
                 is_generator: false,
                 type_params: None,
@@ -1243,8 +1332,8 @@ impl CodePressTransform {
                         callee: Callee::Expr(Box::new(Expr::Ident(cp_ident("useSyncExternalStore".into())))),
                         args: vec![
                             ExprOrSpread { spread: None, expr: Box::new(subscribe_arrow) },
-                            ExprOrSpread { spread: None, expr: Box::new(get_snapshot_arrow.clone()) },
                             ExprOrSpread { spread: None, expr: Box::new(get_snapshot_arrow) },
+                            ExprOrSpread { spread: None, expr: Box::new(get_server_snapshot_arrow) },
                         ],
                         type_args: None,
                         #[cfg(not(feature = "compat_0_87"))]
@@ -1421,6 +1510,7 @@ impl CodePressTransform {
         // Insert in reverse so the final order is preserved
         m.body.insert(insert_at, provider_fn);
         m.body.insert(insert_at, cpx_name_stmt);
+        m.body.insert(insert_at, cpv_decl);
         m.body.insert(insert_at, cpx_decl);
         m.body.insert(insert_at, import_decl);
         self.inserted_provider_import = true;
