@@ -1157,27 +1157,6 @@ impl CodePressTransform {
                 body: Box::new(BlockStmtOrExpr::BlockStmt(BlockStmt {
                     span: DUMMY_SP,
                     stmts: vec![
-                        // let __cpvVersion = 0;
-                        Stmt::Decl(Decl::Var(Box::new(VarDecl {
-                            span: DUMMY_SP,
-                            kind: VarDeclKind::Let,
-                            declare: false,
-                            decls: vec![VarDeclarator {
-                                span: DUMMY_SP,
-                                name: Pat::Ident(BindingIdent {
-                                    id: cp_ident("__cpvVersion".into()),
-                                    type_ann: None,
-                                }),
-                                init: Some(Box::new(Expr::Lit(Lit::Num(Number {
-                                    span: DUMMY_SP,
-                                    value: 0.0,
-                                    raw: None,
-                                })))),
-                                definite: false,
-                            }],
-                            #[cfg(not(feature = "compat_0_87"))]
-                            ctxt: SyntaxContext::empty(),
-                        }))),
                         // const h = () => { __cpvVersion = __cpvVersion + 1; cb(); }
                         Stmt::Decl(Decl::Var(Box::new(VarDecl {
                             span: DUMMY_SP,
@@ -1331,6 +1310,27 @@ impl CodePressTransform {
                 #[cfg(not(feature = "compat_0_87"))]
                 ctxt: SyntaxContext::empty(),
             });
+            // Declare __cpvVersion at function scope so both subscribe and getSnapshot can access it
+            let init_version = Stmt::Decl(Decl::Var(Box::new(VarDecl {
+                span: DUMMY_SP,
+                kind: VarDeclKind::Let,
+                declare: false,
+                decls: vec![VarDeclarator {
+                    span: DUMMY_SP,
+                    name: Pat::Ident(BindingIdent {
+                        id: cp_ident("__cpvVersion".into()),
+                        type_ann: None,
+                    }),
+                    init: Some(Box::new(Expr::Lit(Lit::Num(Number {
+                        span: DUMMY_SP,
+                        value: 0.0,
+                        raw: None,
+                    })))),
+                    definite: false,
+                }],
+                #[cfg(not(feature = "compat_0_87"))]
+                ctxt: SyntaxContext::empty(),
+            })));
             let init_subscribe = Stmt::Decl(Decl::Var(Box::new(VarDecl {
                 span: DUMMY_SP,
                 kind: VarDeclKind::Const,
@@ -1495,6 +1495,7 @@ impl CodePressTransform {
                     body: Some(BlockStmt {
                         span: DUMMY_SP,
                         stmts: vec![
+                            init_version,
                             init_subscribe,
                             if_stmt,
                             Stmt::Return(ReturnStmt {
