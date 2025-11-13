@@ -1473,7 +1473,17 @@ impl CodePressTransform {
                 },
                 children: vec![JSXElementChild::JSXExprContainer(JSXExprContainer {
                     span: DUMMY_SP,
-                    expr: JSXExpr::Expr(Box::new(Expr::Ident(cp_ident("children".into())))),
+                    expr: JSXExpr::Expr(Box::new(Expr::Cond(CondExpr {
+                        span: DUMMY_SP,
+                        test: Box::new(Expr::Bin(BinExpr {
+                            span: DUMMY_SP,
+                            op: BinaryOp::NotEqEq,
+                            left: Box::new(Expr::Ident(cp_ident("__cpv".into()))),
+                            right: Box::new(Expr::Ident(cp_ident("undefined".into()))),
+                        })),
+                        cons: Box::new(Expr::Ident(cp_ident("children".into()))),
+                        alt: Box::new(Expr::Ident(cp_ident("children".into()))),
+                    }))),
                 })],
                 closing: Some(JSXClosingElement {
                     span: DUMMY_SP,
