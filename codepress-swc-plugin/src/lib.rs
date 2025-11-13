@@ -68,6 +68,21 @@ fn make_assign_left_member(obj: Expr, prop: CpIdentName) -> swc_core::ecma::ast:
     }))
 }
 
+// Helper: assignment left for simple identifier
+#[cfg(feature = "compat_0_87")]
+fn make_assign_left_ident(name: &str) -> swc_core::ecma::ast::PatOrExpr {
+    use swc_core::ecma::ast::PatOrExpr;
+    PatOrExpr::Expr(Box::new(Expr::Ident(cp_ident(name))))
+}
+
+#[cfg(not(feature = "compat_0_87"))]
+fn make_assign_left_ident(name: &str) -> swc_core::ecma::ast::AssignTarget {
+    use swc_core::ecma::ast::{AssignTarget, BindingIdent, SimpleAssignTarget};
+    AssignTarget::Simple(SimpleAssignTarget::Ident(BindingIdent {
+        id: cp_ident(name),
+        type_ann: None,
+    }))
+}
 // End Compatibility helpers // TODO: move these to another file?
 
 // -----------------------------------------------------------------------------
@@ -1084,28 +1099,6 @@ impl CodePressTransform {
             ctxt: SyntaxContext::empty(),
         }))));
 
-        // let __CPV = 0; (version store for refresh ticks)
-        let cpv_decl = ModuleItem::Stmt(Stmt::Decl(Decl::Var(Box::new(VarDecl {
-            span: DUMMY_SP,
-            kind: VarDeclKind::Var,
-            declare: false,
-            decls: vec![VarDeclarator {
-                span: DUMMY_SP,
-                name: Pat::Ident(BindingIdent {
-                    id: cp_ident("__CPV".into()),
-                    type_ann: None,
-                }),
-                init: Some(Box::new(Expr::Lit(Lit::Num(Number {
-                    span: DUMMY_SP,
-                    value: 0.0,
-                    raw: None,
-                })))),
-                definite: false,
-            }],
-            #[cfg(not(feature = "compat_0_87"))]
-            ctxt: SyntaxContext::empty(),
-        }))));
-
         // __CPX.displayName = "CPX";
         let cpx_name_stmt = ModuleItem::Stmt(Stmt::Expr(ExprStmt {
             span: DUMMY_SP,
@@ -1164,7 +1157,28 @@ impl CodePressTransform {
                 body: Box::new(BlockStmtOrExpr::BlockStmt(BlockStmt {
                     span: DUMMY_SP,
                     stmts: vec![
-                        // const h = () => { __CPV = __CPV + 1; cb(); }
+                        // let __cpvVersion = 0;
+                        Stmt::Decl(Decl::Var(Box::new(VarDecl {
+                            span: DUMMY_SP,
+                            kind: VarDeclKind::Let,
+                            declare: false,
+                            decls: vec![VarDeclarator {
+                                span: DUMMY_SP,
+                                name: Pat::Ident(BindingIdent {
+                                    id: cp_ident("__cpvVersion".into()),
+                                    type_ann: None,
+                                }),
+                                init: Some(Box::new(Expr::Lit(Lit::Num(Number {
+                                    span: DUMMY_SP,
+                                    value: 0.0,
+                                    raw: None,
+                                })))),
+                                definite: false,
+                            }],
+                            #[cfg(not(feature = "compat_0_87"))]
+                            ctxt: SyntaxContext::empty(),
+                        })))),
+                        // const h = () => { __cpvVersion = __cpvVersion + 1; cb(); }
                         Stmt::Decl(Decl::Var(Box::new(VarDecl {
                             span: DUMMY_SP,
                             kind: VarDeclKind::Const,
@@ -1181,20 +1195,17 @@ impl CodePressTransform {
                                     body: Box::new(BlockStmtOrExpr::BlockStmt(BlockStmt {
                                         span: DUMMY_SP,
                                         stmts: vec![
-                                            // __CPV = __CPV + 1;
+                                            // __cpvVersion = __cpvVersion + 1;
                                             Stmt::Expr(ExprStmt {
                                                 span: DUMMY_SP,
                                                 expr: Box::new(Expr::Assign(AssignExpr {
                                                     span: DUMMY_SP,
                                                     op: AssignOp::Assign,
-                                                    left: make_assign_left_member(
-                                                        Expr::Ident(cp_ident("__CPV")),
-                                                        cp_ident_name("value_not_used"), // placeholder not used in compat; overwrite left below
-                                                    ),
+                                                    left: make_assign_left_ident("__cpvVersion"),
                                                     right: Box::new(Expr::Bin(BinExpr {
                                                         span: DUMMY_SP,
                                                         op: BinaryOp::Add,
-                                                        left: Box::new(Expr::Ident(cp_ident("__CPV".into()))),
+                                                        left: Box::new(Expr::Ident(cp_ident("__cpvVersion".into()))),
                                                         right: Box::new(Expr::Lit(Lit::Num(Number { span: DUMMY_SP, value: 1.0, raw: None }))),
                                                     })),
                                                 })),
@@ -1297,7 +1308,7 @@ impl CodePressTransform {
             let get_snapshot_arrow = Expr::Arrow(ArrowExpr {
                 span: DUMMY_SP,
                 params: vec![],
-                body: Box::new(BlockStmtOrExpr::Expr(Box::new(Expr::Ident(cp_ident("__CPV".into()))))),
+                body: Box::new(BlockStmtOrExpr::Expr(Box::new(Expr::Ident(cp_ident("__cpvVersion".into()))))),
                 is_async: false,
                 is_generator: false,
                 type_params: None,
@@ -1510,7 +1521,6 @@ impl CodePressTransform {
         // Insert in reverse so the final order is preserved
         m.body.insert(insert_at, provider_fn);
         m.body.insert(insert_at, cpx_name_stmt);
-        m.body.insert(insert_at, cpv_decl);
         m.body.insert(insert_at, cpx_decl);
         m.body.insert(insert_at, import_decl);
         self.inserted_provider_import = true;
