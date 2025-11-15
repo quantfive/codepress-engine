@@ -41,11 +41,22 @@ function injectJSXAttributes(source: string, encoded: string, repoName?: string,
   for (const line of lines) {
     lineNum++;
 
-    // Match JSX opening tags: <ComponentName or <div or <Component.Sub
-    // This regex matches: < followed by tag name, capturing what comes after
+    // Skip lines that are likely TypeScript type definitions/generics
+    // These patterns indicate type syntax, not JSX
+    if (
+      /^\s*(interface|type|class|extends|implements)\b/.test(line) ||
+      /\bextends\s+[\w.]+</.test(line) ||
+      /<[\w.]+>(?!\s*[{(</])/.test(line) // Generics not followed by JSX-like syntax
+    ) {
+      output.push(line);
+      continue;
+    }
+
+    // Match JSX opening tags with context awareness
+    // Only match when < appears in typical JSX contexts (after whitespace, braces, parens, return, etc.)
     const modifiedLine = line.replace(
-      /<([A-Z][\w.]*|[a-z]+)([\s\/>])/g,
-      (match, tagName, after) => {
+      /(^|\s+|[\s{(>]|return\s+|=\s*|:\s*|\?\s*)<([A-Z][\w.]*|[a-z]+)([\s\/>])/g,
+      (match, before, tagName, after) => {
         // Build attributes
         const attrs: string[] = [];
         attrs.push(`codepress-data-fp="${encoded}:${lineNum}-${lineNum}"`);
@@ -60,7 +71,7 @@ function injectJSXAttributes(source: string, encoded: string, repoName?: string,
           }
         }
 
-        return `<${tagName} ${attrs.join(' ')}${after}`;
+        return `${before}<${tagName} ${attrs.join(' ')}${after}`;
       }
     );
 
