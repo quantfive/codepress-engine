@@ -30,6 +30,11 @@
       "require": "./dist/swc/index.js",
       "default": "./dist/swc/index.js"
     },
+    "./esbuild": {
+      "types": "./dist/esbuild-plugin.d.ts",
+      "require": "./dist/esbuild-plugin.js",
+      "default": "./dist/esbuild-plugin.js"
+    },
     "./swc/wasm": "./swc/codepress_engine.v42.wasm",
     "./swc/wasm-v42": "./swc/codepress_engine.v42.wasm",
     "./swc/wasm-v26": "./swc/codepress_engine.v26.wasm",
@@ -90,6 +95,7 @@
     "@types/jest": "^29.5.12",
     "@types/node": "^22.9.0",
     "@types/node-fetch": "^2.6.11",
+    "esbuild": "^0.24.0",
     "eslint": "^9.37.0",
     "eslint-config-prettier": "^10.1.8",
     "eslint-plugin-import": "^2.32.0",
