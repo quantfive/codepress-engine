@@ -3,6 +3,8 @@ import { execSync } from "child_process";
 import path from "path";
 
 import type { CodePressPluginOptions } from "./types";
+import { ModuleGraphCollector } from "./babel/module-graph";
+import { ProvenanceTracker } from "./babel/provenance";
 
 const SECRET = Buffer.from("codepress-file-obfuscation");
 
@@ -18,7 +20,11 @@ const BASE64_URL_SAFE_RESTORE: Record<string, string> = {
 };
 
 interface CodePressPluginState extends Babel.PluginPass {
-  file: Babel.BabelFile & { encodedPath?: string };
+  file: Babel.BabelFile & {
+    encodedPath?: string;
+    moduleGraph?: ModuleGraphCollector;
+    provenanceTracker?: ProvenanceTracker;
+  };
 }
 
 function encode(relPath: string): string {
@@ -158,6 +164,39 @@ export default function codePressPlugin(
   const repoName = options.repo_name || currentRepoName;
   const branch = options.branch_name || currentBranch;
 
+  // Skip component configuration (like SWC plugin)
+  const skipComponents = new Set(
+    options.skip_components || ["Slot", "Link"]
+  );
+  const skipMemberRoots = new Set(
+    options.skip_member_roots || ["Primitive"]
+  );
+
+  function isSkipComponent(name: Babel.types.JSXIdentifier | Babel.types.JSXMemberExpression | Babel.types.JSXNamespacedName): boolean {
+    if (t.isJSXIdentifier(name)) {
+      return skipComponents.has(name.name);
+    }
+    if (t.isJSXMemberExpression(name)) {
+      // Check root of member expression
+      let root = name.object;
+      while (t.isJSXMemberExpression(root)) {
+        root = root.object;
+      }
+      if (t.isJSXIdentifier(root)) {
+        return skipMemberRoots.has(root.name);
+      }
+    }
+    return false;
+  }
+
+  function isCustomComponent(name: Babel.types.JSXIdentifier | Babel.types.JSXMemberExpression | Babel.types.JSXNamespacedName): boolean {
+    if (t.isJSXIdentifier(name)) {
+      const firstChar = name.name[0];
+      return firstChar === firstChar.toUpperCase();
+    }
+    return t.isJSXMemberExpression(name) || t.isJSXNamespacedName(name);
+  }
+
   return {
     name: "babel-plugin-codepress-html",
     visitor: {
@@ -171,21 +210,83 @@ export default function codePressPlugin(
           }
 
           state.file.encodedPath = encode(relativePath);
+          state.file.moduleGraph = new ModuleGraphCollector(relativePath);
+          state.file.provenanceTracker = new ProvenanceTracker(relativePath);
           processedFileCount += 1;
+
+          // Collect bindings first (needed for provenance tracking)
+          state.file.provenanceTracker.collectBindings(nodePath);
+
+          // Traverse to collect module graph
+          nodePath.traverse({
+            ImportDeclaration(path) {
+              state.file.moduleGraph!.visitImportDeclaration(path);
+            },
+            ExportNamedDeclaration(path) {
+              state.file.moduleGraph!.visitExportNamedDeclaration(path);
+            },
+            VariableDeclarator(path) {
+              const parent = path.parentPath.node;
+              if (t.isVariableDeclaration(parent)) {
+                const kind = parent.kind === 'const' ? 'const' : parent.kind === 'let' ? 'let' : 'var';
+                state.file.moduleGraph!.visitVariableDeclarator(path, kind);
+              }
+            },
+            FunctionDeclaration(path) {
+              if (path.node.id) {
+                state.file.moduleGraph!.graph.defs.push({
+                  local: path.node.id.name,
+                  kind: 'func',
+                  span: `${relativePath}:${path.node.id.loc?.start.line || 0}`,
+                });
+              }
+            },
+            ClassDeclaration(path) {
+              if (path.node.id) {
+                state.file.moduleGraph!.graph.defs.push({
+                  local: path.node.id.name,
+                  kind: 'class',
+                  span: `${relativePath}:${path.node.id.loc?.start.line || 0}`,
+                });
+              }
+            },
+            AssignmentExpression(path) {
+              state.file.moduleGraph!.visitAssignmentExpression(path);
+            },
+            UpdateExpression(path) {
+              state.file.moduleGraph!.visitUpdateExpression(path);
+            },
+            CallExpression(path) {
+              state.file.moduleGraph!.visitCallExpression(path);
+            },
+          });
         },
         exit(programPath, state) {
-          // Only inject the script once and only if we have repo info
-          if (globalAttributesAdded || !repoName) {
-            return;
+          // Inject module graph as globalThis.__CPX_GRAPH[file]
+          if (state.file.moduleGraph) {
+            const graph = state.file.moduleGraph.getGraph();
+            const fileKey = state.file.encodedPath!;
+            const graphJson = JSON.stringify(graph);
+
+            const graphInjectionCode = `
+try {
+  var g = (typeof globalThis !== 'undefined' ? globalThis : window);
+  g.__CPX_GRAPH = g.__CPX_GRAPH || {};
+  g.__CPX_GRAPH[${JSON.stringify(fileKey)}] = JSON.parse(${JSON.stringify(graphJson)});
+} catch(_e) {}
+`;
+
+            const graphAst = babel.template.ast(graphInjectionCode);
+            if (Array.isArray(graphAst)) {
+              programPath.node.body.unshift(...graphAst);
+            } else {
+              programPath.node.body.unshift(graphAst);
+            }
           }
 
-          // Only inject in files that have JSX (check if we processed this file)
-          if (!state.file.encodedPath) {
-            return;
-          }
-
-          // Create the runtime script that adds attributes to document.body
-          const scriptCode = `
+          // Inject repo/branch script (existing code)
+          if (!globalAttributesAdded && repoName && state.file.encodedPath) {
+            const scriptCode = `
 (function() {
   if (typeof document !== 'undefined' && document.body && !document.body.hasAttribute('${REPO_ATTRIBUTE_NAME}')) {
     document.body.setAttribute('${REPO_ATTRIBUTE_NAME}', '${repoName}');
@@ -194,35 +295,35 @@ export default function codePressPlugin(
 })();
 `;
 
-          // Parse the script and add it to the beginning of the program
-          const scriptAst = babel.template.ast(scriptCode);
-          if (Array.isArray(scriptAst)) {
-            programPath.node.body.unshift(...scriptAst);
-          } else {
-            programPath.node.body.unshift(scriptAst);
-          }
+            const scriptAst = babel.template.ast(scriptCode);
+            if (Array.isArray(scriptAst)) {
+              programPath.node.body.unshift(...scriptAst);
+            } else {
+              programPath.node.body.unshift(scriptAst);
+            }
 
-          globalAttributesAdded = true;
-          console.log(
-            `\x1b[32m✓ Injected repo/branch script in ${path.basename(
-              state.file.opts.filename ?? "unknown"
-            )}\x1b[0m`
-          );
+            globalAttributesAdded = true;
+            console.log(
+              `\x1b[32m✓ Injected repo/branch + graph in ${path.basename(
+                state.file.opts.filename ?? "unknown"
+              )}\x1b[0m`
+            );
+          }
         },
       },
       JSXOpeningElement(nodePath, state) {
         const encodedPath = state.file.encodedPath;
-        if (!encodedPath) {
+        if (!encodedPath || !state.file.provenanceTracker) {
           return;
         }
 
         const { node } = nodePath;
-
         const startLine = node.loc?.start.line ?? 0;
         const parentLoc = nodePath.parent.loc;
         const endLine = parentLoc?.end.line ?? startLine;
         const attributeValue = `${encodedPath}:${startLine}-${endLine}`;
 
+        // Add basic file path attribute
         const existingAttribute = node.attributes.find(
           (attr): attr is Babel.types.JSXAttribute =>
             t.isJSXAttribute(attr) &&
@@ -239,12 +340,103 @@ export default function codePressPlugin(
             )
           );
         }
+
+        // Collect provenance from props and children
+        const allNodes: any[] = [];
+        const symbolRefs: any[] = [];
+
+        // Trace props
+        for (const attr of node.attributes) {
+          if (t.isJSXAttribute(attr) && attr.value) {
+            if (t.isJSXExpressionContainer(attr.value) && t.isExpression(attr.value.expression)) {
+              const chain: any[] = [];
+              state.file.provenanceTracker!.traceExpression(attr.value.expression, chain);
+              allNodes.push(...chain);
+              state.file.provenanceTracker!.collectSymbolRefs(attr.value.expression, symbolRefs);
+            }
+          } else if (t.isJSXSpreadAttribute(attr)) {
+            const chain: any[] = [];
+            state.file.provenanceTracker!.traceExpression(attr.argument, chain);
+            allNodes.push(...chain);
+            state.file.provenanceTracker!.collectSymbolRefs(attr.argument, symbolRefs);
+          }
+        }
+
+        // Trace children
+        const parent = nodePath.parent;
+        if (t.isJSXElement(parent)) {
+          for (const child of parent.children) {
+            if (t.isJSXExpressionContainer(child) && t.isExpression(child.expression)) {
+              const chain: any[] = [];
+              state.file.provenanceTracker!.traceExpression(child.expression, chain);
+              allNodes.push(...chain);
+              state.file.provenanceTracker!.collectSymbolRefs(child.expression, symbolRefs);
+            }
+          }
+        }
+
+        // Rank candidates and aggregate kinds
+        const candidates = state.file.provenanceTracker!.rankCandidates(allNodes);
+        const kinds = state.file.provenanceTracker!.aggregateKinds(allNodes);
+
+        // Add callsite candidate
+        const filename = state.file.opts.filename ?? "";
+        const relativePath = path.relative(process.cwd(), filename);
+        const selfTarget = `${relativePath}:${startLine}-${endLine}`;
+        const alreadyHasCallsite = candidates.some(
+          c => c.reason === 'callsite' && c.target === selfTarget
+        );
+        if (!alreadyHasCallsite) {
+          candidates.push({ target: selfTarget, reason: 'callsite' });
+        }
+
+        // Encode metadata
+        const candidatesJson = JSON.stringify(candidates);
+        const kindsJson = JSON.stringify(kinds);
+        const symbolRefsJson = JSON.stringify(symbolRefs);
+        const candidatesEnc = encode(candidatesJson);
+        const kindsEnc = encode(kindsJson);
+        const symbolRefsEnc = encode(symbolRefsJson);
+
+        // Add rich metadata attributes
+        node.attributes.push(
+          t.jsxAttribute(
+            t.jsxIdentifier("data-codepress-edit-candidates"),
+            t.stringLiteral(candidatesEnc)
+          )
+        );
+        node.attributes.push(
+          t.jsxAttribute(
+            t.jsxIdentifier("data-codepress-source-kinds"),
+            t.stringLiteral(kindsEnc)
+          )
+        );
+        node.attributes.push(
+          t.jsxAttribute(
+            t.jsxIdentifier("data-codepress-symbol-refs"),
+            t.stringLiteral(symbolRefsEnc)
+          )
+        );
+
+        // Add callsite attribute
+        node.attributes.push(
+          t.jsxAttribute(
+            t.jsxIdentifier("data-codepress-callsite"),
+            t.stringLiteral(attributeValue)
+          )
+        );
+
+        // For custom components (not in skip list), wrap with marker
+        if (isCustomComponent(node.name) && !isSkipComponent(node.name)) {
+          // Note: Wrapping logic similar to SWC could be added here
+          // For now, we just add the metadata attributes
+        }
       },
     },
     post() {
       if (processedFileCount > 0) {
         console.log(
-          `\x1b[36mℹ Processed ${processedFileCount} files with CodePress\x1b[0m`
+          `\x1b[36mℹ Processed ${processedFileCount} files with CodePress (full features)\x1b[0m`
         );
       } else {
         console.log("\x1b[33m⚠ No files were processed by CodePress\x1b[0m");
