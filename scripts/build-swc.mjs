@@ -46,38 +46,11 @@ const BANDS = [
   },
 ];
 
-// Allow selecting specific bands via env (`BAND` or `BANDS`) or CLI args.
-// Examples:
-//   BAND=v42 node scripts/build-swc.mjs
-//   BANDS=v26,v42 node scripts/build-swc.mjs
-//   node scripts/build-swc.mjs v42 v26
-const args = process.argv.slice(2).filter(Boolean);
-const bandEnvRaw = process.env.BAND || process.env.BANDS || "";
-const bandIdsFromEnv = bandEnvRaw
+// Support env-based band selection for legacy workflows (BAND/BANDS).
+const ENV_BAND_IDS = (process.env.BAND || process.env.BANDS || "")
   .split(",")
   .map((s) => s.trim())
   .filter(Boolean);
-const requestedIds = [...bandIdsFromEnv, ...args];
-const validIds = new Set(BANDS.map((b) => b.id));
-let BANDS_TO_BUILD = BANDS;
-if (requestedIds.length) {
-  const unknown = requestedIds.filter((id) => !validIds.has(id));
-  if (unknown.length) {
-    console.error(
-      `[codepress] Unknown band(s): ${unknown.join(", ")}. Valid: ${[...validIds].join(", ")}`
-    );
-    process.exit(1);
-  }
-  const requestedSet = new Set(requestedIds);
-  BANDS_TO_BUILD = BANDS.filter((b) => requestedSet.has(b.id));
-  console.log(
-    `[codepress] Building bands: ${BANDS_TO_BUILD.map((b) => b.id).join(", ")}`
-  );
-} else {
-  console.log(
-    `[codepress] Building all bands: ${BANDS.map((b) => b.id).join(", ")}`
-  );
-}
 
 // Newer Next uses WASI preview1 (“wasip1”). Some older builds still used “wasi”.
 const TARGETS = [
@@ -315,6 +288,29 @@ function selectTargets(targetArg) {
       process.exit(1);
     }
     bands = BANDS.filter((b) => b.id === bandId);
+  } else if (ENV_BAND_IDS.length) {
+    const validIds = new Set(BANDS.map((b) => b.id));
+    const unknown = ENV_BAND_IDS.filter((id) => !validIds.has(id));
+    if (unknown.length) {
+      console.error(
+        `[codepress] Unknown band(s) via env: ${unknown.join(
+          ", "
+        )}. Valid: ${[...validIds].join(", ")}`
+      );
+      process.exit(1);
+    }
+    const envSet = new Set(ENV_BAND_IDS);
+    bands = BANDS.filter((b) => envSet.has(b.id));
+  }
+
+  if (bands.length === BANDS.length) {
+    console.log(
+      `[codepress] Building all bands: ${BANDS.map((b) => b.id).join(", ")}`
+    );
+  } else {
+    console.log(
+      `[codepress] Building bands: ${bands.map((b) => b.id).join(", ")}`
+    );
   }
 
   const targets = selectTargets(args.target);
