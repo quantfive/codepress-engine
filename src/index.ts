@@ -80,6 +80,24 @@ function detectGitBranch(): string {
 }
 
 function detectGitRepoName(): string | null {
+  // Check CI environment variables first
+  const vercelOwner = process.env.VERCEL_GIT_REPO_OWNER;
+  const vercelSlug = process.env.VERCEL_GIT_REPO_SLUG;
+
+  if (vercelOwner && vercelSlug) {
+    const repoId = `${vercelOwner}/${vercelSlug}`;
+    console.log(`\x1b[32m✓ Detected GitHub repository from Vercel: ${repoId}\x1b[0m`);
+    return repoId;
+  }
+
+  // Check GitHub Actions environment variables
+  const githubRepo = process.env.GITHUB_REPOSITORY;
+  if (githubRepo) {
+    console.log(`\x1b[32m✓ Detected GitHub repository from GitHub Actions: ${githubRepo}\x1b[0m`);
+    return githubRepo;
+  }
+
+  // Fall back to git commands
   try {
     const remoteUrl = execSync("git config --get remote.origin.url", {
       encoding: "utf8",
@@ -155,6 +173,42 @@ export default function codePressPlugin(
           state.file.encodedPath = encode(relativePath);
           processedFileCount += 1;
         },
+        exit(programPath, state) {
+          // Only inject the script once and only if we have repo info
+          if (globalAttributesAdded || !repoName) {
+            return;
+          }
+
+          // Only inject in files that have JSX (check if we processed this file)
+          if (!state.file.encodedPath) {
+            return;
+          }
+
+          // Create the runtime script that adds attributes to document.body
+          const scriptCode = `
+(function() {
+  if (typeof document !== 'undefined' && document.body && !document.body.hasAttribute('${REPO_ATTRIBUTE_NAME}')) {
+    document.body.setAttribute('${REPO_ATTRIBUTE_NAME}', '${repoName}');
+    ${branch ? `document.body.setAttribute('${BRANCH_ATTRIBUTE_NAME}', '${branch}');` : ''}
+  }
+})();
+`;
+
+          // Parse the script and add it to the beginning of the program
+          const scriptAst = babel.template.ast(scriptCode);
+          if (Array.isArray(scriptAst)) {
+            programPath.node.body.unshift(...scriptAst);
+          } else {
+            programPath.node.body.unshift(scriptAst);
+          }
+
+          globalAttributesAdded = true;
+          console.log(
+            `\x1b[32m✓ Injected repo/branch script in ${path.basename(
+              state.file.opts.filename ?? "unknown"
+            )}\x1b[0m`
+          );
+        },
       },
       JSXOpeningElement(nodePath, state) {
         const encodedPath = state.file.encodedPath;
@@ -185,66 +239,6 @@ export default function codePressPlugin(
             )
           );
         }
-
-        if (!repoName || globalAttributesAdded) {
-          return;
-        }
-
-        if (!t.isJSXIdentifier(node.name)) {
-          return;
-        }
-
-        const elementName = node.name.name;
-        const isRootElement = ["html", "body", "div"].includes(elementName);
-
-        if (!isRootElement) {
-          return;
-        }
-
-        const hasRepoAttribute = node.attributes.some(
-          (attr) =>
-            t.isJSXAttribute(attr) &&
-            t.isJSXIdentifier(attr.name, { name: REPO_ATTRIBUTE_NAME })
-        );
-
-        if (!hasRepoAttribute) {
-          console.log(
-            `\x1b[32m✓ Adding repo attribute globally to <${elementName}> in ${path.basename(
-              state.file.opts.filename ?? "unknown"
-            )}\x1b[0m`
-          );
-          node.attributes.push(
-            t.jsxAttribute(
-              t.jsxIdentifier(REPO_ATTRIBUTE_NAME),
-              t.stringLiteral(repoName)
-            )
-          );
-        }
-
-        const hasBranchAttribute = node.attributes.some(
-          (attr) =>
-            t.isJSXAttribute(attr) &&
-            t.isJSXIdentifier(attr.name, { name: BRANCH_ATTRIBUTE_NAME })
-        );
-
-        if (!hasBranchAttribute && branch) {
-          console.log(
-            `\x1b[32m✓ Adding branch attribute globally to <${elementName}> in ${path.basename(
-              state.file.opts.filename ?? "unknown"
-            )}\x1b[0m`
-          );
-          node.attributes.push(
-            t.jsxAttribute(
-              t.jsxIdentifier(BRANCH_ATTRIBUTE_NAME),
-              t.stringLiteral(branch)
-            )
-          );
-        }
-
-        globalAttributesAdded = true;
-        console.log(
-          "\x1b[36mℹ Repo/branch attributes added globally. Won't add again.\x1b[0m"
-        );
       },
     },
     post() {
