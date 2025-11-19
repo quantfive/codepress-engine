@@ -287,6 +287,10 @@ export class ModuleGraphCollector {
     // array.push(), map.set(), etc.
     else if (callee.type === 'MemberExpression' && callee.property.type === 'Identifier') {
       const method = callee.property.name;
+      // Guard against Super type which staticMemberPath doesn't handle
+      if (callee.object.type === 'Super') {
+        return;
+      }
       const memberPath = this.staticMemberPath(callee.object);
 
       if (memberPath) {
