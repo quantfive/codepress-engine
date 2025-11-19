@@ -482,40 +482,174 @@ impl CodePressTransform {
     // Inject `globalThis.__CPX_GRAPH[file] = JSON.parse("<json>")` via new Function to avoid big AST building.
     fn inject_graph_stmt(&self, m: &mut Module) {
         let file_key = xor_encode(&self.current_file());
-        let file_key_json = serde_json::to_string(&file_key).unwrap_or("\"unknown\"".into());
         // graph as JSON string literal passed into JSON.parse
         let graph_json = serde_json::to_string(&self.graph).unwrap_or("{}".into());
-        let graph_json_str = serde_json::to_string(&graph_json).unwrap_or("\"{}\"".into());
-        let js = format!(
-            "try{{var g=(typeof globalThis!=='undefined'?globalThis:window);g.__CPX_GRAPH=g.__CPX_GRAPH||{{}};g.__CPX_GRAPH[{file}]=JSON.parse({graph});}}catch(_e){{}}",
-            file = file_key_json,
-            graph = graph_json_str
-        );
-        let stmt = ModuleItem::Stmt(Stmt::Expr(ExprStmt {
+
+        // Build: typeof globalThis !== "undefined"
+        let has_global_this = Expr::Bin(BinExpr {
             span: DUMMY_SP,
-            expr: Box::new(Expr::Call(CallExpr {
+            op: BinaryOp::NotEqEq,
+            left: Box::new(Expr::Unary(UnaryExpr {
                 span: DUMMY_SP,
-                callee: Callee::Expr(Box::new(Expr::New(NewExpr {
+                op: UnaryOp::TypeOf,
+                arg: Box::new(Expr::Ident(cp_ident("globalThis"))),
+            })),
+            right: Box::new(Expr::Lit(Lit::Str(Str {
+                span: DUMMY_SP,
+                value: "undefined".into(),
+                raw: None,
+            }))),
+        });
+
+        // typeof globalThis !== "undefined" ? globalThis : window
+        let global_target = Expr::Cond(CondExpr {
+            span: DUMMY_SP,
+            test: Box::new(has_global_this),
+            cons: Box::new(Expr::Ident(cp_ident("globalThis"))),
+            alt: Box::new(Expr::Ident(cp_ident("window"))),
+        });
+
+        // var g = (typeof globalThis !== "undefined" ? globalThis : window);
+        let g_decl = Stmt::Decl(Decl::Var(Box::new(VarDecl {
+            span: DUMMY_SP,
+            kind: VarDeclKind::Var,
+            declare: false,
+            decls: vec![VarDeclarator {
+                span: DUMMY_SP,
+                name: Pat::Ident(BindingIdent {
+                    id: cp_ident("g"),
+                    type_ann: None,
+                }),
+                init: Some(Box::new(global_target)),
+                definite: false,
+            }],
+            #[cfg(not(feature = "compat_0_87"))]
+            ctxt: SyntaxContext::empty(),
+        })));
+
+        // g.__CPX_GRAPH = g.__CPX_GRAPH || {};
+        let graph_assign = Stmt::Expr(ExprStmt {
+            span: DUMMY_SP,
+            expr: Box::new(Expr::Assign(AssignExpr {
+                span: DUMMY_SP,
+                op: AssignOp::Assign,
+                left: make_assign_left_member(
+                    Expr::Ident(cp_ident("g")),
+                    cp_ident_name("__CPX_GRAPH"),
+                ),
+                right: Box::new(Expr::Bin(BinExpr {
                     span: DUMMY_SP,
-                    callee: Box::new(Expr::Ident(cp_ident("Function".into()))),
-                    args: Some(vec![ExprOrSpread {
-                        spread: None,
-                        expr: Box::new(Expr::Lit(Lit::Str(Str {
-                            span: DUMMY_SP,
-                            value: js.into(),
-                            raw: None,
-                        }))),
-                    }]),
-                    type_args: None,
-                    #[cfg(not(feature = "compat_0_87"))]
-                    ctxt: SyntaxContext::empty(),
+                    op: BinaryOp::LogicalOr,
+                    left: Box::new(Expr::Member(MemberExpr {
+                        span: DUMMY_SP,
+                        obj: Box::new(Expr::Ident(cp_ident("g"))),
+                        prop: MemberProp::Ident(cp_ident_name("__CPX_GRAPH")),
+                    })),
+                    right: Box::new(Expr::Object(ObjectLit {
+                        span: DUMMY_SP,
+                        props: vec![],
+                    })),
+                })),
+            })),
+        });
+
+        // JSON.parse("<graph_json>")
+        let parse_call = Expr::Call(CallExpr {
+            span: DUMMY_SP,
+            callee: Callee::Expr(Box::new(Expr::Member(MemberExpr {
+                span: DUMMY_SP,
+                obj: Box::new(Expr::Ident(cp_ident("JSON"))),
+                prop: MemberProp::Ident(cp_ident_name("parse")),
+            }))),
+            args: vec![ExprOrSpread {
+                spread: None,
+                expr: Box::new(Expr::Lit(Lit::Str(Str {
+                    span: DUMMY_SP,
+                    value: graph_json.into(),
+                    raw: None,
                 }))),
-                args: vec![],
-                type_args: None,
+            }],
+            type_args: None,
+            #[cfg(not(feature = "compat_0_87"))]
+            ctxt: SyntaxContext::empty(),
+        });
+
+        // g.__CPX_GRAPH[file_key] = JSON.parse("<graph_json>");
+        #[cfg(feature = "compat_0_87")]
+        let graph_set_left = {
+            PatOrExpr::Expr(Box::new(Expr::Member(MemberExpr {
+                span: DUMMY_SP,
+                obj: Box::new(Expr::Member(MemberExpr {
+                    span: DUMMY_SP,
+                    obj: Box::new(Expr::Ident(cp_ident("g"))),
+                    prop: MemberProp::Ident(cp_ident_name("__CPX_GRAPH")),
+                })),
+                prop: MemberProp::Computed(ComputedPropName {
+                    span: DUMMY_SP,
+                    expr: Box::new(Expr::Lit(Lit::Str(Str {
+                        span: DUMMY_SP,
+                        value: file_key.into(),
+                        raw: None,
+                    }))),
+                }),
+            })))
+        };
+
+        #[cfg(not(feature = "compat_0_87"))]
+        let graph_set_left = {
+            AssignTarget::Simple(SimpleAssignTarget::Member(MemberExpr {
+                span: DUMMY_SP,
+                obj: Box::new(Expr::Member(MemberExpr {
+                    span: DUMMY_SP,
+                    obj: Box::new(Expr::Ident(cp_ident("g"))),
+                    prop: MemberProp::Ident(cp_ident_name("__CPX_GRAPH")),
+                })),
+                prop: MemberProp::Computed(ComputedPropName {
+                    span: DUMMY_SP,
+                    expr: Box::new(Expr::Lit(Lit::Str(Str {
+                        span: DUMMY_SP,
+                        value: file_key.into(),
+                        raw: None,
+                    }))),
+                }),
+            }))
+        };
+
+        let graph_set = Stmt::Expr(ExprStmt {
+            span: DUMMY_SP,
+            expr: Box::new(Expr::Assign(AssignExpr {
+                span: DUMMY_SP,
+                op: AssignOp::Assign,
+                left: graph_set_left,
+                right: Box::new(parse_call),
+            })),
+        });
+
+        let try_stmt = Stmt::Try(TryStmt {
+            span: DUMMY_SP,
+            block: BlockStmt {
+                span: DUMMY_SP,
+                stmts: vec![g_decl, graph_assign, graph_set],
                 #[cfg(not(feature = "compat_0_87"))]
                 ctxt: SyntaxContext::empty(),
-            })),
-        }));
+            },
+            handler: Some(CatchClause {
+                span: DUMMY_SP,
+                param: Some(Pat::Ident(BindingIdent {
+                    id: cp_ident("_e"),
+                    type_ann: None,
+                })),
+                body: BlockStmt {
+                    span: DUMMY_SP,
+                    stmts: vec![],
+                    #[cfg(not(feature = "compat_0_87"))]
+                    ctxt: SyntaxContext::empty(),
+                },
+            }),
+            finalizer: None,
+        });
+
+        let stmt = ModuleItem::Stmt(try_stmt);
         let insert_at = self.directive_insert_index(m);
         m.body.insert(insert_at, stmt);
     }
@@ -1598,29 +1732,204 @@ impl CodePressTransform {
         if lower.contains("node_modules/") || lower.contains("\\node_modules\\") || lower.contains("next/dist/") {
             return;
         }
-        // Inject helper via a small runtime snippet executed with new Function
-        let js = "try{var g=(typeof globalThis!=='undefined'?globalThis:window);if(!g.__CP_stamp)g.__CP_stamp=function(v,id,fp){try{if(v&&(typeof v==='function'||typeof v==='object')&&Object.isExtensible(v)){v.__cp_id=id;v.__cp_fp=fp;}}catch(_e){}return v;}}catch(_e){}";
-        let stmt = ModuleItem::Stmt(Stmt::Expr(ExprStmt {
+        // If the user already defines __CP_stamp in this module, reuse theirs.
+        let has_user_stamp = self
+            .bindings
+            .keys()
+            .any(|id| id.0 == "__CP_stamp");
+        if has_user_stamp {
+            self.inserted_stamp_helper = true;
+            return;
+        }
+
+        // Emit a module-scoped helper:
+        // function __CP_stamp(v,id,fp){
+        //   try{
+        //     if (v && (typeof v === "function" || typeof v === "object") && Object.isExtensible(v)) {
+        //       v.__cp_id = id;
+        //       v.__cp_fp = fp;
+        //     }
+        //   } catch (_e) {}
+        //   return v;
+        // }
+        let v_param = Param {
             span: DUMMY_SP,
-            expr: Box::new(Expr::Call(CallExpr {
+            decorators: vec![],
+            pat: Pat::Ident(BindingIdent {
+                id: cp_ident("v"),
+                type_ann: None,
+            }),
+        };
+        let id_param = Param {
+            span: DUMMY_SP,
+            decorators: vec![],
+            pat: Pat::Ident(BindingIdent {
+                id: cp_ident("id"),
+                type_ann: None,
+            }),
+        };
+        let fp_param = Param {
+            span: DUMMY_SP,
+            decorators: vec![],
+            pat: Pat::Ident(BindingIdent {
+                id: cp_ident("fp"),
+                type_ann: None,
+            }),
+        };
+
+        // Build condition: v && (typeof v === "function" || typeof v === "object") && Object.isExtensible(v)
+        let v_ident_expr = Expr::Ident(cp_ident("v"));
+        let typeof_v_fn = Expr::Bin(BinExpr {
+            span: DUMMY_SP,
+            op: BinaryOp::EqEqEq,
+            left: Box::new(Expr::Unary(UnaryExpr {
                 span: DUMMY_SP,
-                callee: Callee::Expr(Box::new(Expr::New(NewExpr {
-                    span: DUMMY_SP,
-                    callee: Box::new(Expr::Ident(cp_ident("Function".into()))),
-                    args: Some(vec![ExprOrSpread { spread: None, expr: Box::new(Expr::Lit(Lit::Str(Str { span: DUMMY_SP, value: js.into(), raw: None })) ) }]),
-                    type_args: None,
-                    #[cfg(not(feature = "compat_0_87"))]
-                    ctxt: SyntaxContext::empty(),
-                }))),
-                args: vec![],
-                type_args: None,
+                op: UnaryOp::TypeOf,
+                arg: Box::new(Expr::Ident(cp_ident("v"))),
+            })),
+            right: Box::new(Expr::Lit(Lit::Str(Str {
+                span: DUMMY_SP,
+                value: "function".into(),
+                raw: None,
+            }))),
+        });
+        let typeof_v_obj = Expr::Bin(BinExpr {
+            span: DUMMY_SP,
+            op: BinaryOp::EqEqEq,
+            left: Box::new(Expr::Unary(UnaryExpr {
+                span: DUMMY_SP,
+                op: UnaryOp::TypeOf,
+                arg: Box::new(Expr::Ident(cp_ident("v"))),
+            })),
+            right: Box::new(Expr::Lit(Lit::Str(Str {
+                span: DUMMY_SP,
+                value: "object".into(),
+                raw: None,
+            }))),
+        });
+        let type_guard = Expr::Bin(BinExpr {
+            span: DUMMY_SP,
+            op: BinaryOp::LogicalOr,
+            left: Box::new(typeof_v_fn),
+            right: Box::new(typeof_v_obj),
+        });
+        let extensible_call = Expr::Call(CallExpr {
+            span: DUMMY_SP,
+            callee: Callee::Expr(Box::new(Expr::Member(MemberExpr {
+                span: DUMMY_SP,
+                obj: Box::new(Expr::Ident(cp_ident("Object"))),
+                prop: MemberProp::Ident(cp_ident_name("isExtensible")),
+            }))),
+            args: vec![ExprOrSpread {
+                spread: None,
+                expr: Box::new(Expr::Ident(cp_ident("v"))),
+            }],
+            type_args: None,
+            #[cfg(not(feature = "compat_0_87"))]
+            ctxt: SyntaxContext::empty(),
+        });
+        let guard_cond = Expr::Bin(BinExpr {
+            span: DUMMY_SP,
+            op: BinaryOp::LogicalAnd,
+            left: Box::new(Expr::Ident(cp_ident("v"))),
+            right: Box::new(Expr::Bin(BinExpr {
+                span: DUMMY_SP,
+                op: BinaryOp::LogicalAnd,
+                left: Box::new(type_guard),
+                right: Box::new(extensible_call),
+            })),
+        });
+
+        let assign_id = Stmt::Expr(ExprStmt {
+            span: DUMMY_SP,
+            expr: Box::new(Expr::Assign(AssignExpr {
+                span: DUMMY_SP,
+                op: AssignOp::Assign,
+                left: make_assign_left_member(
+                    Expr::Ident(cp_ident("v")),
+                    cp_ident_name("__cp_id"),
+                ),
+                right: Box::new(Expr::Ident(cp_ident("id"))),
+            })),
+        });
+        let assign_fp = Stmt::Expr(ExprStmt {
+            span: DUMMY_SP,
+            expr: Box::new(Expr::Assign(AssignExpr {
+                span: DUMMY_SP,
+                op: AssignOp::Assign,
+                left: make_assign_left_member(
+                    Expr::Ident(cp_ident("v")),
+                    cp_ident_name("__cp_fp"),
+                ),
+                right: Box::new(Expr::Ident(cp_ident("fp"))),
+            })),
+        });
+        let if_stmt = Stmt::If(IfStmt {
+            span: DUMMY_SP,
+            test: Box::new(guard_cond),
+            cons: Box::new(Stmt::Block(BlockStmt {
+                span: DUMMY_SP,
+                stmts: vec![assign_id, assign_fp],
                 #[cfg(not(feature = "compat_0_87"))]
                 ctxt: SyntaxContext::empty(),
             })),
-        }));
+            alt: None,
+        });
+
+        let try_stmt = Stmt::Try(TryStmt {
+            span: DUMMY_SP,
+            block: BlockStmt {
+                span: DUMMY_SP,
+                stmts: vec![if_stmt],
+                #[cfg(not(feature = "compat_0_87"))]
+                ctxt: SyntaxContext::empty(),
+            },
+            handler: Some(CatchClause {
+                span: DUMMY_SP,
+                param: Some(Pat::Ident(BindingIdent {
+                    id: cp_ident("_e"),
+                    type_ann: None,
+                })),
+                body: BlockStmt {
+                    span: DUMMY_SP,
+                    stmts: vec![],
+                    #[cfg(not(feature = "compat_0_87"))]
+                    ctxt: SyntaxContext::empty(),
+                },
+            }),
+            finalizer: None,
+        });
+
+        let ret_stmt = Stmt::Return(ReturnStmt {
+            span: DUMMY_SP,
+            arg: Some(Box::new(Expr::Ident(cp_ident("v")))),
+        });
+
+        let helper_fn = ModuleItem::Stmt(Stmt::Decl(Decl::Fn(FnDecl {
+            ident: cp_ident("__CP_stamp"),
+            declare: false,
+            function: Box::new(Function {
+                params: vec![v_param, id_param, fp_param],
+                decorators: vec![],
+                span: DUMMY_SP,
+                body: Some(BlockStmt {
+                    span: DUMMY_SP,
+                    stmts: vec![try_stmt, ret_stmt],
+                    #[cfg(not(feature = "compat_0_87"))]
+                    ctxt: SyntaxContext::empty(),
+                }),
+                is_generator: false,
+                is_async: false,
+                type_params: None,
+                return_type: None,
+                #[cfg(not(feature = "compat_0_87"))]
+                ctxt: SyntaxContext::empty(),
+            }),
+        })));
+
         // Place AFTER directive prologue (e.g., "use client"; "use strict")
         let insert_at = self.directive_insert_index(m);
-        m.body.insert(insert_at, stmt);
+        m.body.insert(insert_at, helper_fn);
         self.inserted_stamp_helper = true;
     }
 }
