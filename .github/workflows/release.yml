@@ -147,6 +147,9 @@ jobs:
       - name: Build Rust WASM plugin
         run: pnpm run build:rust
 
+      - name: Run tests
+        run: pnpm test
+
       # Optional: verify the pack contents before publishing
       - name: Dry-run pack
         run: pnpm pack --dry-run
