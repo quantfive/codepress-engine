@@ -1,6 +1,7 @@
 {
   "name": "@codepress/codepress-engine",
   "version": "0.4.1",
+  "packageManager": "pnpm@10.22.0",
   "description": "CodePress engine - Babel and SWC plug-ins",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -116,5 +117,8 @@
     "node-fetch": "^2.6.7",
     "prettier": "^3.1.0",
     "ws": "^8.18.0"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": ["unrs-resolver"]
   }
 }
