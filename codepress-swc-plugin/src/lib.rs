@@ -625,7 +625,7 @@ impl CodePressTransform {
             })),
         });
 
-        let try_stmt = Stmt::Try(TryStmt {
+        let try_stmt = Stmt::Try(Box::new(TryStmt {
             span: DUMMY_SP,
             block: BlockStmt {
                 span: DUMMY_SP,
@@ -647,7 +647,7 @@ impl CodePressTransform {
                 },
             }),
             finalizer: None,
-        });
+        }));
 
         let stmt = ModuleItem::Stmt(try_stmt);
         let insert_at = self.directive_insert_index(m);
@@ -1876,7 +1876,7 @@ impl CodePressTransform {
             alt: None,
         });
 
-        let try_stmt = Stmt::Try(TryStmt {
+        let try_stmt = Stmt::Try(Box::new(TryStmt {
             span: DUMMY_SP,
             block: BlockStmt {
                 span: DUMMY_SP,
@@ -1898,7 +1898,7 @@ impl CodePressTransform {
                 },
             }),
             finalizer: None,
-        });
+        }));
 
         let ret_stmt = Stmt::Return(ReturnStmt {
             span: DUMMY_SP,
