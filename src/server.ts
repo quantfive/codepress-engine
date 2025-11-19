@@ -1351,9 +1351,10 @@ async function startServer(
     // Create the Fastify app
     const app = createApp();
 
-    // Ensure lock is released when Fastify closes
+    // Ensure lock is released and instance is cleared when Fastify closes
     app.addHook("onClose", () => {
       releaseLock();
+      serverInstance = null;
     });
 
     // Start the server
@@ -1550,7 +1551,11 @@ const serverModule: ServerModule = {
   getProjectStructure,
 };
 
-if (process.env.NODE_ENV !== "production") {
+// Auto-start server in development mode, unless explicitly disabled (e.g., in tests)
+if (
+  process.env.NODE_ENV !== "production" &&
+  !process.env.CODEPRESS_NO_AUTO_START
+) {
   (async () => {
     try {
       serverModule.server = await startServer();

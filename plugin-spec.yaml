@@ -1,0 +1,49 @@
+# Shared specification for generating both plugins
+# (This is a conceptual example - would need tooling)
+
+attributes:
+  - name: codepress-data-fp
+    description: Encoded file path with line range
+    format: "{encoded_path}:{start_line}-{end_line}"
+    apply_to: all_jsx_elements
+    required: true
+
+  - name: data-codepress-callsite
+    description: Location where component is called
+    format: "{encoded_path}:{start_line}-{end_line}"
+    apply_to: custom_components
+    required: false
+    since_version: swc_only
+
+behaviors:
+  git_detection:
+    priority: 0
+    check_env_vars:
+      - GIT_BRANCH
+      - VERCEL_GIT_COMMIT_REF
+      - GITHUB_HEAD_REF
+    fallback: git rev-parse --abbrev-ref HEAD
+    default: main
+
+  repo_detection:
+    priority: 0
+    check_env_vars:
+      - VERCEL_GIT_REPO_OWNER + VERCEL_GIT_REPO_SLUG
+      - GITHUB_REPOSITORY
+    fallback: git config --get remote.origin.url
+    parse_patterns:
+      - https://github.com/{owner}/{repo}
+      - git@github.com:{owner}/{repo}
+
+module_graph:
+  enabled: swc_only
+  tracks:
+    - imports
+    - exports
+    - reexports
+    - definitions
+    - mutations
+    - literal_index
+
+# Would need a generator:
+# npm run generate:plugins -- --from plugin-spec.yaml
