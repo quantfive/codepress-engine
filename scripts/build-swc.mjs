@@ -99,20 +99,18 @@ const templateCargo = (band) => {
   const serdeVer = band.extra?.serde ?? "=1.0.219";
   const serdeJsonVer = band.extra?.serde_json ?? "^1.0.140";
 
-  const swcCommonLine =
-    band.extra && band.extra.swc_common
-      ? `swc_common = "${band.extra.swc_common}"`
-      : "";
+  const swcCommonLine = band.extra?.swc_common
+    ? `swc_common = "${band.extra.swc_common}"`
+    : "";
 
-  const featuresBlock =
-    band.extra && band.extra.compat_feature
-      ? `
+  const featuresBlock = band.extra?.compat_feature
+    ? `
 
 [features]
 ${band.extra.compat_feature} = []
 default = ["${band.extra.compat_feature}"]
 `
-      : "";
+    : "";
 
   return `\
 [package]
@@ -153,13 +151,13 @@ async function hasTarget(triple) {
   return out.split(/\s+/).includes(triple);
 }
 
-async function buildOneBand(band) {
+async function buildOneBand(band, targets = TARGETS) {
   const tmp = await mkdtemp(join(tmpdir(), `cp-swc-${band.id}-`));
   await mkdir(join(tmp, "src"), { recursive: true });
   await cp(join(CRATE_DIR, "src"), join(tmp, "src"), { recursive: true });
   await writeFile(join(tmp, "Cargo.toml"), templateCargo(band), "utf8");
 
-  for (const t of TARGETS) {
+  for (const t of targets) {
     if (!(await hasTarget(t.triple))) {
       console.warn(
         `[codepress] Skipping ${t.triple} (rustc target not installed). Run: rustup target add ${t.triple}`
@@ -185,5 +183,142 @@ async function buildOneBand(band) {
   await rm(tmp, { recursive: true, force: true });
 }
 
-for (const band of BANDS_TO_BUILD) await buildOneBand(band);
-console.log("Finished SWC bands built.");
+function parseArgs(argv) {
+  const args = {
+    next: undefined,
+    band: undefined,
+    target: undefined,
+    listBands: false,
+    help: false,
+  };
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    switch (a) {
+      case "--next":
+      case "-n":
+        args.next = argv[++i];
+        break;
+      case "--band":
+      case "-b":
+        args.band = argv[++i];
+        break;
+      case "--target":
+      case "-t":
+        args.target = argv[++i];
+        break;
+      case "--list-bands":
+        args.listBands = true;
+        break;
+      case "--help":
+      case "-h":
+        args.help = true;
+        break;
+      default:
+        // ignore unknown for forward-compat
+        break;
+    }
+  }
+  return args;
+}
+
+function parseSemver(input) {
+  if (!input) return null;
+  const m = String(input)
+    .trim()
+    .match(/^(\d+)\.(\d+)(?:\.(\d+))?$/);
+  if (!m) return null;
+  return { major: Number(m[1]), minor: Number(m[2]), patch: Number(m[3] ?? 0) };
+}
+
+function nextToBandId(nextVersion) {
+  const v = parseSemver(nextVersion);
+  if (!v) return null;
+  // Mapping guided by bands defined above
+  // - Next 14.0 - 14.1  => v0_82_87
+  // - Next 14.2 - 15.4  => v26
+  // - Next 15.5+        => v42
+  if (v.major < 14) return "v0_82_87";
+  if (v.major === 14) {
+    if (v.minor <= 1) return "v0_82_87";
+    return "v26"; // 14.2+
+  }
+  if (v.major === 15) {
+    if (v.minor <= 4) return "v26";
+    return "v42"; // 15.5+
+  }
+  // Future Next versions default to latest band
+  return "v42";
+}
+
+function usage() {
+  console.log(
+    `Usage: node scripts/build-swc.mjs [options]\n\n` +
+      `Options:\n` +
+      `  -n, --next <version>    Build band matching Next.js version (e.g. 15.4.0)\n` +
+      `  -b, --band <id>         Build specific band id (one of: ${BANDS.map((b) => b.id).join(", ")})\n` +
+      `  -t, --target <t>        Build target(s): wasip1 | wasi | all | comma-list (default: all)\n` +
+      `      --list-bands        Print available band ids and exit\n` +
+      `  -h, --help              Show this help\n\n` +
+      `Examples:\n` +
+      `  node scripts/build-swc.mjs --next 15.4.0\n` +
+      `  node scripts/build-swc.mjs --band v26 --target wasip1\n` +
+      `  npm run build:rust -- --next 15.4.0\n`
+  );
+}
+
+function selectTargets(targetArg) {
+  if (!targetArg || targetArg === "all") return TARGETS;
+  const parts = String(targetArg)
+    .split(/[,\s]+/)
+    .filter(Boolean);
+  const wanted = new Set(parts.map((p) => p.toLowerCase()));
+  const byKey = {
+    wasip1: TARGETS.find((t) => t.triple === "wasm32-wasip1"),
+    wasi: TARGETS.find((t) => t.triple === "wasm32-wasi"),
+  };
+  const out = [];
+  if (wanted.has("wasip1") && byKey.wasip1) out.push(byKey.wasip1);
+  if (wanted.has("wasi") && byKey.wasi) out.push(byKey.wasi);
+  if (out.length === 0) return TARGETS;
+  return out;
+}
+
+(async () => {
+  const args = parseArgs(process.argv.slice(2));
+
+  if (args.help) {
+    usage();
+    return;
+  }
+
+  if (args.listBands) {
+    console.log("Available bands:");
+    for (const b of BANDS) console.log(`  ${b.id} (swc_core ${b.swc_core})`);
+    return;
+  }
+
+  let bands = BANDS;
+  if (args.band) {
+    bands = BANDS.filter((b) => b.id === args.band);
+    if (bands.length === 0) {
+      console.error(`[codepress] Unknown band id: ${args.band}`);
+      usage();
+      process.exit(1);
+    }
+  } else if (args.next) {
+    const bandId = nextToBandId(args.next);
+    if (!bandId) {
+      console.error(
+        `[codepress] Could not parse Next.js version: ${args.next}`
+      );
+      usage();
+      process.exit(1);
+    }
+    bands = BANDS.filter((b) => b.id === bandId);
+  }
+
+  const targets = selectTargets(args.target);
+
+  for (const band of bands) await buildOneBand(band, targets);
+  console.log("Finished SWC bands built.");
+})();

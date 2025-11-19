@@ -1,6 +1,6 @@
 {
   "name": "@codepress/codepress-engine",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "packageManager": "pnpm@10.22.0",
   "description": "CodePress engine - Babel and SWC plug-ins",
   "main": "./dist/index.js",
@@ -30,6 +30,11 @@
       "types": "./dist/swc/index.d.ts",
       "require": "./dist/swc/index.js",
       "default": "./dist/swc/index.js"
+    },
+    "./esbuild": {
+      "types": "./dist/esbuild-plugin.d.ts",
+      "require": "./dist/esbuild-plugin.js",
+      "default": "./dist/esbuild-plugin.js"
     },
     "./swc/wasm": "./swc/codepress_engine.v42.wasm",
     "./swc/wasm-v42": "./swc/codepress_engine.v42.wasm",
@@ -96,6 +101,7 @@
     "@types/jest": "^30.0.0",
     "@types/node": "^22.9.0",
     "@types/node-fetch": "^2.6.11",
+    "esbuild": "^0.24.0",
     "babel-jest": "^30.2.0",
     "eslint": "^9.37.0",
     "eslint-config-prettier": "^10.1.8",

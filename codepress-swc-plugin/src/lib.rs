@@ -9,6 +9,7 @@ use swc_core::{
     },
     plugin::{plugin_transform, proxies::TransformPluginProgramMetadata},
 };
+use swc_core::common::util::take::Take;
 
 // ---------- Compatibility helpers (per-swccore band) ----------
 
@@ -67,6 +68,21 @@ fn make_assign_left_member(obj: Expr, prop: CpIdentName) -> swc_core::ecma::ast:
     }))
 }
 
+// Helper: assignment left for simple identifier
+#[cfg(feature = "compat_0_87")]
+fn make_assign_left_ident(name: &str) -> swc_core::ecma::ast::PatOrExpr {
+    use swc_core::ecma::ast::PatOrExpr;
+    PatOrExpr::Expr(Box::new(Expr::Ident(cp_ident(name))))
+}
+
+#[cfg(not(feature = "compat_0_87"))]
+fn make_assign_left_ident(name: &str) -> swc_core::ecma::ast::AssignTarget {
+    use swc_core::ecma::ast::{AssignTarget, BindingIdent, SimpleAssignTarget};
+    AssignTarget::Simple(SimpleAssignTarget::Ident(BindingIdent {
+        id: cp_ident(name),
+        type_ann: None,
+    }))
+}
 // End Compatibility helpers // TODO: move these to another file?
 
 // -----------------------------------------------------------------------------
@@ -128,6 +144,9 @@ pub struct CodePressTransform {
     wrapper_tag: String,    // DOM wrapper tag (display: contents)
     provider_ident: String, // __CPProvider (inline injected)
     inserted_provider_import: bool,
+    inserted_stamp_helper: bool,
+    stamp_callsites: bool,
+    callsite_symbols: HashSet<String>,
 
     // -------- module graph (this module only) --------
     module_file: Option<String>,
@@ -167,6 +186,10 @@ impl CodePressTransform {
 
         let wrapper_tag = "codepress-marker".to_string();
         let provider_ident = "__CPProvider".to_string();
+        let stamp_callsites = config
+            .remove("stampCallsites")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true);
 
         // Parse optional skip lists from config
         fn read_string_set(map: &mut HashMap<String, serde_json::Value>, key: &str) -> std::collections::HashSet<String> {
@@ -209,6 +232,9 @@ impl CodePressTransform {
             wrapper_tag,
             provider_ident,
             inserted_provider_import: false,
+            inserted_stamp_helper: false,
+            stamp_callsites,
+            callsite_symbols: HashSet::new(),
             module_file: None,
             graph: ModuleGraph {
                 imports: vec![],
@@ -224,6 +250,30 @@ impl CodePressTransform {
     }
 
     // ---------- helpers ----------
+    fn normalize_repo_relative(&self, filename: &str) -> String {
+        let mut s = normalize_filename(filename);
+        let mut s_norm = s.replace('\\', "/");
+        if let Some(repo_full) = &self.repo_name {
+            // Fallback: strip up to the last "/<repo>/" segment when repo_root isn't provided
+            let repo_seg = repo_full.split('/').last().unwrap_or(repo_full);
+            if !repo_seg.is_empty() {
+                let needle = format!("/{}/", repo_seg);
+                if let Some(idx) = s_norm.find(&needle) {
+                    let cut = idx + needle.len();
+                    if cut <= s_norm.len() {
+                        s_norm = s_norm[cut..].to_string();
+                    }
+                } else {
+                    // Handle trailing "/<repo>"
+                    let trail = format!("/{}", repo_seg);
+                    if s_norm.ends_with(&trail) {
+                        s_norm.clear();
+                    }
+                }
+            }
+        }
+        s_norm
+    }
 
     fn span_file_lines(&self, s: swc_core::common::Span) -> String {
         if s.is_dummy() {
@@ -232,12 +282,8 @@ impl CodePressTransform {
         if let Some(ref cm) = self.source_map {
             let lo = cm.lookup_char_pos(s.lo());
             let hi = cm.lookup_char_pos(s.hi());
-            return format!(
-                "{}:{}-{}",
-                normalize_filename(&lo.file.name.to_string()),
-                lo.line,
-                hi.line
-            );
+            let rel = self.normalize_repo_relative(&lo.file.name.to_string());
+            return format!("{}:{}-{}", rel, lo.line, hi.line);
         }
         "unknown:0-0".to_string()
     }
@@ -248,7 +294,7 @@ impl CodePressTransform {
         }
         if let Some(ref cm) = self.source_map {
             let lo = cm.lookup_char_pos(s.lo());
-            let f = normalize_filename(&lo.file.name.to_string());
+            let f = self.normalize_repo_relative(&lo.file.name.to_string());
             self.module_file.get_or_insert(f.clone());
             return Some(f);
         }
@@ -259,6 +305,27 @@ impl CodePressTransform {
         self.module_file
             .clone()
             .unwrap_or_else(|| "unknown".to_string())
+    }
+
+    fn is_route_container_path(p: &str) -> bool {
+        let s = p.replace('\\', "/");
+        // app router pages/layouts
+        if s.contains("/app/") && (s.contains("/page.") || s.contains("/layout.")) {
+            return true;
+        }
+        // pages router
+        if s.contains("/pages/") {
+            // include _app and _document too
+            return s.ends_with(".tsx") || s.ends_with(".jsx") || s.contains("/_app.") || s.contains("/_document.");
+        }
+        // src/app or src/pages variants
+        if s.contains("/src/app/") && (s.contains("/page.") || s.contains("/layout.")) {
+            return true;
+        }
+        if s.contains("/src/pages/") {
+            return s.ends_with(".tsx") || s.ends_with(".jsx") || s.contains("/_app.") || s.contains("/_document.");
+        }
+        false
     }
 
     fn is_custom_component_name(name: &JSXElementName) -> bool {
@@ -480,7 +547,7 @@ impl CodePressTransform {
         opening_span: swc_core::common::Span,
         parent_span: Option<swc_core::common::Span>,
     ) -> JSXAttrOrSpread {
-        let normalized = normalize_filename(filename);
+        let normalized = self.normalize_repo_relative(filename);
         let encoded_path = xor_encode(&normalized);
 
         let attr_value = if let Some(line_info) = self.get_line_info(opening_span, parent_span) {
@@ -976,15 +1043,23 @@ impl CodePressTransform {
         if !file.ends_with(".tsx") {
             return;
         }
-        // import { createContext } from "react";
+        // import { createContext, useSyncExternalStore } from "react";
         let import_decl = ModuleItem::ModuleDecl(ModuleDecl::Import(ImportDecl {
             span: DUMMY_SP,
-            specifiers: vec![ImportSpecifier::Named(ImportNamedSpecifier {
-                span: DUMMY_SP,
-                local: cp_ident("createContext".into()),
-                imported: None,
-                is_type_only: false,
-            })],
+            specifiers: vec![
+                ImportSpecifier::Named(ImportNamedSpecifier {
+                    span: DUMMY_SP,
+                    local: cp_ident("createContext".into()),
+                    imported: None,
+                    is_type_only: false,
+                }),
+                ImportSpecifier::Named(ImportNamedSpecifier {
+                    span: DUMMY_SP,
+                    local: cp_ident("useSyncExternalStore".into()),
+                    imported: None,
+                    is_type_only: false,
+                }),
+            ],
             src: Box::new(Str {
                 span: DUMMY_SP,
                 value: "react".into(),
@@ -1042,7 +1117,38 @@ impl CodePressTransform {
             })),
         }));
 
-        // function __CPProvider({ value, children }) { return <__CPX.Provider value={value}>{children}</__CPX.Provider>; }
+        // let __cpvVersion = 0; (module-level variable to persist across renders)
+        let module_version_var = ModuleItem::Stmt(Stmt::Decl(Decl::Var(Box::new(VarDecl {
+            span: DUMMY_SP,
+            kind: VarDeclKind::Let,
+            declare: false,
+            decls: vec![VarDeclarator {
+                span: DUMMY_SP,
+                name: Pat::Ident(BindingIdent {
+                    id: cp_ident("__cpvVersion".into()),
+                    type_ann: None,
+                }),
+                init: Some(Box::new(Expr::Lit(Lit::Num(Number {
+                    span: DUMMY_SP,
+                    value: 0.0,
+                    raw: None,
+                })))),
+                definite: false,
+            }],
+            #[cfg(not(feature = "compat_0_87"))]
+            ctxt: SyntaxContext::empty(),
+        }))));
+
+        // function __CPProvider({ value, children }) {
+        //   const __cpv = useSyncExternalStore(
+        //     (cb) => { window.addEventListener("CP_PREVIEW_REFRESH", cb); return () => window.removeEventListener("CP_PREVIEW_REFRESH", cb); },
+        //     () => Date.now()
+        //   );
+        //   if (typeof window !== "undefined" && !window.__CP_triggerRefresh) {
+        //     window.__CP_triggerRefresh = function(){ window.dispatchEvent(new CustomEvent("CP_PREVIEW_REFRESH")); };
+        //   }
+        //   return <__CPX.Provider value={value}>{children}</__CPX.Provider>;
+        // }
         let provider_fn = {
             // Params: { value, children }
             let param = Param {
@@ -1066,6 +1172,331 @@ impl CodePressTransform {
                     ],
                 }),
             };
+            // Build: const __cpv = useSyncExternalStore(subscribe, getSnapshot, getServerSnapshot)
+            let subscribe_arrow = Expr::Arrow(ArrowExpr {
+                span: DUMMY_SP,
+                params: vec![Pat::Ident(BindingIdent { id: cp_ident("cb".into()), type_ann: None }).into()],
+                body: Box::new(BlockStmtOrExpr::BlockStmt(BlockStmt {
+                    span: DUMMY_SP,
+                    stmts: vec![
+                        // const h = () => { __cpvVersion = __cpvVersion + 1; cb(); }
+                        Stmt::Decl(Decl::Var(Box::new(VarDecl {
+                            span: DUMMY_SP,
+                            kind: VarDeclKind::Const,
+                            declare: false,
+                            decls: vec![VarDeclarator {
+                                span: DUMMY_SP,
+                                name: Pat::Ident(BindingIdent {
+                                    id: cp_ident("h".into()),
+                                    type_ann: None,
+                                }),
+                                init: Some(Box::new(Expr::Arrow(ArrowExpr {
+                                    span: DUMMY_SP,
+                                    params: vec![],
+                                    body: Box::new(BlockStmtOrExpr::BlockStmt(BlockStmt {
+                                        span: DUMMY_SP,
+                                        stmts: vec![
+                                            // __cpvVersion = __cpvVersion + 1;
+                                            Stmt::Expr(ExprStmt {
+                                                span: DUMMY_SP,
+                                                expr: Box::new(Expr::Assign(AssignExpr {
+                                                    span: DUMMY_SP,
+                                                    op: AssignOp::Assign,
+                                                    left: make_assign_left_ident("__cpvVersion"),
+                                                    right: Box::new(Expr::Bin(BinExpr {
+                                                        span: DUMMY_SP,
+                                                        op: BinaryOp::Add,
+                                                        left: Box::new(Expr::Ident(cp_ident("__cpvVersion".into()))),
+                                                        right: Box::new(Expr::Lit(Lit::Num(Number { span: DUMMY_SP, value: 1.0, raw: None }))),
+                                                    })),
+                                                })),
+                                            }),
+                                            // cb();
+                                            Stmt::Expr(ExprStmt {
+                                                span: DUMMY_SP,
+                                                expr: Box::new(Expr::Call(CallExpr {
+                                                    span: DUMMY_SP,
+                                                    callee: Callee::Expr(Box::new(Expr::Ident(cp_ident("cb".into())))),
+                                                    args: vec![],
+                                                    type_args: None,
+                                                    #[cfg(not(feature = "compat_0_87"))]
+                                                    ctxt: SyntaxContext::empty(),
+                                                })),
+                                            }),
+                                        ],
+                                        #[cfg(not(feature = "compat_0_87"))]
+                                        ctxt: SyntaxContext::empty(),
+                                    })),
+                                    is_async: false,
+                                    is_generator: false,
+                                    type_params: None,
+                                    return_type: None,
+                                    #[cfg(not(feature = "compat_0_87"))]
+                                    ctxt: SyntaxContext::empty(),
+                                }))),
+                                definite: false,
+                            }],
+                            #[cfg(not(feature = "compat_0_87"))]
+                            ctxt: SyntaxContext::empty(),
+                        }))),
+                        // window.addEventListener("CP_PREVIEW_REFRESH", cb);
+                        Stmt::Expr(ExprStmt {
+                            span: DUMMY_SP,
+                            expr: Box::new(Expr::Call(CallExpr {
+                                span: DUMMY_SP,
+                                callee: Callee::Expr(Box::new(Expr::Member(MemberExpr {
+                                    span: DUMMY_SP,
+                                    obj: Box::new(Expr::Ident(cp_ident("window".into()))),
+                                    prop: MemberProp::Ident(cp_ident_name("addEventListener".into())),
+                                }))),
+                                args: vec![
+                                    ExprOrSpread { spread: None, expr: Box::new(Expr::Lit(Lit::Str(Str { span: DUMMY_SP, value: "CP_PREVIEW_REFRESH".into(), raw: None }))) },
+                                    ExprOrSpread { spread: None, expr: Box::new(Expr::Ident(cp_ident("h".into()))) },
+                                ],
+                                type_args: None,
+                                #[cfg(not(feature = "compat_0_87"))]
+                                ctxt: SyntaxContext::empty(),
+                            })),
+                        }),
+                        // return () => window.removeEventListener("CP_PREVIEW_REFRESH", cb);
+                        Stmt::Return(ReturnStmt {
+                            span: DUMMY_SP,
+                            arg: Some(Box::new(Expr::Arrow(ArrowExpr {
+                                span: DUMMY_SP,
+                                params: vec![],
+                                body: Box::new(BlockStmtOrExpr::BlockStmt(BlockStmt {
+                                    span: DUMMY_SP,
+                                    stmts: vec![Stmt::Expr(ExprStmt {
+                                        span: DUMMY_SP,
+                                        expr: Box::new(Expr::Call(CallExpr {
+                                            span: DUMMY_SP,
+                                            callee: Callee::Expr(Box::new(Expr::Member(MemberExpr {
+                                                span: DUMMY_SP,
+                                                obj: Box::new(Expr::Ident(cp_ident("window".into()))),
+                                                prop: MemberProp::Ident(cp_ident_name("removeEventListener".into())),
+                                            }))),
+                                            args: vec![
+                                                ExprOrSpread { spread: None, expr: Box::new(Expr::Lit(Lit::Str(Str { span: DUMMY_SP, value: "CP_PREVIEW_REFRESH".into(), raw: None }))) },
+                                                ExprOrSpread { spread: None, expr: Box::new(Expr::Ident(cp_ident("h".into()))) },
+                                            ],
+                                            type_args: None,
+                                            #[cfg(not(feature = "compat_0_87"))]
+                                            ctxt: SyntaxContext::empty(),
+                                        })),
+                                    })],
+                                    #[cfg(not(feature = "compat_0_87"))]
+                                    ctxt: SyntaxContext::empty(),
+                                })),
+                                is_async: false,
+                                is_generator: false,
+                                type_params: None,
+                                return_type: None,
+                                #[cfg(not(feature = "compat_0_87"))]
+                                ctxt: SyntaxContext::empty(),
+                            }))),
+                        }),
+                    ],
+                    #[cfg(not(feature = "compat_0_87"))]
+                    ctxt: SyntaxContext::empty(),
+                })),
+                is_async: false,
+                is_generator: false,
+                type_params: None,
+                return_type: None,
+                #[cfg(not(feature = "compat_0_87"))]
+                ctxt: SyntaxContext::empty(),
+            });
+            let get_snapshot_arrow = Expr::Arrow(ArrowExpr {
+                span: DUMMY_SP,
+                params: vec![],
+                body: Box::new(BlockStmtOrExpr::Expr(Box::new(Expr::Ident(cp_ident("__cpvVersion".into()))))),
+                is_async: false,
+                is_generator: false,
+                type_params: None,
+                return_type: None,
+                #[cfg(not(feature = "compat_0_87"))]
+                ctxt: SyntaxContext::empty(),
+            });
+            let get_server_snapshot_arrow = Expr::Arrow(ArrowExpr {
+                span: DUMMY_SP,
+                params: vec![],
+                body: Box::new(BlockStmtOrExpr::Expr(Box::new(Expr::Lit(Lit::Num(Number {
+                    span: DUMMY_SP,
+                    value: 0.0,
+                    raw: None,
+                }))))),
+                is_async: false,
+                is_generator: false,
+                type_params: None,
+                return_type: None,
+                #[cfg(not(feature = "compat_0_87"))]
+                ctxt: SyntaxContext::empty(),
+            });
+            // Declare __cpvVersion at function scope so both subscribe and getSnapshot can access it
+            let init_version = Stmt::Decl(Decl::Var(Box::new(VarDecl {
+                span: DUMMY_SP,
+                kind: VarDeclKind::Let,
+                declare: false,
+                decls: vec![VarDeclarator {
+                    span: DUMMY_SP,
+                    name: Pat::Ident(BindingIdent {
+                        id: cp_ident("__cpvVersion".into()),
+                        type_ann: None,
+                    }),
+                    init: Some(Box::new(Expr::Lit(Lit::Num(Number {
+                        span: DUMMY_SP,
+                        value: 0.0,
+                        raw: None,
+                    })))),
+                    definite: false,
+                }],
+                #[cfg(not(feature = "compat_0_87"))]
+                ctxt: SyntaxContext::empty(),
+            })));
+            let init_subscribe = Stmt::Decl(Decl::Var(Box::new(VarDecl {
+                span: DUMMY_SP,
+                kind: VarDeclKind::Const,
+                declare: false,
+                decls: vec![VarDeclarator {
+                    span: DUMMY_SP,
+                    name: Pat::Ident(BindingIdent { id: cp_ident("__cpv".into()), type_ann: None }),
+                    init: Some(Box::new(Expr::Call(CallExpr {
+                        span: DUMMY_SP,
+                        callee: Callee::Expr(Box::new(Expr::Ident(cp_ident("useSyncExternalStore".into())))),
+                        args: vec![
+                            ExprOrSpread { spread: None, expr: Box::new(subscribe_arrow) },
+                            ExprOrSpread { spread: None, expr: Box::new(get_snapshot_arrow) },
+                            ExprOrSpread { spread: None, expr: Box::new(get_server_snapshot_arrow) },
+                        ],
+                        type_args: None,
+                        #[cfg(not(feature = "compat_0_87"))]
+                        ctxt: SyntaxContext::empty(),
+                    }))),
+                    definite: false,
+                }],
+                #[cfg(not(feature = "compat_0_87"))]
+                ctxt: SyntaxContext::empty(),
+            })));
+            // if (typeof window !== "undefined" && !window.__CP_triggerRefresh) window.__CP_triggerRefresh = function(){ window.dispatchEvent(new CustomEvent("CP_PREVIEW_REFRESH")); window.__CP_triggerRefresh.__cp_dispatches_preview = true; }
+            let trigger_member = Expr::Member(MemberExpr {
+                span: DUMMY_SP,
+                obj: Box::new(Expr::Ident(cp_ident("window".into()))),
+                prop: MemberProp::Ident(cp_ident_name("__CP_triggerRefresh".into())),
+            });
+            let assign_trigger_stmt = Stmt::Expr(ExprStmt {
+                span: DUMMY_SP,
+                expr: Box::new(Expr::Assign(AssignExpr {
+                    span: DUMMY_SP,
+                    op: AssignOp::Assign,
+                    left: make_assign_left_member(
+                        Expr::Ident(cp_ident("window")),
+                        cp_ident_name("__CP_triggerRefresh"),
+                    ),
+                    right: Box::new(Expr::Fn(FnExpr {
+                        ident: None,
+                        function: Box::new(Function {
+                            params: vec![],
+                            decorators: vec![],
+                            span: DUMMY_SP,
+                            body: Some(BlockStmt {
+                                span: DUMMY_SP,
+                                stmts: vec![Stmt::Expr(ExprStmt {
+                                    span: DUMMY_SP,
+                                    expr: Box::new(Expr::Call(CallExpr {
+                                        span: DUMMY_SP,
+                                        callee: Callee::Expr(Box::new(Expr::Member(MemberExpr {
+                                            span: DUMMY_SP,
+                                            obj: Box::new(Expr::Ident(cp_ident("window".into()))),
+                                            prop: MemberProp::Ident(cp_ident_name("dispatchEvent".into())),
+                                        }))),
+                                        args: vec![ExprOrSpread {
+                                            spread: None,
+                                            expr: Box::new(Expr::New(NewExpr {
+                                                span: DUMMY_SP,
+                                                callee: Box::new(Expr::Ident(cp_ident("CustomEvent".into()))),
+                                                args: Some(vec![ExprOrSpread {
+                                                    spread: None,
+                                                    expr: Box::new(Expr::Lit(Lit::Str(Str {
+                                                        span: DUMMY_SP,
+                                                        value: "CP_PREVIEW_REFRESH".into(),
+                                                        raw: None,
+                                                    }))),
+                                                }]),
+                                                type_args: None,
+                                                #[cfg(not(feature = "compat_0_87"))]
+                                                ctxt: SyntaxContext::empty(),
+                                            })),
+                                        }],
+                                        type_args: None,
+                                        #[cfg(not(feature = "compat_0_87"))]
+                                        ctxt: SyntaxContext::empty(),
+                                    })),
+                                })],
+                                #[cfg(not(feature = "compat_0_87"))]
+                                ctxt: SyntaxContext::empty(),
+                            }),
+                            is_generator: false,
+                            is_async: false,
+                            type_params: None,
+                            return_type: None,
+                            #[cfg(not(feature = "compat_0_87"))]
+                            ctxt: SyntaxContext::empty(),
+                        }),
+                    })),
+                })),
+            });
+            let mark_trigger_stmt = Stmt::Expr(ExprStmt {
+                span: DUMMY_SP,
+                expr: Box::new(Expr::Assign(AssignExpr {
+                    span: DUMMY_SP,
+                    op: AssignOp::Assign,
+                    left: make_assign_left_member(
+                        trigger_member.clone(),
+                        cp_ident_name("__cp_dispatches_preview".into()),
+                    ),
+                    right: Box::new(Expr::Lit(Lit::Bool(Bool {
+                        span: DUMMY_SP,
+                        value: true,
+                    }))),
+                })),
+            });
+            let if_stmt = Stmt::If(IfStmt {
+                span: DUMMY_SP,
+                test: Box::new(Expr::Bin(BinExpr {
+                    span: DUMMY_SP,
+                    op: BinaryOp::LogicalAnd,
+                    left: Box::new(Expr::Bin(BinExpr {
+                        span: DUMMY_SP,
+                        op: BinaryOp::NotEqEq,
+                        left: Box::new(Expr::Unary(UnaryExpr {
+                            span: DUMMY_SP,
+                            op: UnaryOp::TypeOf,
+                            arg: Box::new(Expr::Ident(cp_ident("window".into()))),
+                        })),
+                        right: Box::new(Expr::Lit(Lit::Str(Str {
+                            span: DUMMY_SP,
+                            value: "undefined".into(),
+                            raw: None,
+                        }))),
+                    })),
+                    right: Box::new(Expr::Unary(UnaryExpr {
+                        span: DUMMY_SP,
+                        op: UnaryOp::Bang,
+                        arg: Box::new(Expr::Member(MemberExpr {
+                            span: DUMMY_SP,
+                            obj: Box::new(Expr::Ident(cp_ident("window".into()))),
+                            prop: MemberProp::Ident(cp_ident_name("__CP_triggerRefresh".into())),
+                        })),
+                    })),
+                })),
+                cons: Box::new(Stmt::Block(BlockStmt {
+                    span: DUMMY_SP,
+                    stmts: vec![assign_trigger_stmt, mark_trigger_stmt],
+                    #[cfg(not(feature = "compat_0_87"))]
+                    ctxt: SyntaxContext::empty(),
+                })),
+                alt: None,
+            });
             // <__CPX.Provider value={value}>{children}</__CPX.Provider>
             let jsx = JSXElement {
                 span: DUMMY_SP,
@@ -1077,14 +1508,24 @@ impl CodePressTransform {
                         obj: JSXObject::Ident(cp_ident("__CPX".into())),
                         prop: cp_ident_name("Provider".into()),
                     }),
-                    attrs: vec![JSXAttrOrSpread::JSXAttr(JSXAttr {
-                        span: DUMMY_SP,
-                        name: JSXAttrName::Ident(cp_ident_name("value".into())),
-                        value: Some(JSXAttrValue::JSXExprContainer(JSXExprContainer {
+                    attrs: vec![
+                        JSXAttrOrSpread::JSXAttr(JSXAttr {
                             span: DUMMY_SP,
-                            expr: JSXExpr::Expr(Box::new(Expr::Ident(cp_ident("value".into())))),
-                        })),
-                    })],
+                            name: JSXAttrName::Ident(cp_ident_name("value".into())),
+                            value: Some(JSXAttrValue::JSXExprContainer(JSXExprContainer {
+                                span: DUMMY_SP,
+                                expr: JSXExpr::Expr(Box::new(Expr::Ident(cp_ident("value".into())))),
+                            })),
+                        }),
+                        JSXAttrOrSpread::JSXAttr(JSXAttr {
+                            span: DUMMY_SP,
+                            name: JSXAttrName::Ident(cp_ident_name("key".into())),
+                            value: Some(JSXAttrValue::JSXExprContainer(JSXExprContainer {
+                                span: DUMMY_SP,
+                                expr: JSXExpr::Expr(Box::new(Expr::Ident(cp_ident("__cpv".into())))),
+                            })),
+                        }),
+                    ],
                     self_closing: false,
                     type_args: None,
                 },
@@ -1102,7 +1543,7 @@ impl CodePressTransform {
                     }),
                 }),
             };
-            ModuleItem::Stmt(Stmt::Decl(Decl::Fn(FnDecl {
+            let mut provider = ModuleItem::Stmt(Stmt::Decl(Decl::Fn(FnDecl {
                 ident: cp_ident(&self.provider_ident),
                 declare: false,
                 function: Box::new(Function {
@@ -1111,10 +1552,14 @@ impl CodePressTransform {
                     span: DUMMY_SP,
                     body: Some(BlockStmt {
                         span: DUMMY_SP,
-                        stmts: vec![Stmt::Return(ReturnStmt {
-                            span: DUMMY_SP,
-                            arg: Some(Box::new(Expr::JSXElement(Box::new(jsx)))),
-                        })],
+                        stmts: vec![
+                            init_subscribe,
+                            if_stmt,
+                            Stmt::Return(ReturnStmt {
+                                span: DUMMY_SP,
+                                arg: Some(Box::new(Expr::JSXElement(Box::new(jsx)))),
+                            }),
+                        ],
                         #[cfg(not(feature = "compat_0_87"))]
                         ctxt: SyntaxContext::empty(),
                     }),
@@ -1125,17 +1570,58 @@ impl CodePressTransform {
                     #[cfg(not(feature = "compat_0_87"))]
                     ctxt: SyntaxContext::empty(),
                 }),
-            })))
+            })));
+            provider
         };
 
-        // Insert after any top-of-file directives, preserving order: import, const, displayName, function
+        // Insert after any top-of-file directives, preserving order: import, const, displayName, version, function
         let insert_at = self.directive_insert_index(m);
         // Insert in reverse so the final order is preserved
         m.body.insert(insert_at, provider_fn);
+        m.body.insert(insert_at, module_version_var);
         m.body.insert(insert_at, cpx_name_stmt);
         m.body.insert(insert_at, cpx_decl);
         m.body.insert(insert_at, import_decl);
         self.inserted_provider_import = true;
+    }
+
+    /// Injects a guarded stamping helper:
+    /// function __CP_stamp(v,id,fp){try{if(v&&(typeof v==='function'||typeof v==='object')&&Object.isExtensible(v)){v.__cp_id=id;v.__cp_fp=fp;}}catch(_){}return v;}
+    fn ensure_stamp_helper_inline(&mut self, m: &mut Module) {
+        if self.inserted_stamp_helper {
+            return;
+        }
+        // Do not inject into third-party bundles (e.g., node_modules, next/dist)
+        let _ = self.file_from_span(m.span);
+        let file = self.current_file();
+        let lower = file.to_lowercase();
+        if lower.contains("node_modules/") || lower.contains("\\node_modules\\") || lower.contains("next/dist/") {
+            return;
+        }
+        // Inject helper via a small runtime snippet executed with new Function
+        let js = "try{var g=(typeof globalThis!=='undefined'?globalThis:window);if(!g.__CP_stamp)g.__CP_stamp=function(v,id,fp){try{if(v&&(typeof v==='function'||typeof v==='object')&&Object.isExtensible(v)){v.__cp_id=id;v.__cp_fp=fp;}}catch(_e){}return v;}}catch(_e){}";
+        let stmt = ModuleItem::Stmt(Stmt::Expr(ExprStmt {
+            span: DUMMY_SP,
+            expr: Box::new(Expr::Call(CallExpr {
+                span: DUMMY_SP,
+                callee: Callee::Expr(Box::new(Expr::New(NewExpr {
+                    span: DUMMY_SP,
+                    callee: Box::new(Expr::Ident(cp_ident("Function".into()))),
+                    args: Some(vec![ExprOrSpread { spread: None, expr: Box::new(Expr::Lit(Lit::Str(Str { span: DUMMY_SP, value: js.into(), raw: None })) ) }]),
+                    type_args: None,
+                    #[cfg(not(feature = "compat_0_87"))]
+                    ctxt: SyntaxContext::empty(),
+                }))),
+                args: vec![],
+                type_args: None,
+                #[cfg(not(feature = "compat_0_87"))]
+                ctxt: SyntaxContext::empty(),
+            })),
+        }));
+        // Place AFTER directive prologue (e.g., "use client"; "use strict")
+        let insert_at = self.directive_insert_index(m);
+        m.body.insert(insert_at, stmt);
+        self.inserted_stamp_helper = true;
     }
 }
 
@@ -1542,7 +2028,153 @@ impl CodePressTransform {
 
 impl VisitMut for CodePressTransform {
     fn visit_mut_module(&mut self, m: &mut Module) {
-        // Provider injection disabled for now
+        // Inject inline provider once per module (from main branch)
+        self.ensure_provider_inline(m);
+        // Inject guarded stamping helper
+        self.ensure_stamp_helper_inline(m);
+
+        // Stamping of exported symbols with __cp_id and __cp_fp (merged change)
+        // Determine encoded file path for this module
+        let filename = if let Some(ref cm) = self.source_map {
+            let loc = cm.lookup_char_pos(m.span.lo());
+            loc.file.name.to_string()
+        } else {
+            "unknown".to_string()
+        };
+        let normalized = self.normalize_repo_relative(&filename);
+        let encoded_fp = xor_encode(&normalized);
+
+        // Decide whether stamping is safe for an identifier (only for functions/classes/calls/new)
+        let find_binding_by_sym = |sym: &str| -> Option<&Binding> {
+            self.bindings
+                .iter()
+                .find(|(k, _)| k.0 == sym)
+                .map(|(_, b)| b)
+        };
+        let is_pascal = |s: &str| s.chars().next().map(|c| c.is_uppercase()).unwrap_or(false);
+        let should_stamp_ident = |ident: &Ident| -> bool {
+            if !is_pascal(&ident.sym.to_string()) {
+                return false;
+            }
+            if let Some(b) = self.bindings.get(&ident.to_id()) {
+                if let Some(init) = &b.init {
+                    match &**init {
+                        Expr::Fn(_) | Expr::Arrow(_) | Expr::Class(_) | Expr::Call(_) | Expr::New(_) => true,
+                        _ => false,
+                    }
+                } else {
+                    // No initializer (likely handled as Decl::Fn/Class elsewhere)
+                    false
+                }
+            } else {
+                false
+            }
+        };
+
+        // Helper to build assignment: Ident.__cp_id = "..." and Ident.__cp_fp = "..."
+        let mut stamp_for_ident = |ident: &Ident, export_name: &str| -> Vec<ModuleItem> {
+            let mut out: Vec<ModuleItem> = Vec::new();
+
+            // __CP_stamp(Ident, "<fp>#<export>", "<fp>")
+            let call = Stmt::Expr(ExprStmt {
+                span: DUMMY_SP,
+                expr: Box::new(Expr::Call(CallExpr {
+                    span: DUMMY_SP,
+                    callee: Callee::Expr(Box::new(Expr::Ident(cp_ident("__CP_stamp".into())))),
+                    args: vec![
+                        ExprOrSpread { spread: None, expr: Box::new(Expr::Ident(ident.clone())) },
+                        ExprOrSpread { spread: None, expr: Box::new(Expr::Lit(Lit::Str(Str { span: DUMMY_SP, value: format!("{}#{}", encoded_fp, export_name).into(), raw: None }))) },
+                        ExprOrSpread { spread: None, expr: Box::new(Expr::Lit(Lit::Str(Str { span: DUMMY_SP, value: encoded_fp.clone().into(), raw: None }))) },
+                    ],
+                    type_args: None,
+                    #[cfg(not(feature = "compat_0_87"))]
+                    ctxt: SyntaxContext::empty(),
+                }))
+            });
+            out.push(ModuleItem::Stmt(call));
+
+            out
+        };
+
+        // Walk module items and append stamping statements after export declarations
+        let mut new_body: Vec<ModuleItem> = Vec::with_capacity(m.body.len() * 2);
+        for item in m.body.drain(..) {
+            match &item {
+                ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(ExportDecl { decl, .. })) => {
+                    new_body.push(item.clone());
+                    match decl {
+                        Decl::Fn(fn_decl) => {
+                            let name = fn_decl.ident.clone();
+                            if is_pascal(&name.sym.to_string()) {
+                                new_body.extend(stamp_for_ident(&name, &name.sym.to_string()));
+                            }
+                        }
+                        Decl::Class(class_decl) => {
+                            let name = class_decl.ident.clone();
+                            if is_pascal(&name.sym.to_string()) {
+                                new_body.extend(stamp_for_ident(&name, &name.sym.to_string()));
+                            }
+                        }
+                        Decl::Var(var_decl) => {
+                            for d in &var_decl.decls {
+                                if let Pat::Ident(bi) = &d.name {
+                                    let name = bi.id.clone();
+                                    if should_stamp_ident(&name) {
+                                        new_body.extend(stamp_for_ident(&name, &name.sym.to_string()));
+                                    }
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                ModuleItem::ModuleDecl(ModuleDecl::ExportDefaultDecl(ExportDefaultDecl { decl, .. })) => {
+                    new_body.push(item.clone());
+                    match decl {
+                        DefaultDecl::Fn(FnExpr { ident: Some(id), .. }) => {
+                            if is_pascal(&id.sym.to_string()) {
+                                new_body.extend(stamp_for_ident(&id, "default"));
+                            }
+                        }
+                        DefaultDecl::Class(ClassExpr { ident: Some(id), .. }) => {
+                            if is_pascal(&id.sym.to_string()) {
+                                new_body.extend(stamp_for_ident(&id, "default"));
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                ModuleItem::ModuleDecl(ModuleDecl::ExportNamed(NamedExport { specifiers, .. })) => {
+                    new_body.push(item.clone());
+                    for spec in specifiers {
+                        if let ExportSpecifier::Named(ExportNamedSpecifier { orig, .. }) = spec {
+                            if let ModuleExportName::Ident(orig_ident) = orig {
+                                // Only stamp PascalCase with a safe initializer
+                                if is_pascal(&orig_ident.sym.to_string()) {
+                                    if let Some(b) = find_binding_by_sym(&orig_ident.sym.to_string()) {
+                                    let safe = match &b.init {
+                                        Some(expr) => match &**expr {
+                                            Expr::Fn(_) | Expr::Arrow(_) | Expr::Class(_) | Expr::Call(_) | Expr::New(_) => true,
+                                            _ => false,
+                                        },
+                                        None => false,
+                                    };
+                                        if safe {
+                                            let id = cp_ident(&orig_ident.sym.to_string());
+                                            new_body.extend(stamp_for_ident(&id, &orig_ident.sym.to_string()));
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                _ => new_body.push(item),
+            }
+        }
+        m.body = new_body;
+
+        // Continue other transforms and inject graph (from main branch)
         m.visit_mut_children_with(self);
         self.inject_graph_stmt(m);
     }
@@ -1715,6 +2347,24 @@ impl VisitMut for CodePressTransform {
                     span: self.span_file_lines(ea.span),
                 });
             }
+            ModuleDecl::ExportDefaultExpr(edx) => {
+                // Wrap default export expression with __CP_stamp(expr, "<fp>#default", "<fp>")
+                let file = self.current_file();
+                let enc = xor_encode(&file);
+                let original = edx.expr.take();
+                edx.expr = Box::new(Expr::Call(CallExpr {
+                    span: DUMMY_SP,
+                    callee: Callee::Expr(Box::new(Expr::Ident(cp_ident("__CP_stamp".into())))),
+                    args: vec![
+                        ExprOrSpread { spread: None, expr: original },
+                        ExprOrSpread { spread: None, expr: Box::new(Expr::Lit(Lit::Str(Str { span: DUMMY_SP, value: format!("{}#{}", enc, "default").into(), raw: None }))) },
+                        ExprOrSpread { spread: None, expr: Box::new(Expr::Lit(Lit::Str(Str { span: DUMMY_SP, value: enc.into(), raw: None }))) },
+                    ],
+                    type_args: None,
+                    #[cfg(not(feature = "compat_0_87"))]
+                    ctxt: SyntaxContext::empty(),
+                }));
+            }
             ModuleDecl::ExportDefaultDecl(ed) => {
                 if let DefaultDecl::Fn(f) = &ed.decl {
                     if let Some(id) = &f.ident {
@@ -1748,6 +2398,29 @@ impl VisitMut for CodePressTransform {
                 kind: "var",
                 span: def_span,
             });
+
+            // If this identifier is used as a JSX callsite and has an initializer, wrap it with __CP_stamp(init, id, fp)
+            if self.stamp_callsites && d.init.is_some() {
+                let sym = name.id.sym.to_string();
+                if self.callsite_symbols.contains(&sym) {
+                    let file = self.current_file();
+                    let enc = xor_encode(&file);
+                    // Move original initializer into call arg
+                    let orig = d.init.take().unwrap();
+                    d.init = Some(Box::new(Expr::Call(CallExpr {
+                        span: DUMMY_SP,
+                        callee: Callee::Expr(Box::new(Expr::Ident(cp_ident("__CP_stamp".into())))),
+                        args: vec![
+                            ExprOrSpread { spread: None, expr: orig },
+                            ExprOrSpread { spread: None, expr: Box::new(Expr::Lit(Lit::Str(Str { span: DUMMY_SP, value: format!("{}#{}", enc, sym).into(), raw: None }))) },
+                            ExprOrSpread { spread: None, expr: Box::new(Expr::Lit(Lit::Str(Str { span: DUMMY_SP, value: enc.into(), raw: None }))) },
+                        ],
+                        type_args: None,
+                        #[cfg(not(feature = "compat_0_87"))]
+                        ctxt: SyntaxContext::empty(),
+                    })));
+                }
+            }
         }
         d.visit_mut_children_with(self);
     }
@@ -1858,6 +2531,7 @@ impl VisitMut for CodePressTransform {
         n.visit_mut_children_with(self);
     }
 
+    
     fn visit_mut_jsx_element(&mut self, node: &mut JSXElement) {
         node.visit_mut_children_with(self);
 
@@ -1892,6 +2566,61 @@ impl VisitMut for CodePressTransform {
                 node.opening.span,
                 Some(node.span),
             ));
+        }
+
+        // Optional: stamp callsites for local identifiers used as components
+        if self.stamp_callsites {
+            // If opening.name is Ident (not host element) we can stamp the value once per module
+            if let JSXElementName::Ident(id) = &node.opening.name {
+                // Skip obvious host tags (lowercase first char)
+                let is_host = id
+                    .sym
+                    .chars()
+                    .next()
+                    .map(|c| c.is_lowercase())
+                    .unwrap_or(false);
+                if !is_host {
+                    let sym = id.sym.to_string();
+                    if !self.callsite_symbols.contains(&sym) {
+                        self.callsite_symbols.insert(sym.clone());
+                        // Inject __CP_stamp(Foo, "<fp>#Foo", "<fp>") at module top (as a statement)
+                        if let Some(file) = self.module_file.clone() {
+                            let enc = xor_encode(&file);
+                            let call = ModuleItem::Stmt(Stmt::Expr(ExprStmt {
+                                span: DUMMY_SP,
+                                expr: Box::new(Expr::Call(CallExpr {
+                                    span: DUMMY_SP,
+                                    callee: Callee::Expr(Box::new(Expr::Ident(cp_ident("__CP_stamp".into())))),
+                                    args: vec![
+                                        ExprOrSpread { spread: None, expr: Box::new(Expr::Ident(cp_ident(&sym))) },
+                                        ExprOrSpread { spread: None, expr: Box::new(Expr::Lit(Lit::Str(Str { span: DUMMY_SP, value: format!("{}#{}", enc, sym).into(), raw: None }))) },
+                                        ExprOrSpread { spread: None, expr: Box::new(Expr::Lit(Lit::Str(Str { span: DUMMY_SP, value: enc.clone().into(), raw: None }))) },
+                                    ],
+                                    type_args: None,
+                                    #[cfg(not(feature = "compat_0_87"))]
+                                    ctxt: SyntaxContext::empty(),
+                                }))
+                            }));
+                            // Prepend so it’s available early; order after helpers is fine
+                            // Insert after any previously inserted helpers (provider + stamp)
+                            // For simplicity, push at start+1
+                            // Ensure we at least have one body slot
+                            // Using file_from_span already set module_file
+                            // Here we conservatively insert near top
+                            // Note: it may duplicate across files if sym collides; guarded at runtime
+                            // Insert after index 1 when helpers exist
+                            // We'll just insert at 0; helpers were inserted earlier so this shifts them, still fine
+                            // (no semantic change)
+                            // To keep helper first, insert at 1 if body has >=1
+                            let insert_at = if let Some(first) = self.module_file.as_ref() { 1 } else { 0 };
+                            // Can't mutate m.body here; collect for later is heavy. Instead, append to graph via inject_graph_stmt? Simpler: store it into graph literal? For now, push to a temp queue is complex.
+                            // Fallback: attach to opening.attrs for provenance only; stamping still done by export/module path. Skip injecting extra statement to avoid structural changes late.
+                            // Leaving runtime callsite injection out to avoid ordering hazards inside this function.
+                            let _ = insert_at; // placeholder to keep compile warnings away
+                        }
+                    }
+                }
+            }
         }
 
         // Root repo/branch once
@@ -1980,7 +2709,7 @@ impl VisitMut for CodePressTransform {
         if !orig_full_span.is_dummy() {
             if let Some(line_info) = self.get_line_info(orig_open_span, Some(orig_full_span)) {
                 // Keep the same (file:start-end) shape as other targets produced by span_file_lines
-                let self_target = format!("{}:{}", normalize_filename(&filename), line_info);
+                let self_target = format!("{}:{}", self.normalize_repo_relative(&filename), line_info);
                 // Avoid dupes if it somehow already exists
                 let already = candidates
                     .iter()
@@ -2037,7 +2766,6 @@ impl VisitMut for CodePressTransform {
                 .push(JSXElementChild::JSXElement(Box::new(original)));
             *node = wrapper;
 
-            /*
             // Provider wrapping temporarily disabled; to re-enable, uncomment this block.
             let cs_enc = if let JSXAttrOrSpread::JSXAttr(a) =
                 self.create_encoded_path_attr(&filename, orig_open_span, Some(orig_full_span))
@@ -2070,7 +2798,6 @@ impl VisitMut for CodePressTransform {
                 fp: fp_enc,
             };
             self.wrap_with_provider(node, meta);
-            */
 
             let attrs = &mut node.opening.attrs;
             // Only annotate the injected wrappers (provider or host wrapper), not the invocation element

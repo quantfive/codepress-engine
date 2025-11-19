@@ -175,9 +175,9 @@ jobs:
           RELEASE_TAG: ${{ needs.check-version.outputs.release_tag }}
         run: |
           if [ "$RELEASE_TAG" = "latest" ]; then
-            pnpm publish --no-git-checks
+            npm publish --ignore-scripts
           else
-            pnpm publish --no-git-checks --tag "$RELEASE_TAG"
+            npm publish --ignore-scripts --tag "$RELEASE_TAG"
           fi
 
       - name: Create Git tag (after successful publish)
