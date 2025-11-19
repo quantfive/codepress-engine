@@ -146,6 +146,7 @@ pub struct CodePressTransform {
     inserted_provider_import: bool,
     inserted_stamp_helper: bool,
     stamp_callsites: bool,
+    stamp_exports: bool,
     callsite_symbols: HashSet<String>,
 
     // -------- module graph (this module only) --------
@@ -188,6 +189,10 @@ impl CodePressTransform {
         let provider_ident = "__CPProvider".to_string();
         let stamp_callsites = config
             .remove("stampCallsites")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true);
+        let stamp_exports = config
+            .remove("stampExports")
             .and_then(|v| v.as_bool())
             .unwrap_or(true);
 
@@ -234,6 +239,7 @@ impl CodePressTransform {
             inserted_provider_import: false,
             inserted_stamp_helper: false,
             stamp_callsites,
+            stamp_exports,
             callsite_symbols: HashSet::new(),
             module_file: None,
             graph: ModuleGraph {
@@ -2341,148 +2347,6 @@ impl VisitMut for CodePressTransform {
         self.ensure_provider_inline(m);
         // Inject guarded stamping helper
         self.ensure_stamp_helper_inline(m);
-
-        // Stamping of exported symbols with __cp_id and __cp_fp (merged change)
-        // Determine encoded file path for this module
-        let filename = if let Some(ref cm) = self.source_map {
-            let loc = cm.lookup_char_pos(m.span.lo());
-            loc.file.name.to_string()
-        } else {
-            "unknown".to_string()
-        };
-        let normalized = self.normalize_repo_relative(&filename);
-        let encoded_fp = xor_encode(&normalized);
-
-        // Decide whether stamping is safe for an identifier (only for functions/classes/calls/new)
-        let find_binding_by_sym = |sym: &str| -> Option<&Binding> {
-            self.bindings
-                .iter()
-                .find(|(k, _)| k.0 == sym)
-                .map(|(_, b)| b)
-        };
-        let is_pascal = |s: &str| s.chars().next().map(|c| c.is_uppercase()).unwrap_or(false);
-        let should_stamp_ident = |ident: &Ident| -> bool {
-            if !is_pascal(&ident.sym.to_string()) {
-                return false;
-            }
-            if let Some(b) = self.bindings.get(&ident.to_id()) {
-                if let Some(init) = &b.init {
-                    match &**init {
-                        Expr::Fn(_) | Expr::Arrow(_) | Expr::Class(_) | Expr::Call(_) | Expr::New(_) => true,
-                        _ => false,
-                    }
-                } else {
-                    // No initializer (likely handled as Decl::Fn/Class elsewhere)
-                    false
-                }
-            } else {
-                false
-            }
-        };
-
-        // Helper to build assignment: Ident.__cp_id = "..." and Ident.__cp_fp = "..."
-        let mut stamp_for_ident = |ident: &Ident, export_name: &str| -> Vec<ModuleItem> {
-            let mut out: Vec<ModuleItem> = Vec::new();
-
-            // __CP_stamp(Ident, "<fp>#<export>", "<fp>")
-            let call = Stmt::Expr(ExprStmt {
-                span: DUMMY_SP,
-                expr: Box::new(Expr::Call(CallExpr {
-                    span: DUMMY_SP,
-                    callee: Callee::Expr(Box::new(Expr::Ident(cp_ident("__CP_stamp".into())))),
-                    args: vec![
-                        ExprOrSpread { spread: None, expr: Box::new(Expr::Ident(ident.clone())) },
-                        ExprOrSpread { spread: None, expr: Box::new(Expr::Lit(Lit::Str(Str { span: DUMMY_SP, value: format!("{}#{}", encoded_fp, export_name).into(), raw: None }))) },
-                        ExprOrSpread { spread: None, expr: Box::new(Expr::Lit(Lit::Str(Str { span: DUMMY_SP, value: encoded_fp.clone().into(), raw: None }))) },
-                    ],
-                    type_args: None,
-                    #[cfg(not(feature = "compat_0_87"))]
-                    ctxt: SyntaxContext::empty(),
-                }))
-            });
-            out.push(ModuleItem::Stmt(call));
-
-            out
-        };
-
-        // Walk module items and append stamping statements after export declarations
-        let mut new_body: Vec<ModuleItem> = Vec::with_capacity(m.body.len() * 2);
-        for item in m.body.drain(..) {
-            match &item {
-                ModuleItem::ModuleDecl(ModuleDecl::ExportDecl(ExportDecl { decl, .. })) => {
-                    new_body.push(item.clone());
-                    match decl {
-                        Decl::Fn(fn_decl) => {
-                            let name = fn_decl.ident.clone();
-                            if is_pascal(&name.sym.to_string()) {
-                                new_body.extend(stamp_for_ident(&name, &name.sym.to_string()));
-                            }
-                        }
-                        Decl::Class(class_decl) => {
-                            let name = class_decl.ident.clone();
-                            if is_pascal(&name.sym.to_string()) {
-                                new_body.extend(stamp_for_ident(&name, &name.sym.to_string()));
-                            }
-                        }
-                        Decl::Var(var_decl) => {
-                            for d in &var_decl.decls {
-                                if let Pat::Ident(bi) = &d.name {
-                                    let name = bi.id.clone();
-                                    if should_stamp_ident(&name) {
-                                        new_body.extend(stamp_for_ident(&name, &name.sym.to_string()));
-                                    }
-                                }
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-                ModuleItem::ModuleDecl(ModuleDecl::ExportDefaultDecl(ExportDefaultDecl { decl, .. })) => {
-                    new_body.push(item.clone());
-                    match decl {
-                        DefaultDecl::Fn(FnExpr { ident: Some(id), .. }) => {
-                            if is_pascal(&id.sym.to_string()) {
-                                new_body.extend(stamp_for_ident(&id, "default"));
-                            }
-                        }
-                        DefaultDecl::Class(ClassExpr { ident: Some(id), .. }) => {
-                            if is_pascal(&id.sym.to_string()) {
-                                new_body.extend(stamp_for_ident(&id, "default"));
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-                ModuleItem::ModuleDecl(ModuleDecl::ExportNamed(NamedExport { specifiers, .. })) => {
-                    new_body.push(item.clone());
-                    for spec in specifiers {
-                        if let ExportSpecifier::Named(ExportNamedSpecifier { orig, .. }) = spec {
-                            if let ModuleExportName::Ident(orig_ident) = orig {
-                                // Only stamp PascalCase with a safe initializer
-                                if is_pascal(&orig_ident.sym.to_string()) {
-                                    if let Some(b) = find_binding_by_sym(&orig_ident.sym.to_string()) {
-                                    let safe = match &b.init {
-                                        Some(expr) => match &**expr {
-                                            Expr::Fn(_) | Expr::Arrow(_) | Expr::Class(_) | Expr::Call(_) | Expr::New(_) => true,
-                                            _ => false,
-                                        },
-                                        None => false,
-                                    };
-                                        if safe {
-                                            let id = cp_ident(&orig_ident.sym.to_string());
-                                            new_body.extend(stamp_for_ident(&id, &orig_ident.sym.to_string()));
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-                _ => new_body.push(item),
-            }
-        }
-        m.body = new_body;
-
         // Continue other transforms and inject graph (from main branch)
         m.visit_mut_children_with(self);
         self.inject_graph_stmt(m);
@@ -2534,7 +2398,7 @@ impl VisitMut for CodePressTransform {
         let _ = self.file_from_span(n.span);
         match &mut n.decl {
             Decl::Var(v) => {
-                for d in &v.decls {
+                for d in &mut v.decls {
                     if let Some(id) = d.name.as_ident() {
                         let def_span = if let Some(init) = &d.init {
                             self.span_file_lines(init.span())
@@ -2565,6 +2429,57 @@ impl VisitMut for CodePressTransform {
                                 &init,
                                 "".to_string(),
                             );
+                        }
+
+                        // Stamp exported const bindings inline in their initializer to avoid TDZ:
+                        //   export const Foo = expr;
+                        // becomes:
+                        //   export const Foo = __CP_stamp(expr, "<fp>#Foo", "<fp>");
+                        if self.stamp_exports && v.kind == VarDeclKind::Const {
+                            if let Some(init_expr) = d.init.as_deref() {
+                                let safe = matches!(
+                                    init_expr,
+                                    Expr::Fn(_)
+                                        | Expr::Arrow(_)
+                                        | Expr::Class(_)
+                                        | Expr::Call(_)
+                                        | Expr::New(_)
+                                );
+                                if safe {
+                                    let file = self.current_file();
+                                    let enc = xor_encode(&file);
+                                    let export_name = id.id.sym.to_string();
+                                    let orig = d.init.take().unwrap();
+                                    d.init = Some(Box::new(Expr::Call(CallExpr {
+                                        span: DUMMY_SP,
+                                        callee: Callee::Expr(Box::new(Expr::Ident(cp_ident(
+                                            "__CP_stamp".into(),
+                                        )))),
+                                        args: vec![
+                                            ExprOrSpread { spread: None, expr: orig },
+                                            ExprOrSpread {
+                                                spread: None,
+                                                expr: Box::new(Expr::Lit(Lit::Str(Str {
+                                                    span: DUMMY_SP,
+                                                    value: format!("{}#{}", enc, export_name).into(),
+                                                    raw: None,
+                                                }))),
+                                            },
+                                            ExprOrSpread {
+                                                spread: None,
+                                                expr: Box::new(Expr::Lit(Lit::Str(Str {
+                                                    span: DUMMY_SP,
+                                                    value: enc.into(),
+                                                    raw: None,
+                                                }))),
+                                            },
+                                        ],
+                                        type_args: None,
+                                        #[cfg(not(feature = "compat_0_87"))]
+                                        ctxt: SyntaxContext::empty(),
+                                    })));
+                                }
+                            }
                         }
                     }
                 }
@@ -2657,22 +2572,24 @@ impl VisitMut for CodePressTransform {
                 });
             }
             ModuleDecl::ExportDefaultExpr(edx) => {
-                // Wrap default export expression with __CP_stamp(expr, "<fp>#default", "<fp>")
-                let file = self.current_file();
-                let enc = xor_encode(&file);
-                let original = edx.expr.take();
-                edx.expr = Box::new(Expr::Call(CallExpr {
-                    span: DUMMY_SP,
-                    callee: Callee::Expr(Box::new(Expr::Ident(cp_ident("__CP_stamp".into())))),
-                    args: vec![
-                        ExprOrSpread { spread: None, expr: original },
-                        ExprOrSpread { spread: None, expr: Box::new(Expr::Lit(Lit::Str(Str { span: DUMMY_SP, value: format!("{}#{}", enc, "default").into(), raw: None }))) },
-                        ExprOrSpread { spread: None, expr: Box::new(Expr::Lit(Lit::Str(Str { span: DUMMY_SP, value: enc.into(), raw: None }))) },
-                    ],
-                    type_args: None,
-                    #[cfg(not(feature = "compat_0_87"))]
-                    ctxt: SyntaxContext::empty(),
-                }));
+                if self.stamp_exports {
+                    // Wrap default export expression with __CP_stamp(expr, "<fp>#default", "<fp>")
+                    let file = self.current_file();
+                    let enc = xor_encode(&file);
+                    let original = edx.expr.take();
+                    edx.expr = Box::new(Expr::Call(CallExpr {
+                        span: DUMMY_SP,
+                        callee: Callee::Expr(Box::new(Expr::Ident(cp_ident("__CP_stamp".into())))),
+                        args: vec![
+                            ExprOrSpread { spread: None, expr: original },
+                            ExprOrSpread { spread: None, expr: Box::new(Expr::Lit(Lit::Str(Str { span: DUMMY_SP, value: format!("{}#{}", enc, "default").into(), raw: None }))) },
+                            ExprOrSpread { spread: None, expr: Box::new(Expr::Lit(Lit::Str(Str { span: DUMMY_SP, value: enc.into(), raw: None }))) },
+                        ],
+                        type_args: None,
+                        #[cfg(not(feature = "compat_0_87"))]
+                        ctxt: SyntaxContext::empty(),
+                    }));
+                }
             }
             ModuleDecl::ExportDefaultDecl(ed) => {
                 if let DefaultDecl::Fn(f) = &ed.decl {
