@@ -36,12 +36,16 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: ${{ env.NODE_VERSION }}
-          cache: npm
           registry-url: ${{ env.REGISTRY_URL }}
           scope: ${{ env.SCOPE }}
 
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.22.0
+
       - name: Install dependencies
-        run: npm ci
+        run: pnpm install --frozen-lockfile
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
@@ -106,9 +110,13 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: ${{ env.NODE_VERSION }}
-          cache: npm
           registry-url: ${{ env.REGISTRY_URL }}
           scope: ${{ env.SCOPE }}
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.22.0
 
       - name: Setup Rust (stable + WASI)
         uses: dtolnay/rust-toolchain@stable
@@ -116,7 +124,7 @@ jobs:
           targets: wasm32-wasip1
 
       - name: Install deps
-        run: npm ci
+        run: pnpm install --frozen-lockfile
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
@@ -128,29 +136,20 @@ jobs:
             const fs = require('fs');
             const version = process.env.RELEASE_VERSION;
             const pkgPath = './package.json';
-            const lockPath = './package-lock.json';
             const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
             pkg.version = version;
             fs.writeFileSync(pkgPath, JSON.stringify(pkg, null, 2) + '\n');
-            if (fs.existsSync(lockPath)) {
-              const lock = JSON.parse(fs.readFileSync(lockPath, 'utf8'));
-              lock.version = version;
-              if (lock.packages && lock.packages['']) {
-                lock.packages[''].version = version;
-              }
-              fs.writeFileSync(lockPath, JSON.stringify(lock, null, 2) + '\n');
-            }
           "
 
       - name: Build JS
-        run: npm run build
+        run: pnpm run build
 
       - name: Build Rust WASM plugin
-        run: npm run build:rust
+        run: pnpm run build:rust
 
       # Optional: verify the pack contents before publishing
       - name: Dry-run pack
-        run: npm pack --dry-run --ignore-scripts
+        run: pnpm pack --dry-run
 
       # Race safety: re-check just before publish
       - name: Ensure version not yet published
@@ -173,9 +172,9 @@ jobs:
           RELEASE_TAG: ${{ needs.check-version.outputs.release_tag }}
         run: |
           if [ "$RELEASE_TAG" = "latest" ]; then
-            npm publish --ignore-scripts
+            pnpm publish --no-git-checks
           else
-            npm publish --ignore-scripts --tag "$RELEASE_TAG"
+            pnpm publish --no-git-checks --tag "$RELEASE_TAG"
           fi
 
       - name: Create Git tag (after successful publish)
