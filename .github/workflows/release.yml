@@ -152,7 +152,7 @@ jobs:
 
       # Optional: verify the pack contents before publishing
       - name: Dry-run pack
-        run: npm pack --dry-run
+        run: npm pack --dry-run --ignore-scripts
 
       # Race safety: re-check just before publish
       - name: Ensure version not yet published
