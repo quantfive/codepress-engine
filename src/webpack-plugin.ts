@@ -17,7 +17,8 @@
  * };
  */
 
-import type { Compiler, Compilation, sources, Module as WebpackModule } from 'webpack';
+import type { Compiler, Compilation, Module as WebpackModule } from 'webpack';
+import { sources } from 'webpack';
 
 interface Asset {
   name: string;
@@ -208,21 +209,16 @@ export default class CodePressWebpackPlugin {
       return false;
     }
 
-    const { name } = mainAsset;
-    const source = mainAsset.source;
-    const originalSource = source.source();
-    const originalSourceStr =
-      typeof originalSource === 'string'
-        ? originalSource
-        : Buffer.isBuffer(originalSource)
-          ? originalSource.toString('utf-8')
-          : String(originalSource);
+    const { name, source } = mainAsset;
 
-    // Update the asset with the prepended map script
-    compilation.updateAsset(name, {
-      source: () => mapScript + '\n' + originalSourceStr,
-      size: () => mapScript.length + originalSourceStr.length,
-    } as sources.Source);
+    // Use webpack's ConcatSource to properly concatenate sources
+    // This ensures the source map and other webpack internals work correctly
+    const newSource = new sources.ConcatSource(
+      new sources.RawSource(mapScript + '\n'),
+      source
+    );
+
+    compilation.updateAsset(name, newSource);
 
     console.log('[CodePress] Injected module map into', name);
     return true;
