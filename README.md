@@ -23,11 +23,11 @@ npm install @codepress/codepress-engine
 ### Next.js usage
 
 ```js
-// next.config.js
-const createSWCPlugin = require("@codepress/codepress-engine/swc");
-const CodePressWebpackPlugin = require("@codepress/codepress-engine/webpack-plugin");
+// next.config.mjs
+import { createSWCPlugin } from "@codepress/codepress-engine/swc";
+import CodePressWebpackPlugin from "@codepress/codepress-engine/webpack-plugin";
 
-module.exports = {
+const nextConfig = {
   // SWC plugin for code transformation (existing)
   experimental: {
     swcPlugins: [createSWCPlugin()],
@@ -39,6 +39,8 @@ module.exports = {
     return config;
   },
 };
+
+export default nextConfig;
 ```
 
 ### How it works
