@@ -36,6 +36,11 @@
       "require": "./dist/esbuild-plugin.js",
       "default": "./dist/esbuild-plugin.js"
     },
+    "./webpack-plugin": {
+      "types": "./dist/webpack-plugin.d.ts",
+      "require": "./dist/webpack-plugin.js",
+      "default": "./dist/webpack-plugin.js"
+    },
     "./swc/wasm": "./swc/codepress_engine.v42.wasm",
     "./swc/wasm-v42": "./swc/codepress_engine.v42.wasm",
     "./swc/wasm-v26": "./swc/codepress_engine.v26.wasm",
@@ -101,6 +106,7 @@
     "@types/jest": "^30.0.0",
     "@types/node": "^22.9.0",
     "@types/node-fetch": "^2.6.11",
+    "@types/webpack": "^5.28.5",
     "esbuild": "^0.24.0",
     "babel-jest": "^30.2.0",
     "eslint": "^9.37.0",

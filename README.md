@@ -20,23 +20,47 @@ TypeScript-powered instrumentation for the CodePress visual editor. The package 
 npm install @codepress/codepress-engine
 ```
 
-## SWC plugin (Next.js) usage
+### Next.js usage
 
 ```js
-// next.config.mjs (Next.js 14/15)
-import { createSWCPlugin } from "@codepress/codepress-engine/swc";
+// next.config.js
+const createSWCPlugin = require("@codepress/codepress-engine/swc");
+const CodePressWebpackPlugin = require("@codepress/codepress-engine/webpack-plugin");
 
-const nextConfig = {
+module.exports = {
+  // SWC plugin for code transformation (existing)
   experimental: {
-    swcPlugins: [
-      // Auto-detects repo/branch; no options required
-      createSWCPlugin(),
-    ],
+    swcPlugins: [createSWCPlugin()],
+  },
+
+  // Webpack plugin for production module mapping (new)
+  webpack: (config, { isServer, dev }) => {
+    config.plugins.push(new CodePressWebpackPlugin({ isServer, dev }));
+    return config;
   },
 };
-
-export default nextConfig;
 ```
+
+### How it works
+
+The plugin:
+
+1. Automatically skips server builds (`isServer: true`) and dev builds (`dev: true`)
+2. Runs during webpack compilation for production client builds
+3. Builds a mapping: `{ 33: "react", 92: "react-dom", ... }`
+4. Injects `window.__CP_MODULE_MAP__` into the main bundle
+5. Enables O(1) module resolution instead of scanning all modules
+
+### Bundle size impact
+
+- Typical app (1000 modules): +3-4KB gzipped
+- Large app (3000 modules): +8-10KB gzipped
+
+### When to use
+
+- **Required**: Production builds where you need HMR to work
+- **Optional**: Development (already has named module IDs)
+- **Alternative**: Set `moduleIds: 'named'` in webpack config (larger bundle, exposes file structure)
 
 Note: When using ESM (`next.config.mjs`), prefer the named import above due to CJS interop. For CommonJS configs you can use:
 
@@ -76,12 +100,13 @@ Optional options for the Babel plugin (all are optional; omit to use auto-detect
 
 Entry points exposed by the package:
 
-| Export                               | Description                        |
-| ------------------------------------ | ---------------------------------- |
-| `@codepress/codepress-engine/babel`  | Compiled Babel plugin (CommonJS)   |
-| `@codepress/codepress-engine/swc`    | SWC plugin factory & WASM helpers  |
-| `@codepress/codepress-engine/server` | Fastify development server factory |
-| `@codepress/codepress-engine/cli`    | CLI used by the `codepress` binary |
+| Export                                       | Description                              |
+| -------------------------------------------- | ---------------------------------------- |
+| `@codepress/codepress-engine/babel`          | Compiled Babel plugin (CommonJS)         |
+| `@codepress/codepress-engine/swc`            | SWC plugin factory & WASM helpers        |
+| `@codepress/codepress-engine/webpack-plugin` | Webpack plugin for production module map |
+| `@codepress/codepress-engine/server`         | Fastify development server factory       |
+| `@codepress/codepress-engine/cli`            | CLI used by the `codepress` binary       |
 
 ---
 
@@ -184,6 +209,7 @@ The helper automatically selects the correct WASM binary based on detected Next.
 ## Additional references
 
 - `INSTALL.md` – linking the package locally & publishing guidance
+- `MODULE_MAP_INTEGRATION.md` – detailed guide for webpack plugin integration and troubleshooting
 - `scripts/build-swc.mjs` – rebuild the WASM binaries (requires Rust toolchain)
 - `tests/` – examples of mocking git, fetch, and file IO when validating the plugin
 
