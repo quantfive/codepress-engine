@@ -118,7 +118,9 @@ export default class CodePressWebpackPlugin {
     const moduleMap: ModuleMap = {};
 
     compilation.modules.forEach((module: WebpackModule) => {
-      if (!module.id) {
+      // Use ChunkGraph API instead of deprecated module.id
+      const moduleId = compilation.chunkGraph.getModuleId(module);
+      if (moduleId === null || moduleId === undefined) {
         return;
       }
 
@@ -128,7 +130,7 @@ export default class CodePressWebpackPlugin {
         return;
       }
 
-      const id = String(module.id);
+      const id = String(moduleId);
       const normalizedPath = this.normalizePath(moduleWithResource.resource, compiler.context);
 
       if (normalizedPath) {
