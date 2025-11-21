@@ -25,8 +25,13 @@ interface Asset {
   source: sources.Source;
 }
 
+interface ModuleMapEntry {
+  path: string;
+  exports?: { [originalName: string]: string }; // Maps original export name -> minified name
+}
+
 interface ModuleMap {
-  [id: string]: string;
+  [id: string]: ModuleMapEntry | string; // Support both old and new format
 }
 
 export interface CodePressWebpackPluginOptions {
@@ -113,7 +118,7 @@ export default class CodePressWebpackPlugin {
   }
 
   /**
-   * Build a mapping of module IDs to normalized paths
+   * Build a mapping of module IDs to normalized paths and export names
    */
   private buildModuleMap(compilation: Compilation, compiler: Compiler): ModuleMap {
     const moduleMap: ModuleMap = {};
@@ -135,11 +140,114 @@ export default class CodePressWebpackPlugin {
       const normalizedPath = this.normalizePath(moduleWithResource.resource, compiler.context);
 
       if (normalizedPath) {
-        moduleMap[id] = normalizedPath;
+        // Skip export mapping for Next.js internal modules and font loaders
+        // These have special handling by Next.js and we shouldn't interfere
+        const shouldSkipExportMapping =
+          moduleWithResource.resource.includes('next/font') ||
+          moduleWithResource.resource.includes('next/dist') ||
+          moduleWithResource.resource.includes('@next/font');
+
+        if (shouldSkipExportMapping) {
+          // Just store the path without export mappings
+          moduleMap[id] = normalizedPath;
+        } else {
+          // Try to capture export mappings for regular modules
+          const exportMappings = this.captureExportMappings(module, compilation);
+
+          if (exportMappings && Object.keys(exportMappings).length > 0) {
+            moduleMap[id] = {
+              path: normalizedPath,
+              exports: exportMappings,
+            };
+          } else {
+            // Fallback to simple string format if no exports found
+            moduleMap[id] = normalizedPath;
+          }
+        }
       }
     });
 
     return moduleMap;
+  }
+
+  /**
+   * Capture export name mappings for a module (original -> minified)
+   */
+  private captureExportMappings(
+    module: WebpackModule,
+    compilation: Compilation
+  ): { [originalName: string]: string } | null {
+    try {
+      // Get exports info from module graph
+      const exportsInfo = compilation.moduleGraph.getExportsInfo(module);
+      if (!exportsInfo) {
+        return null;
+      }
+
+      // Get the generated code for this module
+      if (!compilation.codeGenerationResults) {
+        return null;
+      }
+
+      const codeGenResult = compilation.codeGenerationResults.get(module, undefined);
+      if (!codeGenResult) {
+        return null;
+      }
+
+      // Get the source code
+      const sources = codeGenResult.sources;
+      const sourceMap = sources.get('javascript');
+      if (!sourceMap) {
+        return null;
+      }
+
+      const sourceCode = sourceMap.source().toString();
+
+      // Extract export names from the module
+      const exportMappings: { [originalName: string]: string } = {};
+
+      // Get all exports from the module (convert iterable to array)
+      const orderedExports = Array.from(exportsInfo.orderedExports || []);
+      if (orderedExports.length === 0) {
+        return null;
+      }
+
+      // Parse the generated code to find export assignments
+      // Look for patterns like: exports.X = ..., __webpack_exports__.X = ..., etc.
+      for (const exportInfo of orderedExports) {
+        const originalName = exportInfo.name;
+        if (!originalName || originalName === '__esModule') {
+          continue;
+        }
+
+        // Try to find the mangled name in the source code
+        // Pattern: look for export assignments
+        const patterns = [
+          new RegExp(`exports\\.([a-zA-Z_$][a-zA-Z0-9_$]*)\\s*=.*(?://.*)?(?:${originalName}|"${originalName}")`, 'g'),
+          new RegExp(`\\["([^"]+)"\\]\\s*=.*(?://.*)?(?:${originalName}|"${originalName}")`, 'g'),
+          new RegExp(`\\.([a-zA-Z])\\s*=.*(?://.*)?(?:${originalName}|function ${originalName})`, 'g'),
+        ];
+
+        for (const pattern of patterns) {
+          const matches = sourceCode.matchAll(pattern);
+          for (const match of matches) {
+            const minifiedName = match[1];
+            if (minifiedName && minifiedName !== originalName) {
+              exportMappings[originalName] = minifiedName;
+              break;
+            }
+          }
+          if (exportMappings[originalName]) {
+            break;
+          }
+        }
+      }
+
+      return Object.keys(exportMappings).length > 0 ? exportMappings : null;
+    } catch (error) {
+      // Silently fail - export mapping is optional
+      return null;
+    }
   }
 
   /**
