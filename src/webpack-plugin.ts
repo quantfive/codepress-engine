@@ -27,6 +27,7 @@ interface Asset {
 
 interface ModuleMapEntry {
   path: string;
+  moduleId?: string; // Webpack module ID for requiring the module
   exports?: { [originalName: string]: string }; // Maps original export name -> minified name
 }
 
@@ -82,8 +83,9 @@ export default class CodePressWebpackPlugin {
       compilation.hooks.processAssets.tap(
         {
           name: this.name,
-          // Run during the ADDITIONS stage to ensure all assets are present
-          stage: (compilation.constructor as typeof Compilation).PROCESS_ASSETS_STAGE_ADDITIONS,
+          // Run at REPORT stage (very last) to ensure all module IDs are assigned
+          // Export mangling happens at OPTIMIZE_INLINE, so mangled names are available here
+          stage: (compilation.constructor as typeof Compilation).PROCESS_ASSETS_STAGE_REPORT,
         },
         () => {
           this.processAssets(compilation, compiler);
@@ -91,6 +93,10 @@ export default class CodePressWebpackPlugin {
       );
     });
   }
+
+  /**
+   * No longer needed - we use webpack's getUsedName() API instead
+   */
 
   /**
    * Process compilation assets and inject module map
@@ -122,22 +128,148 @@ export default class CodePressWebpackPlugin {
    */
   private buildModuleMap(compilation: Compilation, compiler: Compiler): ModuleMap {
     const moduleMap: ModuleMap = {};
+    let processedCount = 0;
+    let skippedNoId = 0;
+    let skippedNoResource = 0;
+    let skippedNoPath = 0;
+
+    console.log('[CodePress] Building module map from', compilation.modules.size, 'modules');
 
     compilation.modules.forEach((module: WebpackModule) => {
+      // Type assertion: webpack modules can have a resource property
+      const moduleWithResource = module as WebpackModule & { resource?: string };
+
+      // Debug logging BEFORE any checks - to see if HeroSection is even in the compilation
+      // Also check barrel files in the hero export chain
+      const isHeroRelated = moduleWithResource.resource && (
+        moduleWithResource.resource.includes('HeroSection') ||
+        moduleWithResource.resource.includes('home/sections') ||
+        moduleWithResource.resource.includes('features/home/index') ||
+        moduleWithResource.resource.includes('sections/hero/index')
+      );
+
+      if (isHeroRelated) {
+        const moduleId = compilation.chunkGraph.getModuleId(module);
+        const chunks = Array.from(compilation.chunkGraph.getModuleChunks(module));
+        const chunkNames = chunks.map(chunk => chunk.name || chunk.id);
+        console.log('[CodePress] FOUND HeroSection-related module (before checks):', {
+          resource: moduleWithResource.resource,
+          hasModuleId: moduleId !== null && moduleId !== undefined,
+          moduleId: moduleId,
+          chunkCount: chunks.length,
+          chunkNames: chunkNames,
+        });
+      }
+
       // Use ChunkGraph API instead of deprecated module.id
       const moduleId = compilation.chunkGraph.getModuleId(module);
+
+      // Debug logging for specific module ID 30348
+      if (moduleId === 30348 || moduleId === '30348') {
+        console.log('[CodePress] ⭐ FOUND MODULE 30348:', {
+          moduleId: moduleId,
+          resource: moduleWithResource.resource,
+          type: typeof moduleId,
+          moduleType: module.constructor.name,
+        });
+      }
+
       if (moduleId === null || moduleId === undefined) {
+        skippedNoId++;
         return;
       }
 
-      // Type assertion: webpack modules can have a resource property
-      const moduleWithResource = module as WebpackModule & { resource?: string };
+      // Handle modules without resource (e.g., concatenated modules)
+      // These still have export info we can capture
       if (!moduleWithResource.resource) {
+        // Try to get export mappings even without resource
+        const exportMappings = this.captureExportMappings(module, compilation);
+
+        if (exportMappings && Object.keys(exportMappings).length > 0) {
+          const id = String(moduleId);
+          // Use module identifier as fallback path
+          const moduleIdentifier = (module as any).identifier?.() || `module_${id}`;
+
+          // For concatenated modules, try to extract source modules
+          const concatenatedModule = module as any;
+          let allSourcePaths: Array<{ normalized: string; runtime: string }> = [];
+
+          if (concatenatedModule.modules && Array.isArray(concatenatedModule.modules)) {
+            console.log('[CodePress] ConcatenatedModule', id, 'contains', concatenatedModule.modules.length, 'source modules');
+
+            // Collect all source module paths
+            for (const sourceModule of concatenatedModule.modules) {
+              const sourceResource = (sourceModule as any).resource;
+              if (sourceResource) {
+                // Store both normalized (for module ID entry) and runtime format (with extension)
+                const normalizedPath = this.normalizePath(sourceResource, compiler.context);
+                // Runtime format: relative to context, with extension, no ./ prefix
+                const runtimePath = sourceResource
+                  .replace(compiler.context + '/', '')
+                  .replace(/\\/g, '/');
+
+                if (normalizedPath) {
+                  console.log('[CodePress] Source module in concatenated:', normalizedPath, '(runtime:', runtimePath + ')');
+                  allSourcePaths.push({ normalized: normalizedPath, runtime: runtimePath });
+                }
+              }
+            }
+
+            // Add entries for ALL source files so runtime can find them by path
+            if (allSourcePaths.length > 0) {
+              // Add numeric ID entry (for backwards compat)
+              moduleMap[id] = {
+                path: allSourcePaths[0].normalized,
+                exports: exportMappings,
+              };
+
+              // Add path-based entries for each source file (for runtime lookup)
+              // Runtime expects: 'src/features/home/sections/hero/HeroSection.tsx' (with extension, no ./)
+              for (const { normalized, runtime } of allSourcePaths) {
+                // Key by runtime path WITH extension for fast O(1) lookup
+                moduleMap[runtime] = {
+                  path: runtime,
+                  moduleId: id, // Add module ID so runtime can require it!
+                  exports: exportMappings,
+                };
+              }
+
+              console.log('[CodePress] Added', allSourcePaths.length, 'path-based entries for module', id);
+            } else {
+              // Fallback: use the identifier
+              moduleMap[id] = {
+                path: moduleIdentifier,
+                exports: exportMappings,
+              };
+            }
+          } else {
+            // Fallback: use the identifier
+            moduleMap[id] = {
+              path: moduleIdentifier,
+              exports: exportMappings,
+            };
+          }
+
+          console.log('[CodePress] Added module without resource to map:', id, 'exports:', Object.keys(exportMappings));
+          processedCount++;
+        } else {
+          skippedNoResource++;
+        }
         return;
       }
 
       const id = String(moduleId);
-      const normalizedPath = this.normalizePath(moduleWithResource.resource, compiler.context);
+      const resource = moduleWithResource.resource;
+      const normalizedPath = this.normalizePath(resource, compiler.context);
+
+      // Debug logging for HeroSection or home-related modules
+      if (resource.includes('HeroSection') || resource.includes('home/sections')) {
+        console.log('[CodePress] Found HeroSection-related module:', {
+          id,
+          resource,
+          normalizedPath,
+        });
+      }
 
       if (normalizedPath) {
         // Try to capture export mappings
@@ -148,95 +280,91 @@ export default class CodePressWebpackPlugin {
             path: normalizedPath,
             exports: exportMappings,
           };
+          console.log('[CodePress] Added to map with exports:', id, normalizedPath, Object.keys(exportMappings));
         } else {
           // Fallback to simple string format if no exports found
           moduleMap[id] = normalizedPath;
         }
+        processedCount++;
+      } else {
+        skippedNoPath++;
+        if (resource.includes('HeroSection')) {
+          console.warn('[CodePress] HeroSection module skipped - no normalized path:', resource);
+        }
       }
+    });
+
+    console.log('[CodePress] Module map build complete:', {
+      total: compilation.modules.size,
+      processed: processedCount,
+      skippedNoId,
+      skippedNoResource,
+      skippedNoPath,
+      mapSize: Object.keys(moduleMap).length,
     });
 
     return moduleMap;
   }
 
   /**
-   * Capture export name mappings for a module (original -> minified)
+   * Capture export name mappings using webpack's own mangling APIs
+   * This uses ExportInfo.getUsedName() to get the mangled export names directly
    */
   private captureExportMappings(
     module: WebpackModule,
     compilation: Compilation
   ): { [originalName: string]: string } | null {
     try {
-      // Get exports info from module graph
+      // Get module ID for logging
+      const moduleId = compilation.chunkGraph.getModuleId(module);
+      if (moduleId === null || moduleId === undefined) {
+        return null;
+      }
+
+      // Use webpack's ModuleGraph to get export information
       const exportsInfo = compilation.moduleGraph.getExportsInfo(module);
       if (!exportsInfo) {
         return null;
       }
 
-      // Get the generated code for this module
-      if (!compilation.codeGenerationResults) {
-        return null;
-      }
-
-      const codeGenResult = compilation.codeGenerationResults.get(module, undefined);
-      if (!codeGenResult) {
-        return null;
-      }
-
-      // Get the source code
-      const sources = codeGenResult.sources;
-      const sourceMap = sources.get('javascript');
-      if (!sourceMap) {
-        return null;
-      }
-
-      const sourceCode = sourceMap.source().toString();
-
-      // Extract export names from the module
       const exportMappings: { [originalName: string]: string } = {};
 
-      // Get all exports from the module (convert iterable to array)
-      const orderedExports = Array.from(exportsInfo.orderedExports || []);
-      if (orderedExports.length === 0) {
-        return null;
-      }
-
-      // Parse the generated code to find export assignments
-      // Look for patterns like: exports.X = ..., __webpack_exports__.X = ..., etc.
-      for (const exportInfo of orderedExports) {
+      // Iterate through all exports and check if they were mangled
+      for (const exportInfo of exportsInfo.orderedExports) {
         const originalName = exportInfo.name;
+
+        // Skip special exports
         if (!originalName || originalName === '__esModule') {
           continue;
         }
 
-        // Try to find the mangled name in the source code
-        // Pattern: look for export assignments
-        const patterns = [
-          new RegExp(`exports\\.([a-zA-Z_$][a-zA-Z0-9_$]*)\\s*=.*(?://.*)?(?:${originalName}|"${originalName}")`, 'g'),
-          new RegExp(`\\["([^"]+)"\\]\\s*=.*(?://.*)?(?:${originalName}|"${originalName}")`, 'g'),
-          new RegExp(`\\.([a-zA-Z])\\s*=.*(?://.*)?(?:${originalName}|function ${originalName})`, 'g'),
-        ];
+        // Get the mangled name using webpack's own API
+        // Pass undefined as runtime to get the global mangled name
+        const usedName = exportInfo.getUsedName(originalName, undefined);
 
-        for (const pattern of patterns) {
-          const matches = sourceCode.matchAll(pattern);
-          for (const match of matches) {
-            const minifiedName = match[1];
-            if (minifiedName && minifiedName !== originalName) {
-              exportMappings[originalName] = minifiedName;
-              break;
-            }
-          }
-          if (exportMappings[originalName]) {
-            break;
-          }
+        // If usedName is false, the export is unused (tree-shaken)
+        // If usedName is different from originalName, it was mangled
+        if (usedName && typeof usedName === 'string' && usedName !== originalName) {
+          exportMappings[originalName] = usedName;
+          console.log('[CodePress] Export mapping:', originalName, '->', usedName);
         }
       }
 
-      return Object.keys(exportMappings).length > 0 ? exportMappings : null;
+      if (Object.keys(exportMappings).length > 0) {
+        console.log(
+          `[CodePress] Found ${Object.keys(exportMappings).length} export mapping(s) for module ${moduleId}`
+        );
+        return exportMappings;
+      }
+
+      return null;
     } catch (error) {
       // Silently fail - export mapping is optional
+      console.warn('[CodePress] Export mapping failed:', error);
       return null;
     }
   }
+
 
   /**
    * Normalize a module path to a human-readable format
