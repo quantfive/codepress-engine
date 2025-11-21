@@ -140,29 +140,17 @@ export default class CodePressWebpackPlugin {
       const normalizedPath = this.normalizePath(moduleWithResource.resource, compiler.context);
 
       if (normalizedPath) {
-        // Skip export mapping for Next.js internal modules and font loaders
-        // These have special handling by Next.js and we shouldn't interfere
-        const shouldSkipExportMapping =
-          moduleWithResource.resource.includes('next/font') ||
-          moduleWithResource.resource.includes('next/dist') ||
-          moduleWithResource.resource.includes('@next/font');
+        // Try to capture export mappings
+        const exportMappings = this.captureExportMappings(module, compilation);
 
-        if (shouldSkipExportMapping) {
-          // Just store the path without export mappings
-          moduleMap[id] = normalizedPath;
+        if (exportMappings && Object.keys(exportMappings).length > 0) {
+          moduleMap[id] = {
+            path: normalizedPath,
+            exports: exportMappings,
+          };
         } else {
-          // Try to capture export mappings for regular modules
-          const exportMappings = this.captureExportMappings(module, compilation);
-
-          if (exportMappings && Object.keys(exportMappings).length > 0) {
-            moduleMap[id] = {
-              path: normalizedPath,
-              exports: exportMappings,
-            };
-          } else {
-            // Fallback to simple string format if no exports found
-            moduleMap[id] = normalizedPath;
-          }
+          // Fallback to simple string format if no exports found
+          moduleMap[id] = normalizedPath;
         }
       }
     });

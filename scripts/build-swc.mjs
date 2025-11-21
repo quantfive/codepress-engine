@@ -128,6 +128,7 @@ strip = "symbols"
 
 [dependencies]
 base64 = "0.22.1"
+regex = "1"
 serde = { version = "${serdeVer}", features = ["derive"] }
 serde_json = "${serdeJsonVer}"
 ${swcCommonLine}

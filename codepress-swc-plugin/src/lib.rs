@@ -155,6 +155,9 @@ pub struct CodePressTransform {
     // Skips: components we should not wrap (to avoid interfering with pass-through libs)
     skip_components: std::collections::HashSet<String>,      // e.g., ["Slot", "Link"]
     skip_member_roots: std::collections::HashSet<String>,    // e.g., ["Primitive"] for <Primitive.*>
+
+    // Exclude: file patterns to exclude from all transformations
+    exclude_patterns: Vec<String>,  // e.g., ["**/FontProvider.tsx", "**/providers/**"]
 }
 
 impl CodePressTransform {
@@ -224,6 +227,16 @@ impl CodePressTransform {
             skip_member_roots.insert("Primitive".to_string());
         }
 
+        // Read exclude patterns (file paths/globs to skip all transformations)
+        let exclude_patterns = config
+            .remove("exclude")
+            .and_then(|v| v.as_array().map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect()
+            }))
+            .unwrap_or_default();
+
         Self {
             repo_name,
             branch_name,
@@ -246,6 +259,7 @@ impl CodePressTransform {
             },
             skip_components,
             skip_member_roots,
+            exclude_patterns,
         }
     }
 
@@ -273,6 +287,52 @@ impl CodePressTransform {
             }
         }
         s_norm
+    }
+
+    /// Check if the current file should be excluded from all transformations
+    fn is_excluded(&self) -> bool {
+        if self.exclude_patterns.is_empty() {
+            return false;
+        }
+
+        let file = self.current_file();
+        let normalized = file.replace('\\', "/");
+
+        for pattern in &self.exclude_patterns {
+            // Simple glob matching: ** matches any path segment, * matches within a segment
+            if Self::matches_pattern(&normalized, pattern) {
+                return true;
+            }
+        }
+
+        false
+    }
+
+    /// Simple glob pattern matching (supports * and **)
+    fn matches_pattern(path: &str, pattern: &str) -> bool {
+        let pattern_normalized = pattern.replace('\\', "/");
+
+        // Exact match
+        if path == pattern_normalized {
+            return true;
+        }
+
+        // Convert pattern to regex
+        let regex_pattern = pattern_normalized
+            .replace(".", "\\.")
+            .replace("**", "DOUBLE_STAR")
+            .replace("*", "[^/]*")
+            .replace("DOUBLE_STAR", ".*");
+
+        // Match against full path or as a suffix (for patterns like **/foo.tsx)
+        let re = format!("(^|/){}$", regex_pattern);
+
+        if let Ok(regex) = regex::Regex::new(&re) {
+            regex.is_match(path)
+        } else {
+            // Fallback to simple contains check
+            path.contains(&pattern_normalized) || path.ends_with(&pattern_normalized)
+        }
     }
 
     fn span_file_lines(&self, s: swc_core::common::Span) -> String {
@@ -1042,6 +1102,16 @@ impl CodePressTransform {
         let file = self.current_file();
         if !file.ends_with(".tsx") {
             return;
+        }
+
+        // Skip files that use Next.js font loaders to avoid interfering with font validation
+        for item in &m.body {
+            if let ModuleItem::ModuleDecl(ModuleDecl::Import(import_decl)) = item {
+                let src = import_decl.src.value.to_string();
+                if src.starts_with("next/font/") || src.starts_with("@next/font/") {
+                    return;
+                }
+            }
         }
         // import { createContext, useSyncExternalStore } from "react";
         let import_decl = ModuleItem::ModuleDecl(ModuleDecl::Import(ImportDecl {
@@ -2028,6 +2098,11 @@ impl CodePressTransform {
 
 impl VisitMut for CodePressTransform {
     fn visit_mut_module(&mut self, m: &mut Module) {
+        // Check if this file should be excluded from all transformations
+        if self.is_excluded() {
+            return;
+        }
+
         // Inject inline provider once per module (from main branch)
         self.ensure_provider_inline(m);
         // Inject guarded stamping helper
