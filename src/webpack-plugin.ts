@@ -70,12 +70,10 @@ export default class CodePressWebpackPlugin {
   public apply(compiler: Compiler): void {
     // Skip if this is a server build or dev build
     if (this.options.isServer) {
-      console.log("[CodePress] Skipping module map (server-side build)");
       return;
     }
 
     if (this.options.dev) {
-      console.log("[CodePress] Skipping module map (dev build has named IDs)");
       return;
     }
 
@@ -112,12 +110,6 @@ export default class CodePressWebpackPlugin {
       return;
     }
 
-    console.log(
-      "[CodePress] Built module map with",
-      Object.keys(moduleMap).length,
-      "entries"
-    );
-
     const mapScript = this.generateMapScript(moduleMap);
     const injected = this.injectIntoMainBundle(compilation, mapScript);
 
@@ -136,16 +128,8 @@ export default class CodePressWebpackPlugin {
     compiler: Compiler
   ): ModuleMap {
     const moduleMap: ModuleMap = {};
-    let processedCount = 0;
-    let skippedNoId = 0;
-    let skippedNoResource = 0;
-    let skippedNoPath = 0;
 
-    console.log(
-      "[CodePress] Building module map from",
-      compilation.modules.size,
-      "modules"
-    );
+    // Build the module map from the compilation modules
 
     compilation.modules.forEach((module: WebpackModule) => {
       // Type assertion: webpack modules can have a resource property
@@ -157,7 +141,6 @@ export default class CodePressWebpackPlugin {
       const moduleId = compilation.chunkGraph.getModuleId(module);
 
       if (moduleId === null || moduleId === undefined) {
-        skippedNoId++;
         return;
       }
 
@@ -185,14 +168,6 @@ export default class CodePressWebpackPlugin {
             concatenatedModule.modules &&
             Array.isArray(concatenatedModule.modules)
           ) {
-            console.log(
-              "[CodePress] ConcatenatedModule",
-              id,
-              "contains",
-              concatenatedModule.modules.length,
-              "source modules"
-            );
-
             // Collect all source module paths
             for (const sourceModule of concatenatedModule.modules) {
               const sourceResource = (sourceModule as any).resource;
@@ -208,12 +183,6 @@ export default class CodePressWebpackPlugin {
                   .replace(/\\/g, "/");
 
                 if (normalizedPath) {
-                  console.log(
-                    "[CodePress] Source module in concatenated:",
-                    normalizedPath,
-                    "(runtime:",
-                    runtimePath + ")"
-                  );
                   allSourcePaths.push({
                     normalized: normalizedPath,
                     runtime: runtimePath,
@@ -233,11 +202,7 @@ export default class CodePressWebpackPlugin {
 
               // Add path-based entries for each source file (for runtime lookup)
               // Runtime expects: 'src/features/home/sections/hero/HeroSection.tsx' (with extension, no ./)
-              for (const {
-                normalized,
-                runtime,
-                module: sourceModule,
-              } of allSourcePaths) {
+              for (const { runtime, module: sourceModule } of allSourcePaths) {
                 // Prefer the outer concatenated module's export mappings, since those reflect actual
                 // properties on the exported object returned by moduleId. Add a default alias to the
                 // basename if present (common for default exports re-exported as named symbols).
@@ -271,13 +236,6 @@ export default class CodePressWebpackPlugin {
                   exports: finalExports || undefined,
                 };
               }
-
-              console.log(
-                "[CodePress] Added",
-                allSourcePaths.length,
-                "path-based entries for module",
-                id
-              );
             } else {
               // Fallback: use the identifier
               moduleMap[id] = {
@@ -292,16 +250,6 @@ export default class CodePressWebpackPlugin {
               exports: exportMappings,
             };
           }
-
-          console.log(
-            "[CodePress] Added module without resource to map:",
-            id,
-            "exports:",
-            Object.keys(exportMappings)
-          );
-          processedCount++;
-        } else {
-          skippedNoResource++;
         }
         return;
       }
@@ -327,13 +275,6 @@ export default class CodePressWebpackPlugin {
             path: normalizedPath,
             exports: exportMappings || undefined,
           };
-          console.log(
-            "[CodePress] Added to map with exports:",
-            id,
-            normalizedPath,
-            "(runtime:",
-            runtimePath + ")"
-          );
         } else {
           // Fallback to simple string format if no exports found
           moduleMap[id] = normalizedPath;
@@ -346,20 +287,7 @@ export default class CodePressWebpackPlugin {
           moduleId: id,
           ...(hasExportMappings ? { exports: exportMappings } : {}),
         };
-
-        processedCount++;
-      } else {
-        skippedNoPath++;
       }
-    });
-
-    console.log("[CodePress] Module map build complete:", {
-      total: compilation.modules.size,
-      processed: processedCount,
-      skippedNoId,
-      skippedNoResource,
-      skippedNoPath,
-      mapSize: Object.keys(moduleMap).length,
     });
 
     return moduleMap;
@@ -374,9 +302,6 @@ export default class CodePressWebpackPlugin {
     compilation: Compilation
   ): { [originalName: string]: string } | null {
     try {
-      // Get module ID for logging (may be undefined for inner concatenated modules)
-      const moduleId = compilation.chunkGraph.getModuleId(module);
-
       // Use webpack's ModuleGraph to get export information
       const exportsInfo = compilation.moduleGraph.getExportsInfo(module);
       if (!exportsInfo) {
@@ -406,19 +331,10 @@ export default class CodePressWebpackPlugin {
         // If usedName is false, the export is unused (tree-shaken)
         if (usedName && typeof usedName === "string") {
           exportMappings[originalName] = usedName;
-          console.log(
-            "[CodePress] Export mapping:",
-            originalName,
-            "->",
-            usedName
-          );
         }
       }
 
       if (Object.keys(exportMappings).length > 0) {
-        console.log(
-          `[CodePress] Found ${Object.keys(exportMappings).length} export mapping(s) for module ${moduleId}`
-        );
         return exportMappings;
       }
 
@@ -574,7 +490,6 @@ export default class CodePressWebpackPlugin {
 
     compilation.updateAsset(name, newSource);
 
-    console.log("[CodePress] Injected module map into", name);
     return true;
   }
 }
