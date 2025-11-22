@@ -80,6 +80,9 @@ export default class CodePressWebpackPlugin {
     }
 
     compiler.hooks.thisCompilation.tap(this.name, (compilation: Compilation) => {
+      // Add runtime hook before assets are processed so the bootstrap exposes cache helpers
+      this.injectRuntimeHook(compilation, compiler);
+
       compilation.hooks.processAssets.tap(
         {
           name: this.name,
@@ -192,7 +195,7 @@ export default class CodePressWebpackPlugin {
 
           // For concatenated modules, try to extract source modules
           const concatenatedModule = module as any;
-          let allSourcePaths: Array<{ normalized: string; runtime: string }> = [];
+          let allSourcePaths: Array<{ normalized: string; runtime: string; module: WebpackModule }> = [];
 
           if (concatenatedModule.modules && Array.isArray(concatenatedModule.modules)) {
             console.log('[CodePress] ConcatenatedModule', id, 'contains', concatenatedModule.modules.length, 'source modules');
@@ -210,7 +213,7 @@ export default class CodePressWebpackPlugin {
 
                 if (normalizedPath) {
                   console.log('[CodePress] Source module in concatenated:', normalizedPath, '(runtime:', runtimePath + ')');
-                  allSourcePaths.push({ normalized: normalizedPath, runtime: runtimePath });
+                  allSourcePaths.push({ normalized: normalizedPath, runtime: runtimePath, module: sourceModule as WebpackModule });
                 }
               }
             }
@@ -220,17 +223,34 @@ export default class CodePressWebpackPlugin {
               // Add numeric ID entry (for backwards compat)
               moduleMap[id] = {
                 path: allSourcePaths[0].normalized,
-                exports: exportMappings,
+                exports: exportMappings || undefined,
               };
 
               // Add path-based entries for each source file (for runtime lookup)
               // Runtime expects: 'src/features/home/sections/hero/HeroSection.tsx' (with extension, no ./)
-              for (const { normalized, runtime } of allSourcePaths) {
+              for (const { normalized, runtime, module: sourceModule } of allSourcePaths) {
+                // Prefer the outer concatenated module's export mappings, since those reflect actual
+                // properties on the exported object returned by moduleId. Add a default alias to the
+                // basename if present (common for default exports re-exported as named symbols).
+                const baseName = runtime.split('/').pop()?.replace(/\.[^/.]+$/, '') || null;
+                const outerExportMappings = exportMappings || {};
+                const mergedExports: { [originalName: string]: string } = { ...outerExportMappings };
+                if (
+                  baseName &&
+                  !mergedExports.default &&
+                  Object.prototype.hasOwnProperty.call(mergedExports, baseName)
+                ) {
+                  mergedExports.default = mergedExports[baseName];
+                }
+                const finalExports =
+                  Object.keys(mergedExports).length > 0
+                    ? mergedExports
+                    : this.captureExportMappings(sourceModule as WebpackModule, compilation) || undefined;
                 // Key by runtime path WITH extension for fast O(1) lookup
                 moduleMap[runtime] = {
                   path: runtime,
                   moduleId: id, // Add module ID so runtime can require it!
-                  exports: exportMappings,
+                  exports: finalExports || undefined,
                 };
               }
 
@@ -274,17 +294,34 @@ export default class CodePressWebpackPlugin {
       if (normalizedPath) {
         // Try to capture export mappings
         const exportMappings = this.captureExportMappings(module, compilation);
+        const hasExportMappings =
+          exportMappings && Object.keys(exportMappings).length > 0;
 
-        if (exportMappings && Object.keys(exportMappings).length > 0) {
+        // Runtime format: relative to context, with extension, no ./ prefix
+        const runtimePath = resource
+          .replace(compiler.context + '/', '')
+          .replace(/\\/g, '/');
+
+        if (hasExportMappings) {
+          // Add numeric ID entry (for backwards compat)
           moduleMap[id] = {
             path: normalizedPath,
-            exports: exportMappings,
+            exports: exportMappings || undefined,
           };
-          console.log('[CodePress] Added to map with exports:', id, normalizedPath, Object.keys(exportMappings));
+          console.log('[CodePress] Added to map with exports:', id, normalizedPath, '(runtime:', runtimePath + ')');
         } else {
           // Fallback to simple string format if no exports found
           moduleMap[id] = normalizedPath;
         }
+
+        // Always add a path-based entry for runtime lookup (with extension, no ./)
+        // so production preview can resolve modules by their source path.
+        moduleMap[runtimePath] = {
+          path: runtimePath,
+          moduleId: id,
+          ...(hasExportMappings ? { exports: exportMappings } : {}),
+        };
+
         processedCount++;
       } else {
         skippedNoPath++;
@@ -315,11 +352,8 @@ export default class CodePressWebpackPlugin {
     compilation: Compilation
   ): { [originalName: string]: string } | null {
     try {
-      // Get module ID for logging
+      // Get module ID for logging (may be undefined for inner concatenated modules)
       const moduleId = compilation.chunkGraph.getModuleId(module);
-      if (moduleId === null || moduleId === undefined) {
-        return null;
-      }
 
       // Use webpack's ModuleGraph to get export information
       const exportsInfo = compilation.moduleGraph.getExportsInfo(module);
@@ -343,8 +377,7 @@ export default class CodePressWebpackPlugin {
         const usedName = exportInfo.getUsedName(originalName, undefined);
 
         // If usedName is false, the export is unused (tree-shaken)
-        // If usedName is different from originalName, it was mangled
-        if (usedName && typeof usedName === 'string' && usedName !== originalName) {
+        if (usedName && typeof usedName === 'string') {
           exportMappings[originalName] = usedName;
           console.log('[CodePress] Export mapping:', originalName, '->', usedName);
         }
@@ -364,7 +397,6 @@ export default class CodePressWebpackPlugin {
       return null;
     }
   }
-
 
   /**
    * Normalize a module path to a human-readable format
@@ -413,6 +445,61 @@ export default class CodePressWebpackPlugin {
   private generateMapScript(moduleMap: ModuleMap): string {
     const json = JSON.stringify(moduleMap);
     return `(function(){if(typeof window!=="undefined"){window.__CP_MODULE_MAP__=${json};console.log("[CodePress] Loaded module map with",Object.keys(window.__CP_MODULE_MAP__).length,"entries");}})();`;
+  }
+
+  /**
+   * Inject a runtime module to expose webpack module cache and make exports writable.
+   */
+  private injectRuntimeHook(compilation: Compilation, compiler: Compiler): void {
+    const wp: any = (compiler as any).webpack;
+    if (!wp || !wp.RuntimeModule || !wp.Template || !wp.RuntimeGlobals) {
+      console.warn('[CodePress] Webpack runtime APIs unavailable; skipping cache exposure hook');
+      return;
+    }
+
+    const { RuntimeModule, Template, RuntimeGlobals } = wp as any;
+
+    class ExposeCacheRuntimeModule extends (RuntimeModule as any) {
+      constructor() {
+        super('CodePressExposeCache');
+      }
+      generate() {
+        return Template.asString([
+          'try {',
+          '  var req = __webpack_require__;',
+          '  if (req && typeof req.c === "undefined" && typeof __webpack_module_cache__ !== "undefined") {',
+          '    req.c = __webpack_module_cache__;',
+          '  }',
+          '  if (req && typeof req.makeWritable !== "function" && typeof __webpack_module_cache__ !== "undefined") {',
+          '    req.makeWritable = function(id) {',
+          '      try {',
+          '        var mod = __webpack_module_cache__[id];',
+          '        if (!mod || !mod.exports) return;',
+          '        var exp = mod.exports;',
+          '        Object.getOwnPropertyNames(exp).forEach(function(key) {',
+          '          try {',
+          '            var desc = Object.getOwnPropertyDescriptor(exp, key);',
+          '            if (!desc) return;',
+          '            if (desc.configurable === false || desc.writable === false) {',
+          '              Object.defineProperty(exp, key, { configurable: true, writable: true, enumerable: desc.enumerable, value: exp[key] });',
+          '            }',
+          '          } catch (_e) {}',
+          '        });',
+          '        return exp;',
+          '      } catch (_err) { return; }',
+          '    };',
+          '  }',
+          '} catch (_e) {}',
+        ]);
+      }
+    }
+
+    compilation.hooks.runtimeRequirementInTree
+      .for(RuntimeGlobals.require)
+      .tap(this.name, (chunk: any) => {
+        compilation.addRuntimeModule(chunk, new ExposeCacheRuntimeModule() as any);
+        return true;
+      });
   }
 
   /**
