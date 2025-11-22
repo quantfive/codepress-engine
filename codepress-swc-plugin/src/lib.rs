@@ -116,6 +116,10 @@ fn normalize_filename(filename: &str) -> String {
     } else if let Some(rest) = s.strip_prefix("file://") {
         s = rest.to_string();
     }
+    // Strip Vercel build prefix if present
+    if let Some(rest) = s.strip_prefix("/vercel/path0/") {
+        s = rest.to_string();
+    }
     for prefix in &[
         "turbopack/[project]/",
         "/turbopack/[project]/",
