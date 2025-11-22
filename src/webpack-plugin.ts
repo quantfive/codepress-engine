@@ -385,8 +385,13 @@ export default class CodePressWebpackPlugin {
 
       const exportMappings: { [originalName: string]: string } = {};
 
+      const orderedExports = exportsInfo.orderedExports;
+      if (!orderedExports) {
+        return null;
+      }
+
       // Iterate through all exports and check if they were mangled
-      for (const exportInfo of exportsInfo.orderedExports) {
+      for (const exportInfo of orderedExports) {
         const originalName = exportInfo.name;
 
         // Skip special exports
