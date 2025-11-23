@@ -295,12 +295,17 @@ impl CodePressTransform {
 
     /// Check if the current file should be excluded from all transformations
     fn is_excluded(&self) -> bool {
+        let file = self.current_file();
+        let normalized = file.replace('\\', "/");
+
+        // Always skip node_modules unless explicitly allowed
+        if normalized.contains("/node_modules/") {
+            return true;
+        }
+
         if self.exclude_patterns.is_empty() {
             return false;
         }
-
-        let file = self.current_file();
-        let normalized = file.replace('\\', "/");
 
         for pattern in &self.exclude_patterns {
             // Simple glob matching: ** matches any path segment, * matches within a segment
