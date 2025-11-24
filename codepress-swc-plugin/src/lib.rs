@@ -10,6 +10,7 @@ use swc_core::{
     plugin::{plugin_transform, proxies::TransformPluginProgramMetadata},
 };
 use swc_core::common::util::take::Take;
+use std::path::{Path, PathBuf};
 
 // ---------- Compatibility helpers (per-swccore band) ----------
 
@@ -162,6 +163,13 @@ pub struct CodePressTransform {
 
     // Exclude: file patterns to exclude from all transformations
     exclude_patterns: Vec<String>,  // e.g., ["**/FontProvider.tsx", "**/providers/**"]
+
+    // Provider wrapping: treat these import prefixes/packages as "local" (safe to wrap)
+    provider_local_prefixes: Vec<String>,   // e.g., ["@/", "~/"]
+    provider_local_packages: std::collections::HashSet<String>, // e.g., ["@repo/ui"]
+
+    // Import resolver derived from tsconfig/jsconfig (used to decide local vs external)
+    import_resolver: ImportResolver,
 }
 
 impl CodePressTransform {
@@ -241,6 +249,36 @@ impl CodePressTransform {
             }))
             .unwrap_or_default();
 
+        // Read provider wrapping allowlists
+        fn read_vec(map: &mut HashMap<String, serde_json::Value>, key: &str) -> Vec<String> {
+            map.remove(key)
+                .and_then(|v| {
+                    if let Some(arr) = v.as_array() {
+                        Some(
+                            arr.iter()
+                                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                                .collect(),
+                        )
+                    } else if let Some(s) = v.as_str() {
+                        Some(vec![s.to_string()])
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or_default()
+        }
+        let mut provider_local_prefixes = read_vec(&mut config, "providerLocalPrefixes");
+        if provider_local_prefixes.is_empty() {
+            provider_local_prefixes = vec!["@/".to_string(), "~/".to_string()];
+        }
+        let provider_local_packages: std::collections::HashSet<String> =
+            read_vec(&mut config, "providerLocalPackages")
+                .into_iter()
+                .collect();
+
+        // Build import resolver from tsconfig/jsconfig in cwd
+        let import_resolver = ImportResolver::from_configs();
+
         Self {
             repo_name,
             branch_name,
@@ -264,6 +302,9 @@ impl CodePressTransform {
             skip_components,
             skip_member_roots,
             exclude_patterns,
+            provider_local_prefixes,
+            provider_local_packages,
+            import_resolver,
         }
     }
 
@@ -453,6 +494,55 @@ impl CodePressTransform {
             }
             JSXElementName::JSXNamespacedName(_) => false,
         }
+    }
+
+    /// Return the import source module path for a JSX element (if it was imported).
+    fn import_source_for_jsx_name(&self, name: &JSXElementName) -> Option<String> {
+        match name {
+            JSXElementName::Ident(ident) => self
+                .bindings
+                .get(&ident.to_id())
+                .and_then(|b| b.import.as_ref().map(|im| im.source.clone())),
+            JSXElementName::JSXMemberExpr(member) => {
+                // Walk to the root object of the member chain (for namespace imports like Foo.Bar)
+                let mut obj = &member.obj;
+                while let JSXObject::JSXMemberExpr(inner) = obj {
+                    obj = &inner.obj;
+                }
+                if let JSXObject::Ident(root) = obj {
+                    self.bindings
+                        .get(&root.to_id())
+                        .and_then(|b| b.import.as_ref().map(|im| im.source.clone()))
+                } else {
+                    None
+                }
+            }
+            JSXElementName::JSXNamespacedName(_) => None,
+        }
+    }
+
+    /// True when we should avoid wrapping with __CPProvider because the component likely comes
+    /// from an external library that expects to own its direct children.
+    fn should_block_provider_wrap(&self, name: &JSXElementName) -> bool {
+        if let Some(src) = self.import_source_for_jsx_name(name) {
+            let file = self.current_file();
+            // Primary rule: resolve to a real path; if it is inside repo and not node_modules, allow wrapping.
+            if self.import_resolver.is_local_import(&src, &file) {
+                return false;
+            }
+            // Secondary override: explicit prefixes/packages can force wrapping for known-safe aliases.
+            for pfx in &self.provider_local_prefixes {
+                if src.starts_with(pfx) {
+                    return false;
+                }
+            }
+            if self.provider_local_packages.contains(&src) {
+                return false;
+            }
+            // Otherwise treat as external and avoid wrapping.
+            return true;
+        }
+        false
     }
 
     fn has_attr_key(attrs: &[JSXAttrOrSpread], key: &str) -> bool {
@@ -1853,6 +1943,222 @@ struct Candidate {
     reason: String,
 }
 
+// ----------------------------------------------------------------------------- 
+// Import resolution (tsconfig/jsconfig-aware) to determine local vs external imports
+// -----------------------------------------------------------------------------
+
+#[derive(Clone)]
+struct PathAlias {
+    prefix: String,
+    suffix: String,
+    targets: Vec<PathBuf>, // already joined with baseUrl/config dir
+    has_wildcard: bool,
+}
+
+struct ImportResolver {
+    root: PathBuf,
+    base_url: Option<PathBuf>,
+    aliases: Vec<PathAlias>,
+}
+
+impl ImportResolver {
+    fn from_configs() -> Self {
+        let root = std::env::current_dir()
+            .and_then(std::fs::canonicalize)
+            .unwrap_or_else(|_| PathBuf::from("."));
+        let mut base_url: Option<PathBuf> = None;
+        let mut aliases: Vec<PathAlias> = vec![];
+
+        // Prefer tsconfig.json then jsconfig.json
+        for cfg_name in &["tsconfig.json", "jsconfig.json"] {
+            let cfg_path = root.join(cfg_name);
+            if let Ok(text) = std::fs::read_to_string(&cfg_path) {
+                if let Ok(val) = serde_json::from_str::<serde_json::Value>(&text) {
+                    if let Some((b, a)) = Self::parse_config(&root, &cfg_path, &val) {
+                        base_url = b.or(base_url);
+                        aliases.extend(a);
+                        break;
+                    }
+                }
+            }
+        }
+
+        ImportResolver {
+            root,
+            base_url,
+            aliases,
+        }
+    }
+
+    fn parse_config(
+        root: &Path,
+        cfg_path: &Path,
+        val: &serde_json::Value,
+    ) -> Option<(Option<PathBuf>, Vec<PathAlias>)> {
+        let compiler_options = val.get("compilerOptions")?;
+        let cfg_dir = cfg_path.parent().unwrap_or(root);
+
+        let base_url = compiler_options
+            .get("baseUrl")
+            .and_then(|v| v.as_str())
+            .map(|s| cfg_dir.join(s));
+
+        let mut aliases: Vec<PathAlias> = vec![];
+        if let Some(paths) = compiler_options.get("paths").and_then(|p| p.as_object()) {
+            for (pattern, targets) in paths {
+                let has_wildcard = pattern.contains('*');
+                let mut prefix = pattern.clone();
+                let mut suffix = String::new();
+                if has_wildcard {
+                    if let Some((pfx, sfx)) = pattern.split_once('*') {
+                        prefix = pfx.to_string();
+                        suffix = sfx.to_string();
+                    }
+                }
+                let mut resolved_targets: Vec<PathBuf> = vec![];
+                if let Some(arr) = targets.as_array() {
+                    for t in arr {
+                        if let Some(s) = t.as_str() {
+                            let base = base_url
+                                .as_ref()
+                                .map_or_else(|| cfg_dir.to_path_buf(), |v| v.clone());
+                            resolved_targets.push(base.join(s));
+                        }
+                    }
+                }
+                aliases.push(PathAlias {
+                    prefix,
+                    suffix,
+                    targets: resolved_targets,
+                    has_wildcard,
+                });
+            }
+        }
+        Some((base_url, aliases))
+    }
+
+    /// Returns true if the import resolves to a path inside the repo root and outside node_modules.
+    fn is_local_import(&self, spec: &str, from_file: &str) -> bool {
+        if spec.is_empty() {
+            return false;
+        }
+
+        // Relative or absolute specifier
+        if spec.starts_with("./") || spec.starts_with("../") || spec.starts_with('/') {
+            if let Some(p) = self.resolve_relative(spec, from_file) {
+                return self.is_local_path(&p);
+            }
+            return false;
+        }
+
+        // Path aliases (tsconfig/jsconfig paths)
+        for alias in &self.aliases {
+            if let Some(paths) = alias.apply(spec) {
+                for p in paths {
+                    if let Some(resolved) = self.resolve_with_extensions(&p) {
+                        if self.is_local_path(&resolved) {
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+
+        // baseUrl fallback
+        if let Some(base) = &self.base_url {
+            let candidate = base.join(spec);
+            if let Some(resolved) = self.resolve_with_extensions(&candidate) {
+                if self.is_local_path(&resolved) {
+                    return true;
+                }
+            }
+        }
+
+        // Anything else: treat as external
+        false
+    }
+
+    fn resolve_relative(&self, spec: &str, from_file: &str) -> Option<PathBuf> {
+        let from = PathBuf::from(from_file);
+        let base = if from.is_absolute() {
+            from
+        } else {
+            self.root.join(from)
+        };
+        let parent = base.parent().unwrap_or(&self.root);
+        let joined = parent.join(spec);
+        self.resolve_with_extensions(&joined)
+    }
+
+    fn resolve_with_extensions(&self, p: &Path) -> Option<PathBuf> {
+        // If it already exists
+        if p.exists() && p.is_file() {
+            return std::fs::canonicalize(p).ok();
+        }
+
+        let mut candidates: Vec<PathBuf> = vec![];
+        let exts = ["ts", "tsx", "js", "jsx", "mjs", "cjs"];
+        for ext in &exts {
+            let mut with_ext = p.to_path_buf();
+            with_ext.set_extension(ext);
+            candidates.push(with_ext);
+        }
+        // index files if p is a directory or no extension given
+        let mut dir_candidate = p.to_path_buf();
+        for ext in &exts {
+            let mut ix = dir_candidate.clone();
+            ix.push("index");
+            ix.set_extension(ext);
+            candidates.push(ix);
+        }
+
+        for cand in candidates {
+            if cand.exists() && cand.is_file() {
+                if let Ok(real) = std::fs::canonicalize(&cand) {
+                    return Some(real);
+                }
+            }
+        }
+        None
+    }
+
+    fn is_local_path(&self, p: &Path) -> bool {
+        if let Ok(real) = std::fs::canonicalize(p) {
+            if Self::is_in_node_modules(&real) {
+                return false;
+            }
+            return real.starts_with(&self.root);
+        }
+        false
+    }
+
+    fn is_in_node_modules(p: &Path) -> bool {
+        p.components().any(|c| c.as_os_str() == "node_modules")
+    }
+}
+
+impl PathAlias {
+    fn apply(&self, spec: &str) -> Option<Vec<PathBuf>> {
+        if self.has_wildcard {
+            if spec.starts_with(&self.prefix) && spec.ends_with(&self.suffix) {
+                let mid = &spec[self.prefix.len()..spec.len() - self.suffix.len()];
+                let mut out = vec![];
+                for t in &self.targets {
+                    let candidate = t.join(mid);
+                    out.push(candidate);
+                }
+                Some(out)
+            } else {
+                None
+            }
+        } else if spec == self.prefix {
+            Some(self.targets.clone())
+        } else {
+            None
+        }
+    }
+}
+
 struct BindingCollector<'a> {
     out: &'a mut HashMap<Id, Binding>,
 }
@@ -2106,7 +2412,9 @@ impl CodePressTransform {
 }
 
 impl VisitMut for CodePressTransform {
-    fn visit_mut_module(&mut self, m: &mut Module) {
+  fn visit_mut_module(&mut self, m: &mut Module) {
+        // Record module file from module span before exclusion checks
+        self.file_from_span(m.span);
         // Check if this file should be excluded from all transformations
         if self.is_excluded() {
             return;
@@ -2820,6 +3128,7 @@ impl VisitMut for CodePressTransform {
         let is_custom_call = !is_host
             && Self::is_custom_component_name(&node.opening.name)
             && !self.is_skip_component(&node.opening.name);
+        let block_provider = self.should_block_provider_wrap(&node.opening.name);
 
         if is_custom_call {
             // DOM wrapper (display: contents) carrying callsite; we also duplicate metadata on the invocation
@@ -2850,38 +3159,41 @@ impl VisitMut for CodePressTransform {
                 .push(JSXElementChild::JSXElement(Box::new(original)));
             *node = wrapper;
 
-            // Provider wrapping temporarily disabled; to re-enable, uncomment this block.
-            let cs_enc = if let JSXAttrOrSpread::JSXAttr(a) =
-                self.create_encoded_path_attr(&filename, orig_open_span, Some(orig_full_span))
-            {
-                if let Some(JSXAttrValue::Lit(Lit::Str(s))) = a.value {
-                    s.value.to_string()
+            // Wrap with __CPProvider unless the component depends on its direct parent/child
+            // identity (e.g., Recharts clones its immediate child chart).
+            if !block_provider {
+                let cs_enc = if let JSXAttrOrSpread::JSXAttr(a) =
+                    self.create_encoded_path_attr(&filename, orig_open_span, Some(orig_full_span))
+                {
+                    if let Some(JSXAttrValue::Lit(Lit::Str(s))) = a.value {
+                        s.value.to_string()
+                    } else {
+                        "".into()
+                    }
                 } else {
                     "".into()
-                }
-            } else {
-                "".into()
-            };
-            // find fp on this node (or recompute)
-            let mut fp_enc = String::new();
-            for a in &node.opening.attrs {
-                if let JSXAttrOrSpread::JSXAttr(attr) = a {
-                    if let JSXAttrName::Ident(idn) = &attr.name {
-                        if idn.sym.as_ref() == "codepress-data-fp" {
-                            if let Some(JSXAttrValue::Lit(Lit::Str(s))) = &attr.value {
-                                fp_enc = s.value.to_string();
+                };
+                // find fp on this node (or recompute)
+                let mut fp_enc = String::new();
+                for a in &node.opening.attrs {
+                    if let JSXAttrOrSpread::JSXAttr(attr) = a {
+                        if let JSXAttrName::Ident(idn) = &attr.name {
+                            if idn.sym.as_ref() == "codepress-data-fp" {
+                                if let Some(JSXAttrValue::Lit(Lit::Str(s))) = &attr.value {
+                                    fp_enc = s.value.to_string();
+                                }
                             }
                         }
                     }
                 }
+                let meta = ProviderMeta {
+                    cs: cs_enc,
+                    c: cands_enc.clone(),
+                    k: kinds_enc.clone(),
+                    fp: fp_enc,
+                };
+                self.wrap_with_provider(node, meta);
             }
-            let meta = ProviderMeta {
-                cs: cs_enc,
-                c: cands_enc.clone(),
-                k: kinds_enc.clone(),
-                fp: fp_enc,
-            };
-            self.wrap_with_provider(node, meta);
 
             let attrs = &mut node.opening.attrs;
             // Only annotate the injected wrappers (provider or host wrapper), not the invocation element
