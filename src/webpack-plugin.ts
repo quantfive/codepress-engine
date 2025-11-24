@@ -110,7 +110,10 @@ export default class CodePressWebpackPlugin {
       return;
     }
 
-    const mapScript = this.generateMapScript(moduleMap);
+    // Extract env vars from DefinePlugin for HMR support
+    const envMap = this.extractEnvVars(compiler);
+
+    const mapScript = this.generateMapScript(moduleMap, envMap);
     const injected = this.injectIntoMainBundle(compilation, mapScript);
 
     if (!injected) {
@@ -347,6 +350,41 @@ export default class CodePressWebpackPlugin {
   }
 
   /**
+   * Extract environment variable definitions from DefinePlugin
+   * These are the values that get replaced at build time (e.g., process.env.NEXT_PUBLIC_*)
+   */
+  private extractEnvVars(compiler: Compiler): Record<string, string> {
+    const envMap: Record<string, string> = {};
+
+    // Find DefinePlugin in the compiler's plugins
+    for (const plugin of compiler.options.plugins || []) {
+      if (plugin?.constructor?.name === "DefinePlugin") {
+        const definitions =
+          (plugin as { definitions?: Record<string, unknown> }).definitions ||
+          {};
+        for (const [key, value] of Object.entries(definitions)) {
+          // Match process.env.* patterns
+          if (key.startsWith("process.env.")) {
+            const envKey = key.replace("process.env.", "");
+            // DefinePlugin values are JSON-stringified (e.g., '"value"')
+            // Parse to get the actual value
+            if (typeof value === "string") {
+              try {
+                envMap[envKey] = JSON.parse(value);
+              } catch {
+                envMap[envKey] = value;
+              }
+            } else if (value !== undefined && value !== null) {
+              envMap[envKey] = String(value);
+            }
+          }
+        }
+      }
+    }
+    return envMap;
+  }
+
+  /**
    * Normalize a module path to a human-readable format
    *
    * @param resourcePath - The absolute path to the module
@@ -388,11 +426,15 @@ export default class CodePressWebpackPlugin {
   }
 
   /**
-   * Generate the inline script that injects the module map
+   * Generate the inline script that injects the module map and env vars
    */
-  private generateMapScript(moduleMap: ModuleMap): string {
-    const json = JSON.stringify(moduleMap);
-    return `(function(){if(typeof window!=="undefined"){window.__CP_MODULE_MAP__=${json};console.log("[CodePress] Loaded module map with",Object.keys(window.__CP_MODULE_MAP__).length,"entries");}})();`;
+  private generateMapScript(
+    moduleMap: ModuleMap,
+    envMap: Record<string, string>
+  ): string {
+    const mapJson = JSON.stringify(moduleMap);
+    const envJson = JSON.stringify(envMap);
+    return `(function(){if(typeof window!=="undefined"){window.__CP_MODULE_MAP__=${mapJson};window.__CP_ENV_MAP__=${envJson};console.log("[CodePress] Loaded module map with",Object.keys(window.__CP_MODULE_MAP__).length,"entries and",Object.keys(window.__CP_ENV_MAP__).length,"env vars");}})();`;
   }
 
   /**
