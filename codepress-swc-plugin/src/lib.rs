@@ -84,6 +84,73 @@ fn make_assign_left_ident(name: &str) -> swc_core::ecma::ast::AssignTarget {
         type_ann: None,
     }))
 }
+
+// JSXAttrValue::Lit was removed in swc_core 48.x, need to use JSXExprContainer
+#[cfg(feature = "compat_v48")]
+fn make_jsx_str_attr_value(val: String) -> JSXAttrValue {
+    JSXAttrValue::JSXExprContainer(JSXExprContainer {
+        span: DUMMY_SP,
+        expr: JSXExpr::Expr(Box::new(Expr::Lit(Lit::Str(Str {
+            span: DUMMY_SP,
+            value: val.into(),
+            raw: None,
+        })))),
+    })
+}
+
+#[cfg(not(feature = "compat_v48"))]
+fn make_jsx_str_attr_value(val: String) -> JSXAttrValue {
+    JSXAttrValue::Lit(Lit::Str(Str {
+        span: DUMMY_SP,
+        value: val.into(),
+        raw: None,
+    }))
+}
+
+// In swc_core 48.x, Str.value is Wtf8Atom which has a Debug impl
+#[cfg(feature = "compat_v48")]
+#[inline]
+fn atom_to_string(atom: &swc_atoms::Wtf8Atom) -> String {
+    // Wtf8Atom implements Into<String>
+    format!("{:?}", atom).trim_matches('"').to_string()
+}
+
+#[cfg(not(feature = "compat_v48"))]
+#[inline]
+fn atom_to_string<T: ToString>(atom: &T) -> String {
+    atom.to_string()
+}
+
+// Helper to extract string from JSXAttrValue (handles both old Lit and new pattern)
+// In swc_core 48.x, JSXAttrValue::Lit was removed entirely
+#[cfg(feature = "compat_v48")]
+fn jsx_attr_value_to_string(value: &Option<JSXAttrValue>) -> Option<String> {
+    match value {
+        Some(JSXAttrValue::JSXExprContainer(JSXExprContainer { expr: JSXExpr::Expr(e), .. })) => {
+            if let Expr::Lit(Lit::Str(s)) = &**e {
+                Some(atom_to_string(&s.value))
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
+#[cfg(not(feature = "compat_v48"))]
+fn jsx_attr_value_to_string(value: &Option<JSXAttrValue>) -> Option<String> {
+    match value {
+        Some(JSXAttrValue::Lit(Lit::Str(s))) => Some(atom_to_string(&s.value)),
+        Some(JSXAttrValue::JSXExprContainer(JSXExprContainer { expr: JSXExpr::Expr(e), .. })) => {
+            if let Expr::Lit(Lit::Str(s)) = &**e {
+                Some(atom_to_string(&s.value))
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
 // End Compatibility helpers // TODO: move these to another file?
 
 // -----------------------------------------------------------------------------
@@ -564,11 +631,7 @@ impl CodePressTransform {
         attrs.push(JSXAttrOrSpread::JSXAttr(JSXAttr {
             span: DUMMY_SP,
             name: JSXAttrName::Ident(cp_ident_name(key.into())),
-            value: Some(JSXAttrValue::Lit(Lit::Str(Str {
-                span: DUMMY_SP,
-                value: val.into(),
-                raw: None,
-            }))),
+            value: Some(make_jsx_str_attr_value(val)),
         }));
     }
     // Build "root.path" for MemberExpr where the path is statically known.
@@ -599,7 +662,7 @@ impl CodePressTransform {
                         MemberProp::PrivateName(_) => false,
                         MemberProp::Computed(c) => match &*c.expr {
                             Expr::Lit(Lit::Str(s)) => {
-                                push_seg(path, &format!(r#"["{}"]"#, s.value));
+                                push_seg(path, &format!(r#"["{}"]"#, atom_to_string(&s.value)));
                                 true
                             }
                             Expr::Lit(Lit::Num(n)) => {
@@ -718,11 +781,7 @@ impl CodePressTransform {
         JSXAttrOrSpread::JSXAttr(JSXAttr {
             span: DUMMY_SP,
             name: JSXAttrName::Ident(cp_ident_name("codepress-data-fp".into())),
-            value: Some(JSXAttrValue::Lit(Lit::Str(Str {
-                span: DUMMY_SP,
-                value: attr_value.into(),
-                raw: None,
-            }))),
+            value: Some(make_jsx_str_attr_value(attr_value)),
         })
     }
 
@@ -731,11 +790,7 @@ impl CodePressTransform {
             JSXAttrOrSpread::JSXAttr(JSXAttr {
                 span: DUMMY_SP,
                 name: JSXAttrName::Ident(cp_ident_name("codepress-github-repo-name".into())),
-                value: Some(JSXAttrValue::Lit(Lit::Str(Str {
-                    span: DUMMY_SP,
-                    value: repo.clone().into(),
-                    raw: None,
-                }))),
+                value: Some(make_jsx_str_attr_value(repo.clone())),
             })
         })
     }
@@ -745,11 +800,7 @@ impl CodePressTransform {
             JSXAttrOrSpread::JSXAttr(JSXAttr {
                 span: DUMMY_SP,
                 name: JSXAttrName::Ident(cp_ident_name("codepress-github-branch".into())),
-                value: Some(JSXAttrValue::Lit(Lit::Str(Str {
-                    span: DUMMY_SP,
-                    value: branch.clone().into(),
-                    raw: None,
-                }))),
+                value: Some(make_jsx_str_attr_value(branch.clone())),
             })
         })
     }
@@ -961,7 +1012,7 @@ impl CodePressTransform {
                         if let Prop::KeyValue(kv) = &**p {
                             let key = match &kv.key {
                                 PropName::Ident(i) => i.sym.to_string(),
-                                PropName::Str(s) => s.value.to_string(),
+                                PropName::Str(s) => atom_to_string(&s.value),
                                 _ => "<computed>".to_string(),
                             };
                             chain.push(ProvNode::ObjectProp {
@@ -1206,7 +1257,7 @@ impl CodePressTransform {
         // Skip files that use Next.js font loaders to avoid interfering with font validation
         for item in &m.body {
             if let ModuleItem::ModuleDecl(ModuleDecl::Import(import_decl)) = item {
-                let src = import_decl.src.value.to_string();
+                let src = atom_to_string(&import_decl.src.value);
                 if src.starts_with("next/font/") || src.starts_with("@next/font/") {
                     return;
                 }
@@ -2211,7 +2262,7 @@ impl<'a> Visit for BindingCollector<'a> {
                             def_span: named.local.span,
                             init: None,
                             import: Some(ImportInfo {
-                                source: n.src.value.to_string(),
+                                source: atom_to_string(&n.src.value),
                                 imported,
                             }),
                             fn_body_span: None,
@@ -2225,7 +2276,7 @@ impl<'a> Visit for BindingCollector<'a> {
                             def_span: def.local.span,
                             init: None,
                             import: Some(ImportInfo {
-                                source: n.src.value.to_string(),
+                                source: atom_to_string(&n.src.value),
                                 imported: "default".into(),
                             }),
                             fn_body_span: None,
@@ -2239,7 +2290,7 @@ impl<'a> Visit for BindingCollector<'a> {
                             def_span: ns.local.span,
                             init: None,
                             import: Some(ImportInfo {
-                                source: n.src.value.to_string(),
+                                source: atom_to_string(&n.src.value),
                                 imported: "*".into(),
                             }),
                             fn_body_span: None,
@@ -2291,7 +2342,7 @@ fn detect_fetch_like(c: &CallExpr) -> Option<FetchLike> {
         Callee::Expr(expr) => match &**expr {
             Expr::Ident(id) if id.sym.as_ref() == "fetch" => {
                 let url = c.args.get(0).and_then(|a| match &*a.expr {
-                    Expr::Lit(Lit::Str(s)) => Some(s.value.to_string()),
+                    Expr::Lit(Lit::Str(s)) => Some(atom_to_string(&s.value)),
                     _ => None,
                 });
                 Some(FetchLike { url })
@@ -2301,7 +2352,7 @@ fn detect_fetch_like(c: &CallExpr) -> Option<FetchLike> {
                     let p = prop.sym.as_ref();
                     if ["get", "post", "put", "delete", "query", "mutate", "request"].contains(&p) {
                         let url = c.args.get(0).and_then(|a| match &*a.expr {
-                            Expr::Lit(Lit::Str(s)) => Some(s.value.to_string()),
+                            Expr::Lit(Lit::Str(s)) => Some(atom_to_string(&s.value)),
                             _ => None,
                         });
                         return Some(FetchLike { url });
@@ -2588,7 +2639,7 @@ impl VisitMut for CodePressTransform {
                                 }
                             })
                             .unwrap_or_else(|| named.local.sym.to_string()),
-                        source: n.src.value.to_string(),
+                        source: atom_to_string(&n.src.value),
                         span: self.span_file_lines(named.local.span),
                     });
                 }
@@ -2596,7 +2647,7 @@ impl VisitMut for CodePressTransform {
                     self.graph.imports.push(ImportRow {
                         local: def.local.sym.to_string(),
                         imported: "default".into(),
-                        source: n.src.value.to_string(),
+                        source: atom_to_string(&n.src.value),
                         span: self.span_file_lines(def.local.span),
                     });
                 }
@@ -2604,7 +2655,7 @@ impl VisitMut for CodePressTransform {
                     self.graph.imports.push(ImportRow {
                         local: ns.local.sym.to_string(),
                         imported: "*".into(),
-                        source: n.src.value.to_string(),
+                        source: atom_to_string(&n.src.value),
                         span: self.span_file_lines(ns.local.span),
                     });
                 }
@@ -2690,20 +2741,20 @@ impl VisitMut for CodePressTransform {
                         if let ExportSpecifier::Named(nm) = s {
                             let imported = match &nm.orig {
                                 ModuleExportName::Ident(i) => i.sym.to_string(),
-                                ModuleExportName::Str(s) => s.value.to_string(),
+                                ModuleExportName::Str(s) => atom_to_string(&s.value),
                             };
                             let exported = nm
                                 .exported
                                 .as_ref()
                                 .map(|e| match e {
                                     ModuleExportName::Ident(i) => i.sym.to_string(),
-                                    ModuleExportName::Str(s) => s.value.to_string(),
+                                    ModuleExportName::Str(s) => atom_to_string(&s.value),
                                 })
                                 .unwrap_or_else(|| imported.clone());
                             self.graph.reexports.push(ReexportRow {
                                 exported,
                                 imported,
-                                source: src.value.to_string(),
+                                source: atom_to_string(&src.value),
                                 span: self.span_file_lines(en.span),
                             });
                         }
@@ -2718,7 +2769,7 @@ impl VisitMut for CodePressTransform {
                                     .as_ref()
                                     .map(|e| match e {
                                         ModuleExportName::Ident(i) => i.sym.to_string(),
-                                        ModuleExportName::Str(s) => s.value.to_string(),
+                                        ModuleExportName::Str(s) => atom_to_string(&s.value),
                                     })
                                     .unwrap_or_else(|| orig.sym.to_string());
                                 self.graph.exports.push(ExportRow {
@@ -2735,7 +2786,7 @@ impl VisitMut for CodePressTransform {
                 self.graph.reexports.push(ReexportRow {
                     exported: "*".into(),
                     imported: "*".into(),
-                    source: ea.src.value.to_string(),
+                    source: atom_to_string(&ea.src.value),
                     span: self.span_file_lines(ea.span),
                 });
             }
@@ -3165,11 +3216,7 @@ impl VisitMut for CodePressTransform {
                 let cs_enc = if let JSXAttrOrSpread::JSXAttr(a) =
                     self.create_encoded_path_attr(&filename, orig_open_span, Some(orig_full_span))
                 {
-                    if let Some(JSXAttrValue::Lit(Lit::Str(s))) = a.value {
-                        s.value.to_string()
-                    } else {
-                        "".into()
-                    }
+                    jsx_attr_value_to_string(&a.value).unwrap_or_default()
                 } else {
                     "".into()
                 };
@@ -3179,8 +3226,8 @@ impl VisitMut for CodePressTransform {
                     if let JSXAttrOrSpread::JSXAttr(attr) = a {
                         if let JSXAttrName::Ident(idn) = &attr.name {
                             if idn.sym.as_ref() == "codepress-data-fp" {
-                                if let Some(JSXAttrValue::Lit(Lit::Str(s))) = &attr.value {
-                                    fp_enc = s.value.to_string();
+                                if let Some(val) = jsx_attr_value_to_string(&attr.value) {
+                                    fp_enc = val;
                                 }
                             }
                         }
@@ -3265,9 +3312,7 @@ impl HoistAndElide {
             if let JSXAttrOrSpread::JSXAttr(attr) = a {
                 if let JSXAttrName::Ident(id) = &attr.name {
                     if id.sym.as_ref() == key {
-                        if let Some(JSXAttrValue::Lit(Lit::Str(s))) = &attr.value {
-                            return Some(s.value.to_string());
-                        }
+                        return jsx_attr_value_to_string(&attr.value);
                     }
                 }
             }
@@ -3278,11 +3323,7 @@ impl HoistAndElide {
         attrs.push(JSXAttrOrSpread::JSXAttr(JSXAttr {
             span: DUMMY_SP,
             name: JSXAttrName::Ident(cp_ident_name(key.into())),
-            value: Some(JSXAttrValue::Lit(Lit::Str(Str {
-                span: DUMMY_SP,
-                value: val.into(),
-                raw: None,
-            }))),
+            value: Some(make_jsx_str_attr_value(val)),
         }));
     }
 }
@@ -3401,7 +3442,7 @@ impl CodePressTransform {
                         if let Prop::KeyValue(kv) = &**p {
                             let key = match &kv.key {
                                 PropName::Ident(i) => i.sym.to_string(),
-                                PropName::Str(s) => s.value.to_string(),
+                                PropName::Str(s) => atom_to_string(&s.value),
                                 PropName::Num(n) => n.value.to_string(),
                                 _ => continue,
                             };
@@ -3423,7 +3464,7 @@ impl CodePressTransform {
                 self.graph.literal_index.push(LiteralIxRow {
                     export_name: export_name.to_string(),
                     path: prefix,
-                    text: s.value.to_string(),
+                    text: atom_to_string(&s.value),
                     span: self.span_file_lines(s.span),
                 });
             }
