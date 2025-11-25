@@ -44,6 +44,18 @@ const BANDS = [
       serde_json: "^1.0.140",
     },
   },
+
+  // @swc/core 1.14+ (standalone SWC, not Next.js bundled)
+  {
+    id: "v48",
+    swc_core: "=48.0.2",
+    extra: {
+      serde: "^1.0.225",
+      serde_json: "^1.0.140",
+      compat_feature: "compat_v48",
+      swc_atoms: "=9.0.0",
+    },
+  },
 ];
 
 // Allow selecting specific bands via env (`BAND` or `BANDS`) or CLI args.
@@ -103,6 +115,10 @@ const templateCargo = (band) => {
     ? `swc_common = "${band.extra.swc_common}"`
     : "";
 
+  const swcAtomsLine = band.extra?.swc_atoms
+    ? `swc_atoms = "${band.extra.swc_atoms}"`
+    : "";
+
   const featuresBlock = band.extra?.compat_feature
     ? `
 
@@ -132,6 +148,7 @@ regex = "1"
 serde = { version = "${serdeVer}", features = ["derive"] }
 serde_json = "${serdeJsonVer}"
 ${swcCommonLine}
+${swcAtomsLine}
 
 [dependencies.swc_core]
 version = "${band.swc_core}"
@@ -298,7 +315,7 @@ function selectTargets(targetArg) {
     return;
   }
 
-  let bands = BANDS;
+  let bands = BANDS_TO_BUILD;
   if (args.band) {
     bands = BANDS.filter((b) => b.id === args.band);
     if (bands.length === 0) {
