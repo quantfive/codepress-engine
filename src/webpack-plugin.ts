@@ -78,7 +78,7 @@ export default class CodePressWebpackPlugin {
   }
 
   /**
-   * Get alias mappings from webpack's resolve configuration.
+   * Get alias mappings from webpack's resolve configuration AND tsconfig.json.
    * Returns a map of alias prefix -> resolved directory path.
    *
    * For example, with tsconfig paths: { "@/*": ["./src/*"] }
@@ -86,8 +86,9 @@ export default class CodePressWebpackPlugin {
    */
   private getAliasMap(compiler: Compiler): Map<string, string> {
     const aliases = new Map<string, string>();
-    const resolveAlias = compiler.options.resolve?.alias;
 
+    // First, try webpack's resolve.alias
+    const resolveAlias = compiler.options.resolve?.alias;
     if (resolveAlias && typeof resolveAlias === "object") {
       for (const [alias, target] of Object.entries(resolveAlias)) {
         if (typeof target === "string") {
@@ -102,6 +103,44 @@ export default class CodePressWebpackPlugin {
           relativePath = relativePath.replace(/\/$/, "");
           aliases.set(alias, relativePath);
         }
+      }
+    }
+
+    // If no aliases found, try reading from tsconfig.json
+    // Next.js doesn't always populate resolve.alias from tsconfig paths
+    if (aliases.size === 0) {
+      try {
+        const fs = require("fs");
+        const path = require("path");
+        const tsconfigPath = path.join(compiler.context, "tsconfig.json");
+
+        if (fs.existsSync(tsconfigPath)) {
+          const tsconfigContent = fs.readFileSync(tsconfigPath, "utf8");
+          // Remove comments (tsconfig allows them)
+          const jsonContent = tsconfigContent.replace(
+            /\/\*[\s\S]*?\*\/|\/\/.*/g,
+            ""
+          );
+          const tsconfig = JSON.parse(jsonContent);
+          const paths = tsconfig.compilerOptions?.paths;
+
+          if (paths && typeof paths === "object") {
+            for (const [aliasPattern, targets] of Object.entries(paths)) {
+              // Convert "@/*" -> "@" and ["./src/*"] -> "src"
+              const alias = aliasPattern.replace(/\/\*$/, "");
+              const targetArray = targets as string[];
+              if (targetArray && targetArray[0]) {
+                let targetPath = targetArray[0]
+                  .replace(/^\.\//, "") // Remove leading ./
+                  .replace(/\/\*$/, ""); // Remove trailing /*
+                aliases.set(alias, targetPath);
+              }
+            }
+          }
+        }
+      } catch (e) {
+        // Silently fail - tsconfig reading is best-effort
+        console.warn("[CodePress] Could not read tsconfig.json for aliases:", e);
       }
     }
 
@@ -363,6 +402,19 @@ export default class CodePressWebpackPlugin {
                         ? finalExports
                         : undefined,
                   };
+                  // For index files, also add a key without /index suffix
+                  // so imports like "@/features/dashboard" resolve to "@/features/dashboard/index"
+                  if (aliasPath.endsWith("/index")) {
+                    const withoutIndex = aliasPath.replace(/\/index$/, "");
+                    moduleMap[withoutIndex] = {
+                      path: runtime,
+                      moduleId: id,
+                      exports:
+                        Object.keys(finalExports).length > 0
+                          ? finalExports
+                          : undefined,
+                    };
+                  }
                 }
               }
             } else {
@@ -488,6 +540,16 @@ export default class CodePressWebpackPlugin {
             moduleId: id,
             ...(hasExportMappings ? { exports: exportMappings } : {}),
           };
+          // For index files, also add a key without /index suffix
+          // so imports like "@/features/dashboard" resolve to "@/features/dashboard/index"
+          if (aliasPath.endsWith("/index")) {
+            const withoutIndex = aliasPath.replace(/\/index$/, "");
+            moduleMap[withoutIndex] = {
+              path: runtimePath,
+              moduleId: id,
+              ...(hasExportMappings ? { exports: exportMappings } : {}),
+            };
+          }
         }
       }
     });
