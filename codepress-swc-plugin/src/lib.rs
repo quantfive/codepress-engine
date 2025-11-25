@@ -237,6 +237,10 @@ pub struct CodePressTransform {
 
     // Import resolver derived from tsconfig/jsconfig (used to decide local vs external)
     import_resolver: ImportResolver,
+
+    // Environment variables to inject as window.__CP_ENV_MAP__ (for HMR support)
+    env_vars: HashMap<String, String>,
+    inserted_env_map: bool,
 }
 
 impl CodePressTransform {
@@ -346,6 +350,24 @@ impl CodePressTransform {
         // Build import resolver from tsconfig/jsconfig in cwd
         let import_resolver = ImportResolver::from_configs();
 
+        // Parse env_vars from config (for HMR env var injection)
+        let env_vars: HashMap<String, String> = config
+            .remove("env_vars")
+            .and_then(|v| {
+                if let Some(obj) = v.as_object() {
+                    Some(
+                        obj.iter()
+                            .filter_map(|(k, v)| {
+                                v.as_str().map(|s| (k.clone(), s.to_string()))
+                            })
+                            .collect()
+                    )
+                } else {
+                    None
+                }
+            })
+            .unwrap_or_default();
+
         Self {
             repo_name,
             branch_name,
@@ -372,6 +394,8 @@ impl CodePressTransform {
             provider_local_prefixes,
             provider_local_packages,
             import_resolver,
+            env_vars,
+            inserted_env_map: false,
         }
     }
 
@@ -1843,6 +1867,88 @@ impl CodePressTransform {
         m.body.insert(insert_at, stmt);
         self.inserted_stamp_helper = true;
     }
+
+    /// Injects window.__CP_ENV_MAP__ = {...} into Next.js entry points (_app, root layout).
+    /// This provides env vars to the CodePress HMR system for dynamically built modules.
+    fn ensure_env_map_inline(&mut self, m: &mut Module) {
+        if self.inserted_env_map || self.env_vars.is_empty() {
+            return;
+        }
+
+        // Get current file path
+        let _ = self.file_from_span(m.span);
+        let file = self.current_file();
+        let lower = file.to_lowercase().replace('\\', "/");
+
+        // Skip node_modules and next internals
+        if lower.contains("node_modules/") || lower.contains("next/dist/") {
+            return;
+        }
+
+        // Only inject into Next.js entry points:
+        // - Pages Router: _app.tsx/_app.jsx/_app.ts/_app.js
+        // - App Router: root layout.tsx/layout.jsx (in /app/ or /src/app/, not nested)
+        let is_pages_app = lower.contains("/_app.") || lower.contains("/pages/_app");
+        let is_root_layout = {
+            // Match /app/layout.tsx or /src/app/layout.tsx but NOT /app/foo/layout.tsx
+            let is_app_layout = lower.contains("/app/layout.") || lower.contains("/src/app/layout.");
+            // Ensure it's the root layout (no additional path segments between /app/ and /layout)
+            let segments_after_app = if let Some(idx) = lower.find("/app/") {
+                let after = &lower[idx + 5..]; // skip "/app/"
+                after.starts_with("layout.")
+            } else if let Some(idx) = lower.find("/src/app/") {
+                let after = &lower[idx + 9..]; // skip "/src/app/"
+                after.starts_with("layout.")
+            } else {
+                false
+            };
+            is_app_layout && segments_after_app
+        };
+
+        if !is_pages_app && !is_root_layout {
+            return;
+        }
+
+        // Build JSON string for env vars
+        let json = serde_json::to_string(&self.env_vars).unwrap_or_else(|_| "{}".to_string());
+
+        // Inject: try{if(typeof window!=='undefined'){window.__CP_ENV_MAP__=...;}}catch(_){}
+        let js = format!(
+            "try{{if(typeof window!=='undefined'){{window.__CP_ENV_MAP__={};console.log('[CodePress] Injected',Object.keys(window.__CP_ENV_MAP__).length,'env vars');}}}}catch(_){{}}",
+            json
+        );
+
+        let stmt = ModuleItem::Stmt(Stmt::Expr(ExprStmt {
+            span: DUMMY_SP,
+            expr: Box::new(Expr::Call(CallExpr {
+                span: DUMMY_SP,
+                callee: Callee::Expr(Box::new(Expr::New(NewExpr {
+                    span: DUMMY_SP,
+                    callee: Box::new(Expr::Ident(cp_ident("Function".into()))),
+                    args: Some(vec![ExprOrSpread {
+                        spread: None,
+                        expr: Box::new(Expr::Lit(Lit::Str(Str {
+                            span: DUMMY_SP,
+                            value: js.into(),
+                            raw: None,
+                        }))),
+                    }]),
+                    type_args: None,
+                    #[cfg(not(feature = "compat_0_87"))]
+                    ctxt: SyntaxContext::empty(),
+                }))),
+                args: vec![],
+                type_args: None,
+                #[cfg(not(feature = "compat_0_87"))]
+                ctxt: SyntaxContext::empty(),
+            })),
+        }));
+
+        // Place AFTER directive prologue (e.g., "use client"; "use strict")
+        let insert_at = self.directive_insert_index(m);
+        m.body.insert(insert_at, stmt);
+        self.inserted_env_map = true;
+    }
 }
 
 // -----------------------------------------------------------------------------
@@ -2471,6 +2577,8 @@ impl VisitMut for CodePressTransform {
             return;
         }
 
+        // Inject env vars into entry points (for HMR support)
+        self.ensure_env_map_inline(m);
         // Inject inline provider once per module (from main branch)
         self.ensure_provider_inline(m);
         // Inject guarded stamping helper

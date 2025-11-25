@@ -66,6 +66,21 @@ function detectGitRepoName(): string | null {
   return null;
 }
 
+/**
+ * Auto-collect NEXT_PUBLIC_* environment variables for injection into the page.
+ * These are used by CodePress HMR to substitute env vars in dynamically built modules.
+ */
+function collectPublicEnvVars(): Record<string, string> {
+  if (typeof process === "undefined" || !process.env) {
+    return {};
+  }
+  return Object.fromEntries(
+    Object.entries(process.env)
+      .filter(([k]) => k.startsWith("NEXT_PUBLIC_"))
+      .map(([k, v]) => [k, v ?? ""])
+  );
+}
+
 function readPackageVersion(pkg: string): string | null {
   try {
     const resolved = require(
@@ -150,9 +165,14 @@ function resolveWasmFile(selection: BandSelection): string {
 const createSWCPlugin = (
   userConfig: SWCUserConfig = {}
 ): [string, SWCConfig] => {
+  // Auto-collect env vars, but allow user override
+  const autoEnvVars = collectPublicEnvVars();
+  const userEnvVars = (userConfig as CodePressPluginOptions).env_vars;
+
   const config: SWCConfig = {
     repo_name: detectGitRepoName(),
     branch_name: detectGitBranch(),
+    env_vars: userEnvVars ?? autoEnvVars,
     ...(userConfig as CodePressPluginOptions),
   } as SWCConfig;
 

@@ -5,6 +5,9 @@
  * module IDs (used in production) to human-readable module names. The mapping
  * is injected into the main bundle as window.__CP_MODULE_MAP__.
  *
+ * Note: Environment variables (window.__CP_ENV_MAP__) are now injected by the
+ * SWC plugin at transform time, not by this webpack plugin.
+ *
  * @example
  * // next.config.js
  * const CodePressWebpackPlugin = require('@codepress/codepress-engine/webpack-plugin');
@@ -44,7 +47,7 @@ export interface CodePressWebpackPluginOptions {
 
   /**
    * Whether this is a development build
-   * Plugin will skip if true (dev already has named IDs)
+   * Plugin will skip if true (dev already has named IDs, and env vars are handled by SWC plugin)
    */
   dev?: boolean;
 }
@@ -68,11 +71,13 @@ export default class CodePressWebpackPlugin {
    * Apply the plugin to the webpack compiler
    */
   public apply(compiler: Compiler): void {
-    // Skip if this is a server build or dev build
+    // Skip server builds entirely
     if (this.options.isServer) {
       return;
     }
 
+    // Skip dev mode - module mapping not needed (dev has named IDs)
+    // and env vars are handled by the SWC plugin
     if (this.options.dev) {
       return;
     }
@@ -80,7 +85,7 @@ export default class CodePressWebpackPlugin {
     compiler.hooks.thisCompilation.tap(
       this.name,
       (compilation: Compilation) => {
-        // Add runtime hook before assets are processed so the bootstrap exposes cache helpers
+        // Production mode: module mapping + runtime hooks
         this.injectRuntimeHook(compilation, compiler);
 
         compilation.hooks.processAssets.tap(
@@ -110,10 +115,7 @@ export default class CodePressWebpackPlugin {
       return;
     }
 
-    // Extract env vars from DefinePlugin for HMR support
-    const envMap = this.extractEnvVars(compiler);
-
-    const mapScript = this.generateMapScript(moduleMap, envMap);
+    const mapScript = this.generateMapScript(moduleMap);
     const injected = this.injectIntoMainBundle(compilation, mapScript);
 
     if (!injected) {
@@ -350,41 +352,6 @@ export default class CodePressWebpackPlugin {
   }
 
   /**
-   * Extract environment variable definitions from DefinePlugin
-   * These are the values that get replaced at build time (e.g., process.env.NEXT_PUBLIC_*)
-   */
-  private extractEnvVars(compiler: Compiler): Record<string, string> {
-    const envMap: Record<string, string> = {};
-
-    // Find DefinePlugin in the compiler's plugins
-    for (const plugin of compiler.options.plugins || []) {
-      if (plugin?.constructor?.name === "DefinePlugin") {
-        const definitions =
-          (plugin as { definitions?: Record<string, unknown> }).definitions ||
-          {};
-        for (const [key, value] of Object.entries(definitions)) {
-          // Match process.env.* patterns
-          if (key.startsWith("process.env.")) {
-            const envKey = key.replace("process.env.", "");
-            // DefinePlugin values are JSON-stringified (e.g., '"value"')
-            // Parse to get the actual value
-            if (typeof value === "string") {
-              try {
-                envMap[envKey] = JSON.parse(value);
-              } catch {
-                envMap[envKey] = value;
-              }
-            } else if (value !== undefined && value !== null) {
-              envMap[envKey] = String(value);
-            }
-          }
-        }
-      }
-    }
-    return envMap;
-  }
-
-  /**
    * Normalize a module path to a human-readable format
    *
    * @param resourcePath - The absolute path to the module
@@ -426,15 +393,11 @@ export default class CodePressWebpackPlugin {
   }
 
   /**
-   * Generate the inline script that injects the module map and env vars
+   * Generate the inline script that injects the module map
    */
-  private generateMapScript(
-    moduleMap: ModuleMap,
-    envMap: Record<string, string>
-  ): string {
+  private generateMapScript(moduleMap: ModuleMap): string {
     const mapJson = JSON.stringify(moduleMap);
-    const envJson = JSON.stringify(envMap);
-    return `(function(){if(typeof window!=="undefined"){window.__CP_MODULE_MAP__=${mapJson};window.__CP_ENV_MAP__=${envJson};console.log("[CodePress] Loaded module map with",Object.keys(window.__CP_MODULE_MAP__).length,"entries and",Object.keys(window.__CP_ENV_MAP__).length,"env vars");}})();`;
+    return `(function(){if(typeof window!=="undefined"){window.__CP_MODULE_MAP__=${mapJson};console.log("[CodePress] Loaded module map with",Object.keys(window.__CP_MODULE_MAP__).length,"entries");}})();`;
   }
 
   /**
@@ -509,19 +472,67 @@ export default class CodePressWebpackPlugin {
     compilation: Compilation,
     mapScript: string
   ): boolean {
+    const assets = compilation.getAssets();
+    const assetNames = assets.map((a: Asset) => a.name);
+
+    // Log available JS assets for debugging
+    const jsAssets = assetNames.filter((n: string) => n.endsWith(".js"));
+    console.log(
+      `[CodePress] Looking for main bundle among ${jsAssets.length} JS assets`
+    );
+    console.log(
+      `[CodePress] JS assets: ${jsAssets.slice(0, 15).join(", ")}${jsAssets.length > 15 ? "..." : ""}`
+    );
+
     // Find the main client bundle
-    // Matches patterns like: main-abc123.js, static/chunks/main-abc123.js
-    const mainAsset = compilation
-      .getAssets()
-      .find((asset: Asset) =>
-        asset.name.match(/^(static\/chunks\/main-|main-)[a-f0-9]+\.js$/)
-      );
+    // Matches patterns like: main-abc123.js, static/chunks/main-abc123.js, main-app-abc123.js
+    const mainPattern = /^(static\/chunks\/)?(main-|main-app-)[a-f0-9]+\.js$/;
+    const mainAsset = assets.find((asset: Asset) =>
+      asset.name.match(mainPattern)
+    );
 
     if (!mainAsset) {
+      // Try alternative patterns for different Next.js versions
+      const altPatterns = [
+        /^(static\/chunks\/)?pages\/_app-[a-f0-9]+\.js$/,
+        /^(static\/chunks\/)?app-[a-f0-9]+\.js$/,
+        /^_app-[a-f0-9]+\.js$/,
+      ];
+
+      for (const pattern of altPatterns) {
+        const altAsset = assets.find((asset: Asset) =>
+          asset.name.match(pattern)
+        );
+        if (altAsset) {
+          console.log(
+            `[CodePress] Found alternative main bundle: ${altAsset.name}`
+          );
+          return this.doInject(compilation, altAsset, mapScript);
+        }
+      }
+
+      console.warn(
+        `[CodePress] Could not find main bundle. Tried patterns: main-*, main-app-*, pages/_app-*, app-*`
+      );
+      console.warn(
+        `[CodePress] Available JS assets sample: ${jsAssets.slice(0, 10).join(", ")}`
+      );
       return false;
     }
 
-    const { name, source } = mainAsset;
+    console.log(`[CodePress] Found main bundle: ${mainAsset.name}`);
+    return this.doInject(compilation, mainAsset, mapScript);
+  }
+
+  /**
+   * Actually perform the injection into an asset
+   */
+  private doInject(
+    compilation: Compilation,
+    asset: Asset,
+    mapScript: string
+  ): boolean {
+    const { name, source } = asset;
 
     // Use webpack's ConcatSource to properly concatenate sources
     // This ensures the source map and other webpack internals work correctly
@@ -531,6 +542,7 @@ export default class CodePressWebpackPlugin {
     );
 
     compilation.updateAsset(name, newSource);
+    console.log(`[CodePress] Successfully injected module map into ${name}`);
 
     return true;
   }
