@@ -34,8 +34,18 @@ interface ModuleMapEntry {
   exports?: { [originalName: string]: string }; // Maps original export name -> minified name
 }
 
+interface NpmExportEntry {
+  moduleId: string;
+  exportName: string; // The minified export name (e.g., "A")
+}
+
+interface NpmPackageEntry {
+  type: "npm";
+  exports: { [originalName: string]: NpmExportEntry }; // Maps export name -> module info
+}
+
 interface ModuleMap {
-  [id: string]: ModuleMapEntry | string; // Support both old and new format
+  [id: string]: ModuleMapEntry | NpmPackageEntry | string; // Support app code, npm packages, and legacy format
 }
 
 export interface CodePressWebpackPluginOptions {
@@ -68,6 +78,58 @@ export default class CodePressWebpackPlugin {
   }
 
   /**
+   * Get alias mappings from webpack's resolve configuration.
+   * Returns a map of alias prefix -> resolved directory path.
+   *
+   * For example, with tsconfig paths: { "@/*": ["./src/*"] }
+   * This returns: { "@": "src" }
+   */
+  private getAliasMap(compiler: Compiler): Map<string, string> {
+    const aliases = new Map<string, string>();
+    const resolveAlias = compiler.options.resolve?.alias;
+
+    if (resolveAlias && typeof resolveAlias === "object") {
+      for (const [alias, target] of Object.entries(resolveAlias)) {
+        if (typeof target === "string") {
+          // Convert absolute path to relative (e.g., /project/src -> src)
+          let relativePath = target.replace(compiler.context + "/", "");
+          // Remove trailing slash if present
+          relativePath = relativePath.replace(/\/$/, "");
+          aliases.set(alias, relativePath);
+        } else if (Array.isArray(target) && typeof target[0] === "string") {
+          // Handle array format: ["path1", "path2"]
+          let relativePath = target[0].replace(compiler.context + "/", "");
+          relativePath = relativePath.replace(/\/$/, "");
+          aliases.set(alias, relativePath);
+        }
+      }
+    }
+
+    return aliases;
+  }
+
+  /**
+   * Convert a real path to its aliased version if applicable.
+   * For example: "src/components/Foo.tsx" with alias "@" -> "src"
+   * Returns: "@/components/Foo" (without extension)
+   */
+  private pathToAlias(
+    realPath: string,
+    aliasMap: Map<string, string>
+  ): string | null {
+    for (const [alias, targetDir] of aliasMap) {
+      if (realPath.startsWith(targetDir + "/")) {
+        // Replace the target dir with the alias
+        const withoutDir = realPath.slice(targetDir.length + 1);
+        // Remove extension for the alias version
+        const withoutExt = withoutDir.replace(/\.(tsx?|jsx?|mjs|cjs)$/, "");
+        return `${alias}/${withoutExt}`;
+      }
+    }
+    return null;
+  }
+
+  /**
    * Apply the plugin to the webpack compiler
    */
   public apply(compiler: Compiler): void {
@@ -81,6 +143,31 @@ export default class CodePressWebpackPlugin {
     if (this.options.dev) {
       return;
     }
+
+    // Disable optimizations that break CodePress preview in production builds.
+    // This is REQUIRED for CodePress preview to work because:
+    //
+    // 1. Module Concatenation (scope hoisting): Merges multiple source files into one,
+    //    making internal components inaccessible via exports.
+    //
+    // 2. Used Exports tracking (tree-shaking): Removes "unused" exports from modules.
+    //    If app uses `import Foo from './Foo'` but preview uses `import { Foo }`,
+    //    the named export won't exist. Disabling this preserves ALL exports.
+    //
+    // Bundle size impact: ~10-20% larger, but acceptable for preview functionality.
+    // The extra code is still minified and gzips well.
+    //
+    // We use the 'environment' hook which runs early, before plugins are applied,
+    // to ensure our settings take effect before Next.js can override them.
+    compiler.hooks.environment.tap(this.name, () => {
+      if (compiler.options.optimization) {
+        compiler.options.optimization.concatenateModules = false;
+        compiler.options.optimization.usedExports = false;
+        console.log(
+          "[CodePress] Disabled module concatenation and export tree-shaking for production preview support"
+        );
+      }
+    });
 
     compiler.hooks.thisCompilation.tap(
       this.name,
@@ -133,6 +220,24 @@ export default class CodePressWebpackPlugin {
     compiler: Compiler
   ): ModuleMap {
     const moduleMap: ModuleMap = {};
+
+    // Get alias map for generating alias-based keys
+    const aliasMap = this.getAliasMap(compiler);
+    if (aliasMap.size > 0) {
+      console.log(
+        "[CodePress] Found aliases:",
+        Array.from(aliasMap.entries())
+          .map(([k, v]) => `${k} → ${v}`)
+          .join(", ")
+      );
+    }
+
+    // Collect npm package exports for aggregation
+    // Map of package name -> { exportName -> { moduleId, minifiedName } }
+    const npmPackageExports = new Map<
+      string,
+      Map<string, { moduleId: string; exportName: string }>
+    >();
 
     // Build the module map from the compilation modules
 
@@ -249,6 +354,19 @@ export default class CodePressWebpackPlugin {
                       ? finalExports
                       : undefined,
                 };
+
+                // Also add alias-based key for direct O(1) lookup
+                const aliasPath = this.pathToAlias(runtime, aliasMap);
+                if (aliasPath) {
+                  moduleMap[aliasPath] = {
+                    path: runtime,
+                    moduleId: id,
+                    exports:
+                      Object.keys(finalExports).length > 0
+                        ? finalExports
+                        : undefined,
+                  };
+                }
               }
             } else {
               // Fallback: use the identifier
@@ -283,6 +401,67 @@ export default class CodePressWebpackPlugin {
           .replace(compiler.context + "/", "")
           .replace(/\\/g, "/");
 
+        // Check if this is an npm package and collect its exports
+        const npmPackageName = this.extractNpmPackageName(resource);
+        if (npmPackageName) {
+          // Get or create the package's export map
+          if (!npmPackageExports.has(npmPackageName)) {
+            npmPackageExports.set(npmPackageName, new Map());
+          }
+          const packageExports = npmPackageExports.get(npmPackageName)!;
+
+          if (hasExportMappings) {
+            // Add each export to the package's map using webpack's export info
+            for (const [originalName, minifiedName] of Object.entries(
+              exportMappings
+            )) {
+              // Store the export with its module ID and minified name
+              packageExports.set(originalName, {
+                moduleId: id,
+                exportName: minifiedName,
+              });
+            }
+
+            // Special handling for default exports in icon libraries like lucide-react:
+            // If this module has a "default" export, also add an entry using the
+            // derived name from the file path. This allows `import { ChevronLeft }`
+            // to work even though the module exports it as `default`.
+            // e.g., "lucide-react/dist/esm/icons/chevron-left.js" with default export
+            //       -> also add "ChevronLeft" pointing to the default export
+            if (exportMappings.default) {
+              const derivedName = this.deriveExportNameFromPath(resource);
+              if (derivedName && derivedName !== "default" && !packageExports.has(derivedName)) {
+                packageExports.set(derivedName, {
+                  moduleId: id,
+                  exportName: exportMappings.default, // Use the minified default export name
+                });
+              }
+            }
+
+            // Debug: log first few recharts exports
+            if (
+              npmPackageName === "recharts" &&
+              packageExports.size <= 3
+            ) {
+              console.log(
+                `[CodePress DEBUG] Collected recharts export: ${Object.keys(exportMappings).join(", ")} from module ${id}`
+              );
+            }
+          } else {
+            // No export mappings - derive export name from file path
+            // e.g., "recharts/es6/polar/PolarGrid.js" -> "PolarGrid"
+            const derivedName = this.deriveExportNameFromPath(resource);
+            if (derivedName) {
+              // Assume "default" export since we don't have explicit mappings
+              // Runtime will need to handle this appropriately
+              packageExports.set(derivedName, {
+                moduleId: id,
+                exportName: "default",
+              });
+            }
+          }
+        }
+
         if (hasExportMappings) {
           // Add numeric ID entry (for backwards compat)
           moduleMap[id] = {
@@ -301,8 +480,52 @@ export default class CodePressWebpackPlugin {
           moduleId: id,
           ...(hasExportMappings ? { exports: exportMappings } : {}),
         };
+
+        // Also add alias-based key for direct O(1) lookup
+        // e.g., "src/components/Foo.tsx" -> "@/components/Foo"
+        const aliasPath = this.pathToAlias(runtimePath, aliasMap);
+        if (aliasPath) {
+          moduleMap[aliasPath] = {
+            path: runtimePath,
+            moduleId: id,
+            ...(hasExportMappings ? { exports: exportMappings } : {}),
+          };
+        }
       }
     });
+
+    // Aggregate npm package exports into MODULE_MAP entries
+    // This creates entries like:
+    // "lucide-react": { type: "npm", exports: { "ChevronDown": { moduleId: "123", exportName: "A" }, ... } }
+    if (npmPackageExports.size > 0) {
+      console.log(
+        `[CodePress] Found ${npmPackageExports.size} npm packages with tracked exports`
+      );
+
+      for (const [packageName, exportsMap] of npmPackageExports) {
+        // Convert the Map to a plain object for JSON serialization
+        const exportsObj: { [originalName: string]: NpmExportEntry } = {};
+        for (const [exportName, exportInfo] of exportsMap) {
+          exportsObj[exportName] = exportInfo;
+        }
+
+        // Only add if we have exports (don't add empty packages)
+        if (Object.keys(exportsObj).length > 0) {
+          moduleMap[packageName] = {
+            type: "npm",
+            exports: exportsObj,
+          };
+
+          // Debug log for significant packages
+          const exportCount = Object.keys(exportsObj).length;
+          if (exportCount >= 5) {
+            console.log(
+              `[CodePress]   ${packageName}: ${exportCount} exports tracked`
+            );
+          }
+        }
+      }
+    }
 
     return moduleMap;
   }
@@ -467,6 +690,63 @@ export default class CodePressWebpackPlugin {
       console.warn("[CodePress] Export mapping failed:", error);
       return null;
     }
+  }
+
+  /**
+   * Extract the npm package name from a resource path.
+   * Returns null if the path is not from node_modules.
+   *
+   * @example
+   * "/project/node_modules/lucide-react/dist/esm/icons/ChevronDown.js" -> "lucide-react"
+   * "/project/node_modules/@radix-ui/react-dialog/dist/index.js" -> "@radix-ui/react-dialog"
+   */
+  private extractNpmPackageName(resourcePath: string): string | null {
+    if (!resourcePath.includes("node_modules")) {
+      return null;
+    }
+
+    // Match package name (handles scoped packages like @foo/bar)
+    const match = resourcePath.match(/node_modules\/(@[^/]+\/[^/]+|[^/]+)/);
+    return match ? match[1] : null;
+  }
+
+  /**
+   * Derive an export name from a file path.
+   * Used when we don't have explicit export mappings.
+   *
+   * @example
+   * "/project/node_modules/recharts/es6/polar/PolarGrid.js" -> "PolarGrid"
+   * "/project/node_modules/lucide-react/dist/esm/icons/chevron-down.js" -> "ChevronDown"
+   */
+  private deriveExportNameFromPath(resourcePath: string): string | null {
+    // Extract filename from path, remove extension
+    const parts = resourcePath.split("/");
+    let filename = parts[parts.length - 1];
+    if (!filename) return null;
+
+    filename = filename.replace(/\.(js|mjs|cjs|jsx|ts|tsx)$/, "");
+
+    // Skip index files - they're typically re-exports
+    if (filename === "index" || filename === "main") return null;
+
+    // If already PascalCase, use as-is
+    if (/^[A-Z]/.test(filename)) {
+      return filename;
+    }
+
+    // Convert kebab-case or snake_case to PascalCase
+    if (/[-_]/.test(filename)) {
+      return filename
+        .split(/[-_]/)
+        .map((part) => {
+          if (!part) return "";
+          return part.charAt(0).toUpperCase() + part.slice(1).toLowerCase();
+        })
+        .join("");
+    }
+
+    // camelCase - just capitalize first letter
+    return filename.charAt(0).toUpperCase() + filename.slice(1);
   }
 
   /**
