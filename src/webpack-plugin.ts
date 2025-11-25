@@ -205,40 +205,49 @@ export default class CodePressWebpackPlugin {
                 exports: exportMappings || undefined,
               };
 
+              // For concatenated modules, we need to trace exports from the OUTER module
+              // back to each source module. The outer module has the final minified names.
+              // Build a map: sourceModule -> { originalName -> finalMinifiedName }
+              const sourceModuleExports = this.traceExportsToSourceModules(
+                module,
+                concatenatedModule.modules,
+                compilation
+              );
+
               // Add path-based entries for each source file (for runtime lookup)
               // Runtime expects: 'src/features/home/sections/hero/HeroSection.tsx' (with extension, no ./)
               for (const { runtime, module: sourceModule } of allSourcePaths) {
-                // Prefer the outer concatenated module's export mappings, since those reflect actual
-                // properties on the exported object returned by moduleId. Add a default alias to the
-                // basename if present (common for default exports re-exported as named symbols).
+                // Get the traced export mappings for this source module
+                const tracedExports = sourceModuleExports.get(sourceModule);
+
+                // Add a default alias to the basename if present
+                // (common for default exports re-exported as named symbols)
                 const baseName =
                   runtime
                     .split("/")
                     .pop()
                     ?.replace(/\.[^/.]+$/, "") || null;
-                const outerExportMappings = exportMappings || {};
-                const mergedExports: { [originalName: string]: string } = {
-                  ...outerExportMappings,
+
+                const finalExports: { [originalName: string]: string } = {
+                  ...(tracedExports || {}),
                 };
+
                 if (
                   baseName &&
-                  !mergedExports.default &&
-                  Object.prototype.hasOwnProperty.call(mergedExports, baseName)
+                  !finalExports.default &&
+                  Object.prototype.hasOwnProperty.call(finalExports, baseName)
                 ) {
-                  mergedExports.default = mergedExports[baseName];
+                  finalExports.default = finalExports[baseName];
                 }
-                const finalExports =
-                  Object.keys(mergedExports).length > 0
-                    ? mergedExports
-                    : this.captureExportMappings(
-                        sourceModule as WebpackModule,
-                        compilation
-                      ) || undefined;
+
                 // Key by runtime path WITH extension for fast O(1) lookup
                 moduleMap[runtime] = {
                   path: runtime,
                   moduleId: id, // Add module ID so runtime can require it!
-                  exports: finalExports || undefined,
+                  exports:
+                    Object.keys(finalExports).length > 0
+                      ? finalExports
+                      : undefined,
                 };
               }
             } else {
@@ -296,6 +305,115 @@ export default class CodePressWebpackPlugin {
     });
 
     return moduleMap;
+  }
+
+  /**
+   * Trace exports from a concatenated module back to their source modules.
+   * Returns a Map from source module to { originalName -> finalMinifiedName }
+   *
+   * This method uses ONLY webpack's getTarget() API which is 100% accurate.
+   * It traces from the outer module's exports backwards to find which source
+   * module each export originates from.
+   *
+   * IMPORTANT: If a source module's export is NOT re-exported by the barrel file,
+   * it will NOT appear in the result. This is correct behavior because such exports
+   * cannot be patched through __webpack_require__(moduleId).exports anyway.
+   */
+  private traceExportsToSourceModules(
+    concatenatedModule: WebpackModule,
+    sourceModules: WebpackModule[],
+    compilation: Compilation
+  ): Map<WebpackModule, { [originalName: string]: string }> {
+    const result = new Map<WebpackModule, { [originalName: string]: string }>();
+
+    // Build a quick lookup set for source modules
+    const sourceModuleSet = new Set(sourceModules);
+    for (const sourceModule of sourceModules) {
+      result.set(sourceModule, {});
+    }
+
+    // Debug flag - set CODEPRESS_DEBUG_EXPORTS=1 to see tracing details
+    const DEBUG_TRACING = process.env.CODEPRESS_DEBUG_EXPORTS === "1";
+
+    try {
+      // Get the concatenated module's export info (has final minified names)
+      const outerExportsInfo =
+        compilation.moduleGraph.getExportsInfo(concatenatedModule);
+      if (!outerExportsInfo || !outerExportsInfo.orderedExports) {
+        return result;
+      }
+
+      if (DEBUG_TRACING) {
+        const outerExports: string[] = [];
+        for (const ei of outerExportsInfo.orderedExports) {
+          if (ei.name && ei.name !== "__esModule") {
+            const minified = ei.getUsedName(ei.name, undefined);
+            outerExports.push(`${ei.name}→${minified}`);
+          }
+        }
+        console.log(
+          `[CodePress DEBUG] Concatenated module exports: ${outerExports.join(", ")}`
+        );
+      }
+
+      // Trace from outer exports back to source modules using getTarget()
+      // This is webpack's authoritative API - no heuristics
+      for (const exportInfo of outerExportsInfo.orderedExports) {
+        const outerExportName = exportInfo.name;
+        if (!outerExportName || outerExportName === "__esModule") continue;
+
+        const finalMinifiedName = exportInfo.getUsedName(
+          outerExportName,
+          undefined
+        );
+        if (!finalMinifiedName || typeof finalMinifiedName !== "string")
+          continue;
+
+        // Use webpack's getTarget() to trace this export back to its source module
+        const target = exportInfo.getTarget(compilation.moduleGraph);
+        if (target && target.module && sourceModuleSet.has(target.module)) {
+          // Found the source module for this export
+          const sourceExports = result.get(target.module)!;
+          // The original name in the source module is in target.export[0]
+          const originalNameInSource = target.export && target.export[0];
+          if (
+            originalNameInSource &&
+            typeof originalNameInSource === "string"
+          ) {
+            sourceExports[originalNameInSource] = finalMinifiedName;
+            if (DEBUG_TRACING) {
+              const resource = (target.module as any).resource || "unknown";
+              console.log(
+                `[CodePress DEBUG] Traced: ${outerExportName}→${finalMinifiedName} from ${resource.split("/").pop()}:${originalNameInSource}`
+              );
+            }
+          } else {
+            // If no export array, the name is the same as the outer export name
+            sourceExports[outerExportName] = finalMinifiedName;
+            if (DEBUG_TRACING) {
+              const resource = (target.module as any).resource || "unknown";
+              console.log(
+                `[CodePress DEBUG] Traced: ${outerExportName}→${finalMinifiedName} from ${resource.split("/").pop()} (same name)`
+              );
+            }
+          }
+        } else if (DEBUG_TRACING) {
+          // Export exists in outer module but getTarget() didn't find a source module
+          // This can happen if the export is defined directly in the barrel file
+          const targetModule = target?.module;
+          const inSourceSet = targetModule
+            ? sourceModuleSet.has(targetModule)
+            : false;
+          console.log(
+            `[CodePress DEBUG] No source found for: ${outerExportName}→${finalMinifiedName} (target.module=${!!targetModule}, inSourceSet=${inSourceSet})`
+          );
+        }
+      }
+    } catch (error) {
+      console.warn("[CodePress] Export tracing failed:", error);
+    }
+
+    return result;
   }
 
   /**
