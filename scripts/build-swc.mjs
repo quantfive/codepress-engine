@@ -206,7 +206,7 @@ function parseArgs(argv) {
     next: undefined,
     band: undefined,
     target: undefined,
-    parallel: undefined, // number of concurrent builds, 0 = unlimited
+    parallel: 2, // number of concurrent builds, 0 = unlimited
     listBands: false,
     help: false,
   };
@@ -301,7 +301,7 @@ function usage() {
       `  -n, --next <version>    Build band matching Next.js version (e.g. 15.4.0)\n` +
       `  -b, --band <id>         Build specific band id (one of: ${BANDS.map((b) => b.id).join(", ")})\n` +
       `  -t, --target <t>        Build target(s): wasip1 | wasi | all | comma-list (default: all)\n` +
-      `  -p, --parallel <n>      Build bands in parallel (0 = unlimited, 2 = two at a time, etc.)\n` +
+      `  -p, --parallel <n>      Concurrency limit (default: 2, 0 = unlimited)\n` +
       `      --list-bands        Print available band ids and exit\n` +
       `  -h, --help              Show this help\n\n` +
       `Examples:\n` +
@@ -365,17 +365,15 @@ function selectTargets(targetArg) {
   }
 
   const targets = selectTargets(args.target);
+  const concurrency = args.parallel;
 
-  if (args.parallel !== undefined) {
-    const concurrency = args.parallel;
-    console.log(
-      `[codepress] Building ${bands.length} band(s) in parallel` +
-        (concurrency > 0 ? ` (max ${concurrency} concurrent)` : " (unlimited)")
-    );
-    const tasks = bands.map((band) => () => buildOneBand(band, targets));
-    await runWithConcurrency(tasks, concurrency);
-  } else {
-    for (const band of bands) await buildOneBand(band, targets);
-  }
+  console.log(
+    `[codepress] Building ${bands.length} band(s)` +
+      (concurrency > 0
+        ? ` (max ${concurrency} concurrent)`
+        : " (unlimited parallelism)")
+  );
+  const tasks = bands.map((band) => () => buildOneBand(band, targets));
+  await runWithConcurrency(tasks, concurrency);
   console.log("Finished SWC bands built.");
 })();
