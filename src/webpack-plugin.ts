@@ -163,9 +163,6 @@ export default class CodePressWebpackPlugin {
       if (compiler.options.optimization) {
         compiler.options.optimization.concatenateModules = false;
         compiler.options.optimization.usedExports = false;
-        console.log(
-          "[CodePress] Disabled module concatenation and export tree-shaking for production preview support"
-        );
       }
     });
 
@@ -430,7 +427,11 @@ export default class CodePressWebpackPlugin {
             //       -> also add "ChevronLeft" pointing to the default export
             if (exportMappings.default) {
               const derivedName = this.deriveExportNameFromPath(resource);
-              if (derivedName && derivedName !== "default" && !packageExports.has(derivedName)) {
+              if (
+                derivedName &&
+                derivedName !== "default" &&
+                !packageExports.has(derivedName)
+              ) {
                 packageExports.set(derivedName, {
                   moduleId: id,
                   exportName: exportMappings.default, // Use the minified default export name
@@ -439,10 +440,7 @@ export default class CodePressWebpackPlugin {
             }
 
             // Debug: log first few recharts exports
-            if (
-              npmPackageName === "recharts" &&
-              packageExports.size <= 3
-            ) {
+            if (npmPackageName === "recharts" && packageExports.size <= 3) {
               console.log(
                 `[CodePress DEBUG] Collected recharts export: ${Object.keys(exportMappings).join(", ")} from module ${id}`
               );

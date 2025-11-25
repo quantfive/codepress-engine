@@ -107,12 +107,13 @@ fn make_jsx_str_attr_value(val: String) -> JSXAttrValue {
     }))
 }
 
-// In swc_core 48.x, Str.value is Wtf8Atom which has a Debug impl
+// In swc_core 48.x, Str.value is Wtf8Atom which can contain non-UTF-8 (unpaired surrogates).
+// Use to_string_lossy() for safe conversion - it returns the string as-is if valid UTF-8,
+// or replaces surrogates with U+FFFD. This is correct since JS paths/identifiers should be UTF-8.
 #[cfg(feature = "compat_v48")]
 #[inline]
 fn atom_to_string(atom: &swc_atoms::Wtf8Atom) -> String {
-    // Wtf8Atom implements Into<String>
-    format!("{:?}", atom).trim_matches('"').to_string()
+    atom.to_string_lossy().into_owned()
 }
 
 #[cfg(not(feature = "compat_v48"))]
@@ -2301,7 +2302,14 @@ impl PathAlias {
                 let mid = &spec[self.prefix.len()..spec.len() - self.suffix.len()];
                 let mut out = vec![];
                 for t in &self.targets {
-                    let candidate = t.join(mid);
+                    let t_str = t.to_string_lossy();
+                    let candidate = if t_str.contains('*') {
+                        // Replace the wildcard in the target with the matched segment
+                        PathBuf::from(t_str.replace('*', mid))
+                    } else {
+                        // Fallback for targets without wildcard (e.g., "@/*": ["src/"])
+                        t.join(mid)
+                    };
                     out.push(candidate);
                 }
                 Some(out)
