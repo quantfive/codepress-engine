@@ -138,7 +138,9 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Build WASM band ${{ matrix.band }}
-        run: node scripts/build-swc.mjs --band ${{ matrix.band }}
+        run: node scripts/build-swc.mjs
+        env:
+          BAND: ${{ matrix.band }}
 
       - name: Upload WASM artifact
         uses: actions/upload-artifact@v4

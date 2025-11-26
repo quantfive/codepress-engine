@@ -217,16 +217,25 @@ export default class CodePressWebpackPlugin {
    * Apply the plugin to the webpack compiler
    */
   public apply(compiler: Compiler): void {
+    console.log("[CodePress] Plugin apply() called with options:", {
+      isServer: this.options.isServer,
+      dev: this.options.dev,
+    });
+
     // Skip server builds entirely
     if (this.options.isServer) {
+      console.log("[CodePress] Skipping: isServer=true");
       return;
     }
 
     // Skip dev mode - module mapping not needed (dev has named IDs)
     // and env vars are handled by the SWC plugin
     if (this.options.dev) {
+      console.log("[CodePress] Skipping: dev=true");
       return;
     }
+
+    console.log("[CodePress] Running in production mode, will build MODULE_MAP");
 
     // Disable optimizations that break CodePress preview in production builds.
     // This is REQUIRED for CodePress preview to work because:
