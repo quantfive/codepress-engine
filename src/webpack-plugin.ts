@@ -106,86 +106,65 @@ export default class CodePressWebpackPlugin {
       }
     }
 
-    // If no aliases found, try reading from tsconfig.json
-    // Next.js doesn't always populate resolve.alias from tsconfig paths
-    if (aliases.size === 0) {
-      const fs = require("fs");
-      const path = require("path");
-      const tsconfigPath = path.join(compiler.context, "tsconfig.json");
+    // Always try to read @ alias from tsconfig.json if not already present
+    // resolve.alias usually has Next.js internals but not the @ path alias
+    const fs = require("fs");
+    const path = require("path");
 
-      console.log("[CodePress] Checking for tsconfig at:", tsconfigPath);
-      console.log("[CodePress] compiler.context:", compiler.context);
+    if (!aliases.has("@")) {
+      const tsconfigPath = path.join(compiler.context, "tsconfig.json");
+      console.log("[CodePress] Looking for @ alias in tsconfig:", tsconfigPath);
 
       try {
         if (fs.existsSync(tsconfigPath)) {
-          console.log("[CodePress] tsconfig.json exists, reading...");
           const tsconfigContent = fs.readFileSync(tsconfigPath, "utf8");
-          // Remove comments (tsconfig allows them)
-          const jsonContent = tsconfigContent.replace(
-            /\/\*[\s\S]*?\*\/|\/\/.*/g,
-            ""
-          );
-          const tsconfig = JSON.parse(jsonContent);
-          const paths = tsconfig.compilerOptions?.paths;
 
-          console.log(
-            "[CodePress] tsconfig.compilerOptions.paths:",
-            paths ? JSON.stringify(paths) : "undefined"
+          // Extract paths directly using regex (avoids JSON parsing issues with comments/globs)
+          // Match: "paths": { "@/*": ["./src/*"] } or similar
+          const pathsMatch = tsconfigContent.match(
+            /"paths"\s*:\s*\{([^}]+)\}/
           );
 
-          if (paths && typeof paths === "object") {
-            for (const [aliasPattern, targets] of Object.entries(paths)) {
-              // Convert "@/*" -> "@" and ["./src/*"] -> "src"
+          if (pathsMatch) {
+            const pathsContent = pathsMatch[1];
+            console.log("[CodePress] Found paths block:", pathsContent.trim());
+
+            // Extract individual path mappings: "@/*": ["./src/*"]
+            const pathPattern = /"([^"]+)"\s*:\s*\[\s*"([^"]+)"/g;
+            let match;
+            while ((match = pathPattern.exec(pathsContent)) !== null) {
+              const aliasPattern = match[1]; // "@/*"
+              const targetPattern = match[2]; // "./src/*"
+
+              // Convert "@/*" -> "@" and "./src/*" -> "src"
               const alias = aliasPattern.replace(/\/\*$/, "");
-              const targetArray = targets as string[];
-              if (targetArray && targetArray[0]) {
-                let targetPath = targetArray[0]
-                  .replace(/^\.\//, "") // Remove leading ./
-                  .replace(/\/\*$/, ""); // Remove trailing /*
-                aliases.set(alias, targetPath);
-                console.log(
-                  "[CodePress] Added alias from tsconfig:",
-                  alias,
-                  "->",
-                  targetPath
-                );
-              }
+              const targetPath = targetPattern
+                .replace(/^\.\//, "")
+                .replace(/\/\*$/, "");
+
+              aliases.set(alias, targetPath);
+              console.log(
+                "[CodePress] Added alias from tsconfig:",
+                alias,
+                "->",
+                targetPath
+              );
             }
           } else {
-            console.log("[CodePress] No paths found in tsconfig.compilerOptions");
-          }
-        } else {
-          console.log("[CodePress] tsconfig.json does NOT exist at:", tsconfigPath);
-          // List files in compiler.context to debug
-          try {
-            const files = fs.readdirSync(compiler.context);
-            console.log(
-              "[CodePress] Files in compiler.context:",
-              files.filter((f: string) => f.includes("tsconfig") || f.includes("json")).join(", ")
-            );
-          } catch (_listErr) {
-            console.log("[CodePress] Could not list files in compiler.context");
+            console.log("[CodePress] No paths block found in tsconfig");
           }
         }
       } catch (e) {
         console.warn("[CodePress] Error reading tsconfig.json:", e);
       }
-    } else {
-      console.log(
-        "[CodePress] Already have aliases from resolve.alias:",
-        Array.from(aliases.entries())
-      );
-    }
 
-    // Fallback: Next.js convention is @/* -> ./src/*
-    // Add this if no @ alias was found (common setup)
-    if (!aliases.has("@")) {
-      const fs = require("fs");
-      const path = require("path");
-      const srcDir = path.join(compiler.context, "src");
-      if (fs.existsSync(srcDir)) {
-        aliases.set("@", "src");
-        console.log("[CodePress] Using default Next.js alias: @ → src");
+      // Fallback: Next.js convention is @/* -> ./src/*
+      if (!aliases.has("@")) {
+        const srcDir = path.join(compiler.context, "src");
+        if (fs.existsSync(srcDir)) {
+          aliases.set("@", "src");
+          console.log("[CodePress] Using default Next.js alias: @ → src");
+        }
       }
     }
 
