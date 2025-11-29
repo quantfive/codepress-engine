@@ -63,13 +63,35 @@ const BANDS = [
 //   BAND=v42 node scripts/build-swc.mjs
 //   BANDS=v26,v42 node scripts/build-swc.mjs
 //   node scripts/build-swc.mjs v42 v26
-const args = process.argv.slice(2).filter(Boolean);
+const cliArgs = process.argv.slice(2).filter(Boolean);
+// Filter out CLI flags and their values so they don't get misinterpreted as band IDs
+// Flags that take values: -n, --next, -b, --band, -t, --target, -p, --parallel
+const flagsWithValues = new Set([
+  "-n",
+  "--next",
+  "-b",
+  "--band",
+  "-t",
+  "--target",
+  "-p",
+  "--parallel",
+]);
+const bandArgsFromCli = [];
+for (let i = 0; i < cliArgs.length; i++) {
+  const arg = cliArgs[i];
+  if (arg.startsWith("-")) {
+    // Skip flags; if it takes a value, skip the next arg too
+    if (flagsWithValues.has(arg)) i++;
+    continue;
+  }
+  bandArgsFromCli.push(arg);
+}
 const bandEnvRaw = process.env.BAND || process.env.BANDS || "";
 const bandIdsFromEnv = bandEnvRaw
   .split(",")
   .map((s) => s.trim())
   .filter(Boolean);
-const requestedIds = [...bandIdsFromEnv, ...args];
+const requestedIds = [...bandIdsFromEnv, ...bandArgsFromCli];
 const validIds = new Set(BANDS.map((b) => b.id));
 let BANDS_TO_BUILD = BANDS;
 if (requestedIds.length) {
@@ -226,9 +248,23 @@ function parseArgs(argv) {
         args.target = argv[++i];
         break;
       case "--parallel":
-      case "-p":
-        args.parallel = Number(argv[++i]) || 0;
+      case "-p": {
+        const raw = argv[++i];
+        const n = Number(raw);
+        if (
+          raw == null ||
+          !Number.isFinite(n) ||
+          !Number.isInteger(n) ||
+          n < 0
+        ) {
+          console.error(
+            `[codepress] --parallel expects a non-negative integer (0 = unlimited); received: "${raw ?? ""}"`
+          );
+          process.exit(1);
+        }
+        args.parallel = n;
         break;
+      }
       case "--list-bands":
         args.listBands = true;
         break;
@@ -252,14 +288,19 @@ async function runWithConcurrency(tasks, concurrency) {
   const results = [];
   const executing = new Set();
   for (const task of tasks) {
-    const p = task().then((r) => {
-      executing.delete(p);
-      return r;
-    });
-    executing.add(p);
+    const p = Promise.resolve()
+      .then(task)
+      .finally(() => {
+        executing.delete(p);
+      });
     results.push(p);
+    executing.add(p);
     if (executing.size >= concurrency) {
-      await Promise.race(executing);
+      try {
+        await Promise.race(executing);
+      } catch {
+        // Swallow here; final Promise.all(results) will reject with the first error.
+      }
     }
   }
   return Promise.all(results);
