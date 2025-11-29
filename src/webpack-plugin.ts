@@ -24,6 +24,7 @@ import type { Compilation, Compiler, Module as WebpackModule } from "webpack";
 import { sources } from "webpack";
 import fs from "fs";
 import path from "path";
+import { loadConfig } from "tsconfig-paths";
 
 interface Asset {
   name: string;
@@ -108,51 +109,52 @@ export default class CodePressWebpackPlugin {
       }
     }
 
-    // Always try to read @ alias from tsconfig.json if not already present
-    // resolve.alias usually has Next.js internals but not the @ path alias
-    if (!aliases.has("@")) {
-      const tsconfigPath = path.join(compiler.context, "tsconfig.json");
-
+    // Load path aliases from tsconfig.json using tsconfig-paths library
+    // This properly handles:
+    // - JSON with comments (TypeScript's JSON5-like syntax)
+    // - The "extends" field to resolve inherited configurations
+    // - Complex path patterns
+    const tsconfigPath = path.join(compiler.context, "tsconfig.json");
+    if (fs.existsSync(tsconfigPath)) {
       try {
-        if (fs.existsSync(tsconfigPath)) {
-          const tsconfigContent = fs.readFileSync(tsconfigPath, "utf8");
+        const config = loadConfig(compiler.context);
 
-          // Extract paths directly using regex (avoids JSON parsing issues with comments/globs)
-          // Match: "paths": { "@/*": ["./src/*"] } or similar
-          const pathsMatch = tsconfigContent.match(
-            /"paths"\s*:\s*\{([^}]+)\}/
-          );
+        if (config.resultType === "success" && config.paths) {
+          for (const [pattern, targets] of Object.entries(config.paths)) {
+            // Convert "@/*" -> "@" and "./src/*" -> "src"
+            const alias = pattern.replace(/\/\*$/, "");
 
-          if (pathsMatch) {
-            const pathsContent = pathsMatch[1];
+            // Skip if we already have this alias from webpack config
+            if (aliases.has(alias)) continue;
 
-            // Extract individual path mappings: "@/*": ["./src/*"]
-            const pathPattern = /"([^"]+)"\s*:\s*\[\s*"([^"]+)"/g;
-            let match;
-            while ((match = pathPattern.exec(pathsContent)) !== null) {
-              const aliasPattern = match[1]; // "@/*"
-              const targetPattern = match[2]; // "./src/*"
+            // Get the first target path
+            const targetPattern = targets[0];
+            if (targetPattern) {
+              // Convert absolute or relative path to relative directory
+              let targetPath = targetPattern
+                .replace(/\/\*$/, "") // Remove trailing /*
+                .replace(/^\.\//, ""); // Remove leading ./
 
-              // Convert "@/*" -> "@" and "./src/*" -> "src"
-              const alias = aliasPattern.replace(/\/\*$/, "");
-              const targetPath = targetPattern
-                .replace(/^\.\//, "")
-                .replace(/\/\*$/, "");
+              // If it's an absolute path, make it relative to project root
+              if (path.isAbsolute(targetPath)) {
+                targetPath = path.relative(compiler.context, targetPath);
+              }
 
               aliases.set(alias, targetPath);
             }
           }
         }
       } catch (e) {
-        console.warn("[CodePress] Error reading tsconfig.json:", e);
+        console.warn("[CodePress] Error loading tsconfig.json paths:", e);
       }
+    }
 
-      // Fallback: Next.js convention is @/* -> ./src/*
-      if (!aliases.has("@")) {
-        const srcDir = path.join(compiler.context, "src");
-        if (fs.existsSync(srcDir)) {
-          aliases.set("@", "src");
-        }
+    // Fallback: Next.js convention is @/* -> ./src/*
+    // Only applies if no @ alias was configured
+    if (!aliases.has("@")) {
+      const srcDir = path.join(compiler.context, "src");
+      if (fs.existsSync(srcDir)) {
+        aliases.set("@", "src");
       }
     }
 
