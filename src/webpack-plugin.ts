@@ -78,7 +78,7 @@ export default class CodePressWebpackPlugin {
   }
 
   /**
-   * Get alias mappings from webpack's resolve configuration.
+   * Get alias mappings from webpack's resolve configuration AND tsconfig.json.
    * Returns a map of alias prefix -> resolved directory path.
    *
    * For example, with tsconfig paths: { "@/*": ["./src/*"] }
@@ -86,8 +86,9 @@ export default class CodePressWebpackPlugin {
    */
   private getAliasMap(compiler: Compiler): Map<string, string> {
     const aliases = new Map<string, string>();
-    const resolveAlias = compiler.options.resolve?.alias;
 
+    // First, try webpack's resolve.alias
+    const resolveAlias = compiler.options.resolve?.alias;
     if (resolveAlias && typeof resolveAlias === "object") {
       for (const [alias, target] of Object.entries(resolveAlias)) {
         if (typeof target === "string") {
@@ -101,6 +102,68 @@ export default class CodePressWebpackPlugin {
           let relativePath = target[0].replace(compiler.context + "/", "");
           relativePath = relativePath.replace(/\/$/, "");
           aliases.set(alias, relativePath);
+        }
+      }
+    }
+
+    // Always try to read @ alias from tsconfig.json if not already present
+    // resolve.alias usually has Next.js internals but not the @ path alias
+    const fs = require("fs");
+    const path = require("path");
+
+    if (!aliases.has("@")) {
+      const tsconfigPath = path.join(compiler.context, "tsconfig.json");
+      console.log("[CodePress] Looking for @ alias in tsconfig:", tsconfigPath);
+
+      try {
+        if (fs.existsSync(tsconfigPath)) {
+          const tsconfigContent = fs.readFileSync(tsconfigPath, "utf8");
+
+          // Extract paths directly using regex (avoids JSON parsing issues with comments/globs)
+          // Match: "paths": { "@/*": ["./src/*"] } or similar
+          const pathsMatch = tsconfigContent.match(
+            /"paths"\s*:\s*\{([^}]+)\}/
+          );
+
+          if (pathsMatch) {
+            const pathsContent = pathsMatch[1];
+            console.log("[CodePress] Found paths block:", pathsContent.trim());
+
+            // Extract individual path mappings: "@/*": ["./src/*"]
+            const pathPattern = /"([^"]+)"\s*:\s*\[\s*"([^"]+)"/g;
+            let match;
+            while ((match = pathPattern.exec(pathsContent)) !== null) {
+              const aliasPattern = match[1]; // "@/*"
+              const targetPattern = match[2]; // "./src/*"
+
+              // Convert "@/*" -> "@" and "./src/*" -> "src"
+              const alias = aliasPattern.replace(/\/\*$/, "");
+              const targetPath = targetPattern
+                .replace(/^\.\//, "")
+                .replace(/\/\*$/, "");
+
+              aliases.set(alias, targetPath);
+              console.log(
+                "[CodePress] Added alias from tsconfig:",
+                alias,
+                "->",
+                targetPath
+              );
+            }
+          } else {
+            console.log("[CodePress] No paths block found in tsconfig");
+          }
+        }
+      } catch (e) {
+        console.warn("[CodePress] Error reading tsconfig.json:", e);
+      }
+
+      // Fallback: Next.js convention is @/* -> ./src/*
+      if (!aliases.has("@")) {
+        const srcDir = path.join(compiler.context, "src");
+        if (fs.existsSync(srcDir)) {
+          aliases.set("@", "src");
+          console.log("[CodePress] Using default Next.js alias: @ → src");
         }
       }
     }
@@ -133,16 +196,25 @@ export default class CodePressWebpackPlugin {
    * Apply the plugin to the webpack compiler
    */
   public apply(compiler: Compiler): void {
+    console.log("[CodePress] Plugin apply() called with options:", {
+      isServer: this.options.isServer,
+      dev: this.options.dev,
+    });
+
     // Skip server builds entirely
     if (this.options.isServer) {
+      console.log("[CodePress] Skipping: isServer=true");
       return;
     }
 
     // Skip dev mode - module mapping not needed (dev has named IDs)
     // and env vars are handled by the SWC plugin
     if (this.options.dev) {
+      console.log("[CodePress] Skipping: dev=true");
       return;
     }
+
+    console.log("[CodePress] Running in production mode, will build MODULE_MAP");
 
     // Disable optimizations that break CodePress preview in production builds.
     // This is REQUIRED for CodePress preview to work because:
@@ -363,6 +435,19 @@ export default class CodePressWebpackPlugin {
                         ? finalExports
                         : undefined,
                   };
+                  // For index files, also add a key without /index suffix
+                  // so imports like "@/features/dashboard" resolve to "@/features/dashboard/index"
+                  if (aliasPath.endsWith("/index")) {
+                    const withoutIndex = aliasPath.replace(/\/index$/, "");
+                    moduleMap[withoutIndex] = {
+                      path: runtime,
+                      moduleId: id,
+                      exports:
+                        Object.keys(finalExports).length > 0
+                          ? finalExports
+                          : undefined,
+                    };
+                  }
                 }
               }
             } else {
@@ -488,6 +573,16 @@ export default class CodePressWebpackPlugin {
             moduleId: id,
             ...(hasExportMappings ? { exports: exportMappings } : {}),
           };
+          // For index files, also add a key without /index suffix
+          // so imports like "@/features/dashboard" resolve to "@/features/dashboard/index"
+          if (aliasPath.endsWith("/index")) {
+            const withoutIndex = aliasPath.replace(/\/index$/, "");
+            moduleMap[withoutIndex] = {
+              path: runtimePath,
+              moduleId: id,
+              ...(hasExportMappings ? { exports: exportMappings } : {}),
+            };
+          }
         }
       }
     });

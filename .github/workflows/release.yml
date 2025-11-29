@@ -95,8 +95,62 @@ jobs:
             echo "changed=true" >> $GITHUB_OUTPUT
           fi
 
-  build-and-publish:
+  # Build each WASM band in parallel using matrix strategy
+  build-wasm:
     needs: check-version
+    if: needs.check-version.outputs.version_changed == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        band: [v0_82_87, v26, v42, v48]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.22.0
+
+      - name: Setup Rust (stable + WASI)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip1
+
+      - name: Cache Cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-${{ matrix.band }}-${{ hashFiles('codepress-swc-plugin/src/**') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-${{ matrix.band }}-
+            ${{ runner.os }}-cargo-
+
+      - name: Install deps
+        run: pnpm install --frozen-lockfile
+
+      - name: Build WASM band ${{ matrix.band }}
+        run: node scripts/build-swc.mjs
+        env:
+          BAND: ${{ matrix.band }}
+
+      - name: Upload WASM artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: wasm-${{ matrix.band }}
+          path: swc/*.wasm
+          retention-days: 1
+
+  build-and-publish:
+    needs: [check-version, build-wasm]
     if: needs.check-version.outputs.version_changed == 'true'
     runs-on: ubuntu-latest
     permissions:
@@ -118,15 +172,25 @@ jobs:
         with:
           version: 10.22.0
 
-      - name: Setup Rust (stable + WASI)
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: wasm32-wasip1
-
       - name: Install deps
         run: pnpm install --frozen-lockfile
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Download all WASM artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: wasm-*
+          path: swc-artifacts
+          merge-multiple: false
+
+      - name: Combine WASM artifacts
+        run: |
+          mkdir -p swc
+          for dir in swc-artifacts/wasm-*; do
+            cp "$dir"/*.wasm swc/ 2>/dev/null || true
+          done
+          ls -la swc/
 
       - name: Update package version for release
         env:
@@ -143,9 +207,6 @@ jobs:
 
       - name: Build JS
         run: pnpm run build
-
-      - name: Build Rust WASM plugin
-        run: pnpm run build:rust
 
       - name: Run tests
         run: pnpm test

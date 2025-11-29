@@ -63,13 +63,35 @@ const BANDS = [
 //   BAND=v42 node scripts/build-swc.mjs
 //   BANDS=v26,v42 node scripts/build-swc.mjs
 //   node scripts/build-swc.mjs v42 v26
-const args = process.argv.slice(2).filter(Boolean);
+const cliArgs = process.argv.slice(2).filter(Boolean);
+// Filter out CLI flags and their values so they don't get misinterpreted as band IDs
+// Flags that take values: -n, --next, -b, --band, -t, --target, -p, --parallel
+const flagsWithValues = new Set([
+  "-n",
+  "--next",
+  "-b",
+  "--band",
+  "-t",
+  "--target",
+  "-p",
+  "--parallel",
+]);
+const bandArgsFromCli = [];
+for (let i = 0; i < cliArgs.length; i++) {
+  const arg = cliArgs[i];
+  if (arg.startsWith("-")) {
+    // Skip flags; if it takes a value, skip the next arg too
+    if (flagsWithValues.has(arg)) i++;
+    continue;
+  }
+  bandArgsFromCli.push(arg);
+}
 const bandEnvRaw = process.env.BAND || process.env.BANDS || "";
 const bandIdsFromEnv = bandEnvRaw
   .split(",")
   .map((s) => s.trim())
   .filter(Boolean);
-const requestedIds = [...bandIdsFromEnv, ...args];
+const requestedIds = [...bandIdsFromEnv, ...bandArgsFromCli];
 const validIds = new Set(BANDS.map((b) => b.id));
 let BANDS_TO_BUILD = BANDS;
 if (requestedIds.length) {
@@ -206,6 +228,7 @@ function parseArgs(argv) {
     next: undefined,
     band: undefined,
     target: undefined,
+    parallel: 2, // number of concurrent builds, 0 = unlimited
     listBands: false,
     help: false,
   };
@@ -224,6 +247,24 @@ function parseArgs(argv) {
       case "-t":
         args.target = argv[++i];
         break;
+      case "--parallel":
+      case "-p": {
+        const raw = argv[++i];
+        const n = Number(raw);
+        if (
+          raw == null ||
+          !Number.isFinite(n) ||
+          !Number.isInteger(n) ||
+          n < 0
+        ) {
+          console.error(
+            `[codepress] --parallel expects a non-negative integer (0 = unlimited); received: "${raw ?? ""}"`
+          );
+          process.exit(1);
+        }
+        args.parallel = n;
+        break;
+      }
       case "--list-bands":
         args.listBands = true;
         break;
@@ -237,6 +278,32 @@ function parseArgs(argv) {
     }
   }
   return args;
+}
+
+async function runWithConcurrency(tasks, concurrency) {
+  if (concurrency <= 0) {
+    // Unlimited parallelism
+    return Promise.all(tasks.map((fn) => fn()));
+  }
+  const results = [];
+  const executing = new Set();
+  for (const task of tasks) {
+    const p = Promise.resolve()
+      .then(task)
+      .finally(() => {
+        executing.delete(p);
+      });
+    results.push(p);
+    executing.add(p);
+    if (executing.size >= concurrency) {
+      try {
+        await Promise.race(executing);
+      } catch {
+        // Swallow here; final Promise.all(results) will reject with the first error.
+      }
+    }
+  }
+  return Promise.all(results);
 }
 
 function parseSemver(input) {
@@ -275,11 +342,14 @@ function usage() {
       `  -n, --next <version>    Build band matching Next.js version (e.g. 15.4.0)\n` +
       `  -b, --band <id>         Build specific band id (one of: ${BANDS.map((b) => b.id).join(", ")})\n` +
       `  -t, --target <t>        Build target(s): wasip1 | wasi | all | comma-list (default: all)\n` +
+      `  -p, --parallel <n>      Concurrency limit (default: 2, 0 = unlimited)\n` +
       `      --list-bands        Print available band ids and exit\n` +
       `  -h, --help              Show this help\n\n` +
       `Examples:\n` +
       `  node scripts/build-swc.mjs --next 15.4.0\n` +
       `  node scripts/build-swc.mjs --band v26 --target wasip1\n` +
+      `  node scripts/build-swc.mjs --parallel 2    # Build 2 bands at a time\n` +
+      `  node scripts/build-swc.mjs --parallel 0    # Build all bands in parallel\n` +
       `  npm run build:rust -- --next 15.4.0\n`
   );
 }
@@ -336,7 +406,15 @@ function selectTargets(targetArg) {
   }
 
   const targets = selectTargets(args.target);
+  const concurrency = args.parallel;
 
-  for (const band of bands) await buildOneBand(band, targets);
+  console.log(
+    `[codepress] Building ${bands.length} band(s)` +
+      (concurrency > 0
+        ? ` (max ${concurrency} concurrent)`
+        : " (unlimited parallelism)")
+  );
+  const tasks = bands.map((band) => () => buildOneBand(band, targets));
+  await runWithConcurrency(tasks, concurrency);
   console.log("Finished SWC bands built.");
 })();
