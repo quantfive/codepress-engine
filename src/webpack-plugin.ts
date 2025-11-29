@@ -181,6 +181,30 @@ export default class CodePressWebpackPlugin {
   }
 
   /**
+   * Add a module map entry and optionally add a variant without /index suffix.
+   * For index files, also adds a key without /index suffix so imports like
+   * "@/features/dashboard" resolve to "@/features/dashboard/index".
+   *
+   * @param moduleMap - The module map to add entries to
+   * @param key - The key to add (e.g., "@/features/dashboard/index")
+   * @param entry - The module map entry to add
+   */
+  private addModuleMapEntry(
+    moduleMap: ModuleMap,
+    key: string,
+    entry: ModuleMapEntry
+  ): void {
+    // Add the main entry
+    moduleMap[key] = entry;
+
+    // For index files, also add a key without /index suffix
+    if (key.endsWith("/index")) {
+      const withoutIndex = key.replace(/\/index$/, "");
+      moduleMap[withoutIndex] = entry;
+    }
+  }
+
+  /**
    * Apply the plugin to the webpack compiler
    */
   public apply(compiler: Compiler): void {
@@ -406,27 +430,14 @@ export default class CodePressWebpackPlugin {
                 // Also add alias-based key for direct O(1) lookup
                 const aliasPath = this.pathToAlias(runtime, aliasMap);
                 if (aliasPath) {
-                  moduleMap[aliasPath] = {
+                  this.addModuleMapEntry(moduleMap, aliasPath, {
                     path: runtime,
                     moduleId: id,
                     exports:
                       Object.keys(finalExports).length > 0
                         ? finalExports
                         : undefined,
-                  };
-                  // For index files, also add a key without /index suffix
-                  // so imports like "@/features/dashboard" resolve to "@/features/dashboard/index"
-                  if (aliasPath.endsWith("/index")) {
-                    const withoutIndex = aliasPath.replace(/\/index$/, "");
-                    moduleMap[withoutIndex] = {
-                      path: runtime,
-                      moduleId: id,
-                      exports:
-                        Object.keys(finalExports).length > 0
-                          ? finalExports
-                          : undefined,
-                    };
-                  }
+                  });
                 }
               }
             } else {
@@ -547,21 +558,11 @@ export default class CodePressWebpackPlugin {
         // e.g., "src/components/Foo.tsx" -> "@/components/Foo"
         const aliasPath = this.pathToAlias(runtimePath, aliasMap);
         if (aliasPath) {
-          moduleMap[aliasPath] = {
+          this.addModuleMapEntry(moduleMap, aliasPath, {
             path: runtimePath,
             moduleId: id,
             ...(hasExportMappings ? { exports: exportMappings } : {}),
-          };
-          // For index files, also add a key without /index suffix
-          // so imports like "@/features/dashboard" resolve to "@/features/dashboard/index"
-          if (aliasPath.endsWith("/index")) {
-            const withoutIndex = aliasPath.replace(/\/index$/, "");
-            moduleMap[withoutIndex] = {
-              path: runtimePath,
-              moduleId: id,
-              ...(hasExportMappings ? { exports: exportMappings } : {}),
-            };
-          }
+          });
         }
       }
     });
