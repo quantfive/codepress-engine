@@ -192,6 +192,34 @@ jobs:
           done
           ls -la swc/
 
+      - name: Verify all WASM files present
+        run: |
+          echo "Verifying WASM artifacts for all bands..."
+          MISSING_BANDS=""
+          BANDS=("v0_82_87" "v26" "v42" "v48")
+
+          for band in "${BANDS[@]}"; do
+            if ! ls swc/*${band}*.wasm 1>/dev/null 2>&1; then
+              echo "ERROR: Missing WASM file for band: $band"
+              MISSING_BANDS="$MISSING_BANDS $band"
+            else
+              echo "✓ Found WASM file(s) for band: $band"
+              ls swc/*${band}*.wasm
+            fi
+          done
+
+          if [ -n "$MISSING_BANDS" ]; then
+            echo ""
+            echo "FATAL: The following bands are missing WASM artifacts:$MISSING_BANDS"
+            echo "This indicates one or more matrix build jobs failed."
+            echo "Cannot proceed with publish - package would be incomplete."
+            exit 1
+          fi
+
+          echo ""
+          echo "✓ All WASM bands verified successfully"
+          echo "Total WASM files: $(ls swc/*.wasm | wc -l)"
+
       - name: Update package version for release
         env:
           RELEASE_VERSION: ${{ needs.check-version.outputs.release_version }}
