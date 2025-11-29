@@ -22,6 +22,8 @@
 
 import type { Compilation, Compiler, Module as WebpackModule } from "webpack";
 import { sources } from "webpack";
+import fs from "fs";
+import path from "path";
 
 interface Asset {
   name: string;
@@ -108,9 +110,6 @@ export default class CodePressWebpackPlugin {
 
     // Always try to read @ alias from tsconfig.json if not already present
     // resolve.alias usually has Next.js internals but not the @ path alias
-    const fs = require("fs");
-    const path = require("path");
-
     if (!aliases.has("@")) {
       const tsconfigPath = path.join(compiler.context, "tsconfig.json");
       console.log("[CodePress] Looking for @ alias in tsconfig:", tsconfigPath);
