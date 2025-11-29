@@ -83,6 +83,27 @@ export default class CodePressWebpackPlugin {
    *
    * For example, with tsconfig paths: { "@/*": ["./src/*"] }
    * This returns: { "@": "src" }
+   *
+   * @remarks
+   * **Tsconfig Parsing Strategy:**
+   * This method uses regex-based parsing instead of JSON.parse() to handle tsconfig.json
+   * because TypeScript allows JSON5 syntax (comments and trailing commas), which would
+   * cause JSON.parse() to fail.
+   *
+   * **Known Limitations:**
+   * 1. **Multi-line paths:** May fail on path definitions spanning multiple lines with
+   *    nested braces or complex formatting.
+   * 2. **Extends:** Does not follow the `extends` field to resolve inherited path mappings
+   *    from base tsconfig files.
+   * 3. **JSON5 edge cases:** May not handle all JSON5 syntax variations that TypeScript
+   *    supports (e.g., comments within path arrays, unusual whitespace patterns).
+   * 4. **Complex path patterns:** Only parses simple patterns like `"@/*": ["./src/*"]`.
+   *    More complex mappings with multiple array elements may not be fully supported.
+   *
+   * **Fallback Behavior:**
+   * If tsconfig parsing fails or no paths are found, the method falls back to the Next.js
+   * convention of mapping `@` to `src` directory if it exists. Webpack's resolve.alias is
+   * always checked first before attempting tsconfig parsing.
    */
   private getAliasMap(compiler: Compiler): Map<string, string> {
     const aliases = new Map<string, string>();
@@ -121,6 +142,8 @@ export default class CodePressWebpackPlugin {
 
           // Extract paths directly using regex (avoids JSON parsing issues with comments/globs)
           // Match: "paths": { "@/*": ["./src/*"] } or similar
+          // NOTE: This regex assumes single-line path objects. Multi-line paths with nested
+          // braces may not be captured correctly. See method JSDoc for full limitations.
           const pathsMatch = tsconfigContent.match(
             /"paths"\s*:\s*\{([^}]+)\}/
           );
