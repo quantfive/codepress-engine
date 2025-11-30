@@ -147,7 +147,25 @@ export default class CodePressWebpackPlugin {
         console.warn("[CodePress] Error reading tsconfig.json:", e);
       }
 
-      // Fallback: Next.js convention is @/* -> ./src/*
+      /**
+       * Fallback: Auto-detect Next.js @ alias based on directory structure.
+       *
+       * This fallback only applies when:
+       * 1. No @ alias was found in tsconfig.json paths
+       * 2. No @ alias was found in webpack resolve.alias
+       * 3. A "src" directory exists in the project root
+       *
+       * Next.js projects commonly use the convention:
+       *   @/* -> ./src/*
+       *
+       * This allows imports like:
+       *   import { Button } from "@/components/Button"
+       *
+       * For non-Next.js projects or custom project structures:
+       * - Explicit configuration is recommended via tsconfig.json paths
+       * - Example: { "compilerOptions": { "paths": { "@/*": ["./app/*"] } } }
+       * - This fallback will be skipped if you define your own @ alias
+       */
       if (!aliases.has("@")) {
         const srcDir = path.join(compiler.context, "src");
         if (fs.existsSync(srcDir)) {
