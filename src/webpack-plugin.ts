@@ -295,14 +295,6 @@ export default class CodePressWebpackPlugin {
 
     // Get alias map for generating alias-based keys
     const aliasMap = this.getAliasMap(compiler);
-    if (aliasMap.size > 0) {
-      console.log(
-        "[CodePress] Found aliases:",
-        Array.from(aliasMap.entries())
-          .map(([k, v]) => `${k} → ${v}`)
-          .join(", ")
-      );
-    }
 
     // Collect npm package exports for aggregation
     // Map of package name -> { exportName -> { moduleId, minifiedName } }
@@ -514,12 +506,6 @@ export default class CodePressWebpackPlugin {
               }
             }
 
-            // Debug: log first few recharts exports
-            if (npmPackageName === "recharts" && packageExports.size <= 3) {
-              console.log(
-                `[CodePress DEBUG] Collected recharts export: ${Object.keys(exportMappings).join(", ")} from module ${id}`
-              );
-            }
           } else {
             // No export mappings - derive export name from file path
             // e.g., "recharts/es6/polar/PolarGrid.js" -> "PolarGrid"
@@ -570,33 +556,19 @@ export default class CodePressWebpackPlugin {
     // Aggregate npm package exports into MODULE_MAP entries
     // This creates entries like:
     // "lucide-react": { type: "npm", exports: { "ChevronDown": { moduleId: "123", exportName: "A" }, ... } }
-    if (npmPackageExports.size > 0) {
-      console.log(
-        `[CodePress] Found ${npmPackageExports.size} npm packages with tracked exports`
-      );
+    for (const [packageName, exportsMap] of npmPackageExports) {
+      // Convert the Map to a plain object for JSON serialization
+      const exportsObj: { [originalName: string]: NpmExportEntry } = {};
+      for (const [exportName, exportInfo] of exportsMap) {
+        exportsObj[exportName] = exportInfo;
+      }
 
-      for (const [packageName, exportsMap] of npmPackageExports) {
-        // Convert the Map to a plain object for JSON serialization
-        const exportsObj: { [originalName: string]: NpmExportEntry } = {};
-        for (const [exportName, exportInfo] of exportsMap) {
-          exportsObj[exportName] = exportInfo;
-        }
-
-        // Only add if we have exports (don't add empty packages)
-        if (Object.keys(exportsObj).length > 0) {
-          moduleMap[packageName] = {
-            type: "npm",
-            exports: exportsObj,
-          };
-
-          // Debug log for significant packages
-          const exportCount = Object.keys(exportsObj).length;
-          if (exportCount >= 5) {
-            console.log(
-              `[CodePress]   ${packageName}: ${exportCount} exports tracked`
-            );
-          }
-        }
+      // Only add if we have exports (don't add empty packages)
+      if (Object.keys(exportsObj).length > 0) {
+        moduleMap[packageName] = {
+          type: "npm",
+          exports: exportsObj,
+        };
       }
     }
 
@@ -868,7 +840,7 @@ export default class CodePressWebpackPlugin {
    */
   private generateMapScript(moduleMap: ModuleMap): string {
     const mapJson = JSON.stringify(moduleMap);
-    return `(function(){if(typeof window!=="undefined"){window.__CP_MODULE_MAP__=${mapJson};console.log("[CodePress] Loaded module map with",Object.keys(window.__CP_MODULE_MAP__).length,"entries");}})();`;
+    return `(function(){if(typeof window!=="undefined"){window.__CP_MODULE_MAP__=${mapJson};}})();`;
   }
 
   /**
@@ -946,15 +918,6 @@ export default class CodePressWebpackPlugin {
     const assets = compilation.getAssets();
     const assetNames = assets.map((a: Asset) => a.name);
 
-    // Log available JS assets for debugging
-    const jsAssets = assetNames.filter((n: string) => n.endsWith(".js"));
-    console.log(
-      `[CodePress] Looking for main bundle among ${jsAssets.length} JS assets`
-    );
-    console.log(
-      `[CodePress] JS assets: ${jsAssets.slice(0, 15).join(", ")}${jsAssets.length > 15 ? "..." : ""}`
-    );
-
     // Find the main client bundle
     // Matches patterns like: main-abc123.js, static/chunks/main-abc123.js, main-app-abc123.js
     const mainPattern = /^(static\/chunks\/)?(main-|main-app-)[a-f0-9]+\.js$/;
@@ -975,23 +938,17 @@ export default class CodePressWebpackPlugin {
           asset.name.match(pattern)
         );
         if (altAsset) {
-          console.log(
-            `[CodePress] Found alternative main bundle: ${altAsset.name}`
-          );
           return this.doInject(compilation, altAsset, mapScript);
         }
       }
 
+      const jsAssets = assetNames.filter((n: string) => n.endsWith(".js"));
       console.warn(
-        `[CodePress] Could not find main bundle. Tried patterns: main-*, main-app-*, pages/_app-*, app-*`
-      );
-      console.warn(
-        `[CodePress] Available JS assets sample: ${jsAssets.slice(0, 10).join(", ")}`
+        `[CodePress] Could not find main bundle. Available: ${jsAssets.slice(0, 5).join(", ")}${jsAssets.length > 5 ? "..." : ""}`
       );
       return false;
     }
 
-    console.log(`[CodePress] Found main bundle: ${mainAsset.name}`);
     return this.doInject(compilation, mainAsset, mapScript);
   }
 
@@ -1013,8 +970,6 @@ export default class CodePressWebpackPlugin {
     );
 
     compilation.updateAsset(name, newSource);
-    console.log(`[CodePress] Successfully injected module map into ${name}`);
-
     return true;
   }
 }
