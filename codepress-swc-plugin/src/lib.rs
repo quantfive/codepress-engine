@@ -246,6 +246,31 @@ pub struct CodePressTransform {
     // Skip __CPProvider wrapping (for frameworks like Next.js that handle HMR via router)
     // When true, only <codepress-marker> is used for metadata, no React context wrapper
     skip_provider_wrap: bool,
+
+    // Skip <codepress-marker> DOM wrapper for custom components
+    // When true, attributes are added directly to components (like Babel plugin behavior)
+    // This avoids React reconciliation issues with getLayout pattern in Pages Router
+    skip_marker_wrap: bool,
+
+    // JavaScript-based metadata map (instead of DOM attributes)
+    // When enabled, heavy metadata is stored in window.__CODEPRESS_MAP__ instead of DOM
+    // Only codepress-data-fp attribute is added to elements for identification
+    use_js_metadata_map: bool,
+    metadata_map: HashMap<String, MetadataEntry>,
+    inserted_metadata_map: bool,
+}
+
+/// Metadata entry for the JS-based map (window.__CODEPRESS_MAP__)
+#[derive(serde::Serialize, Clone)]
+struct MetadataEntry {
+    #[serde(rename = "cs")]
+    callsite: String,
+    #[serde(rename = "c")]
+    edit_candidates: String,
+    #[serde(rename = "k")]
+    source_kinds: String,
+    #[serde(rename = "s")]
+    symbol_refs: String,
 }
 
 impl CodePressTransform {
@@ -380,13 +405,30 @@ impl CodePressTransform {
             .and_then(|v| v.as_bool())
             .unwrap_or_else(|| {
                 // Auto-detect Next.js: check if next.config.js/ts/mjs exists in cwd
-                // When running under Next.js SWC, these files typically exist
                 let cwd = std::env::current_dir().unwrap_or_default();
-                let next_config_exists = cwd.join("next.config.js").exists()
+                cwd.join("next.config.js").exists()
                     || cwd.join("next.config.ts").exists()
-                    || cwd.join("next.config.mjs").exists();
-                next_config_exists
+                    || cwd.join("next.config.mjs").exists()
             });
+
+        // Skip <codepress-marker> wrapper for custom components
+        // When true, attributes are added directly to components (like Babel plugin)
+        // This avoids React reconciliation issues with getLayout pattern in Pages Router
+        // Auto-enabled for Next.js to match Babel plugin behavior
+        let skip_marker_wrap = config
+            .remove("skipMarkerWrap")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(skip_provider_wrap); // If skipping provider, also skip marker
+
+        // Use JS-based metadata map instead of DOM attributes
+        // When true, heavy metadata (edit-candidates, source-kinds, etc.) is stored in
+        // window.__CODEPRESS_MAP__ instead of DOM attributes. Only codepress-data-fp is on DOM.
+        // This avoids React reconciliation issues and keeps DOM clean.
+        // Auto-enabled for Next.js
+        let use_js_metadata_map = config
+            .remove("useJsMetadataMap")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(skip_provider_wrap); // Same auto-detection as skip_provider_wrap
 
         Self {
             repo_name,
@@ -417,6 +459,10 @@ impl CodePressTransform {
             env_vars,
             inserted_env_map: false,
             skip_provider_wrap,
+            skip_marker_wrap,
+            use_js_metadata_map,
+            metadata_map: HashMap::new(),
+            inserted_metadata_map: false,
         }
     }
 
@@ -560,6 +606,27 @@ impl CodePressTransform {
                 .unwrap_or(false),
             JSXElementName::JSXMemberExpr(_) | JSXElementName::JSXNamespacedName(_) => true,
             // _ => false,
+        }
+    }
+
+    /// Extract element name as a string for use as React key
+    fn get_element_name_str(name: &JSXElementName) -> Option<String> {
+        match name {
+            JSXElementName::Ident(ident) => Some(ident.sym.to_string()),
+            JSXElementName::JSXMemberExpr(m) => {
+                // For member expressions like Foo.Bar, build "Foo.Bar"
+                fn build_member_name(m: &swc_core::ecma::ast::JSXMemberExpr) -> String {
+                    let obj_str = match &m.obj {
+                        swc_core::ecma::ast::JSXObject::Ident(id) => id.sym.to_string(),
+                        swc_core::ecma::ast::JSXObject::JSXMemberExpr(inner) => build_member_name(inner),
+                    };
+                    format!("{}.{}", obj_str, m.prop.sym)
+                }
+                Some(build_member_name(m))
+            }
+            JSXElementName::JSXNamespacedName(ns) => {
+                Some(format!("{}:{}", ns.ns.sym, ns.name.sym))
+            }
         }
     }
 
@@ -1225,12 +1292,14 @@ impl CodePressTransform {
         kinds.into_iter().collect()
     }
 
-    // Build a <codepress-marker style={{display:'contents'}} ...> wrapper with callsite
+    // Build a <codepress-marker style={{display:'contents'}} key={component_name} ...> wrapper with callsite
+    // The key helps React reconcile markers across page navigations (getLayout pattern)
     fn make_display_contents_wrapper(
         &self,
         filename: &str,
         callsite_open_span: swc_core::common::Span,
         elem_span: swc_core::common::Span,
+        component_key: Option<&str>,
     ) -> JSXElement {
         let mut opening = JSXOpeningElement {
             name: JSXElementName::Ident(cp_ident(&self.wrapper_tag).into()),
@@ -1239,6 +1308,14 @@ impl CodePressTransform {
             type_args: None,
             span: DUMMY_SP,
         };
+        // key={component_name} - helps React reconcile markers across navigations
+        if let Some(key) = component_key {
+            opening.attrs.push(JSXAttrOrSpread::JSXAttr(JSXAttr {
+                span: DUMMY_SP,
+                name: JSXAttrName::Ident(cp_ident_name("key".into())),
+                value: Some(make_jsx_str_attr_value(key.to_string())),
+            }));
+        }
         // style={{display:'contents'}}
         opening.attrs.push(JSXAttrOrSpread::JSXAttr(JSXAttr {
             span: DUMMY_SP,
@@ -1969,6 +2046,56 @@ impl CodePressTransform {
         let insert_at = self.directive_insert_index(m);
         m.body.insert(insert_at, stmt);
         self.inserted_env_map = true;
+    }
+
+    /// Injects window.__CODEPRESS_MAP__ entries at the end of module processing.
+    /// This stores metadata in JS instead of DOM attributes for cleaner React reconciliation.
+    /// Uses Object.assign to merge with existing map (multiple modules may load).
+    fn inject_metadata_map(&mut self, m: &mut Module) {
+        if self.inserted_metadata_map || self.metadata_map.is_empty() || !self.use_js_metadata_map {
+            return;
+        }
+
+        // Build JSON for the metadata entries collected in this module
+        let json = serde_json::to_string(&self.metadata_map).unwrap_or_else(|_| "{}".to_string());
+
+        // Inject: try{if(typeof window!=='undefined'){window.__CODEPRESS_MAP__=Object.assign(window.__CODEPRESS_MAP__||{},{...});}}catch(_){}
+        // Using Object.assign to merge with existing map from other modules
+        let js = format!(
+            "try{{if(typeof window!=='undefined'){{window.__CODEPRESS_MAP__=Object.assign(window.__CODEPRESS_MAP__||{{}},{});}}}}catch(_){{}}",
+            json
+        );
+
+        let stmt = ModuleItem::Stmt(Stmt::Expr(ExprStmt {
+            span: DUMMY_SP,
+            expr: Box::new(Expr::Call(CallExpr {
+                span: DUMMY_SP,
+                callee: Callee::Expr(Box::new(Expr::New(NewExpr {
+                    span: DUMMY_SP,
+                    callee: Box::new(Expr::Ident(cp_ident("Function".into()))),
+                    args: Some(vec![ExprOrSpread {
+                        spread: None,
+                        expr: Box::new(Expr::Lit(Lit::Str(Str {
+                            span: DUMMY_SP,
+                            value: js.into(),
+                            raw: None,
+                        }))),
+                    }]),
+                    type_args: None,
+                    #[cfg(not(feature = "compat_0_87"))]
+                    ctxt: SyntaxContext::empty(),
+                }))),
+                args: vec![],
+                type_args: None,
+                #[cfg(not(feature = "compat_0_87"))]
+                ctxt: SyntaxContext::empty(),
+            })),
+        }));
+
+        // Place AFTER directive prologue (e.g., "use client"; "use strict")
+        let insert_at = self.directive_insert_index(m);
+        m.body.insert(insert_at, stmt);
+        self.inserted_metadata_map = true;
     }
 }
 
@@ -2758,6 +2885,8 @@ impl VisitMut for CodePressTransform {
         // Continue other transforms and inject graph (from main branch)
         m.visit_mut_children_with(self);
         self.inject_graph_stmt(m);
+        // Inject metadata map (if using JS-based metadata instead of DOM attributes)
+        self.inject_metadata_map(m);
     }
     fn visit_mut_import_decl(&mut self, n: &mut ImportDecl) {
         let _ = self.file_from_span(n.span);
@@ -3326,73 +3455,139 @@ impl VisitMut for CodePressTransform {
             && !has_slot_prop;
         let block_provider = self.should_block_provider_wrap(&node.opening.name);
 
+        // Generate the fp value (same format as codepress-data-fp attribute)
+        let normalized = self.normalize_repo_relative(&filename);
+        let encoded_path = xor_encode(&normalized);
+        let fp_value = if let Some(line_info) = self.get_line_info(node.opening.span, Some(node.span)) {
+            format!("{}:{}", encoded_path, line_info)
+        } else {
+            encoded_path.clone()
+        };
+
+        // Generate callsite value
+        let callsite_value = format!(
+            "{}:{}-{}",
+            xor_encode(&normalized),
+            self.source_map.as_ref().map(|sm| sm.lookup_char_pos(orig_open_span.lo()).line).unwrap_or(0),
+            self.source_map.as_ref().map(|sm| sm.lookup_char_pos(orig_full_span.hi()).line).unwrap_or(0)
+        );
+
+        // JS-based metadata map mode: store metadata in window.__CODEPRESS_MAP__ instead of DOM
+        // Only codepress-data-fp attribute is on DOM (already added above at line 3273-3278)
+        // No wrapper elements, no additional DOM attributes - cleanest possible approach
+        if self.use_js_metadata_map {
+            // Store metadata in the map keyed by fp
+            self.metadata_map.insert(fp_value.clone(), MetadataEntry {
+                callsite: callsite_value,
+                edit_candidates: cands_enc.clone(),
+                source_kinds: kinds_enc.clone(),
+                symbol_refs: symrefs_enc.clone(),
+            });
+            // No DOM attributes or wrappers needed - extension reads from JS map
+            return;
+        }
+
+        // Legacy mode: DOM attributes and wrapper elements
         if is_custom_call {
-            // DOM wrapper (display: contents) carrying callsite; we also duplicate metadata on the invocation
-            let mut wrapper =
-                self.make_display_contents_wrapper(&filename, orig_open_span, orig_full_span);
+            if self.skip_marker_wrap {
+                // Skip DOM wrapper - add attributes directly to component (like Babel plugin)
+                // This avoids React reconciliation issues with getLayout pattern in Pages Router
+                CodePressTransform::attach_attr_string(
+                    &mut node.opening.attrs,
+                    "data-codepress-edit-candidates",
+                    cands_enc.clone(),
+                );
+                CodePressTransform::attach_attr_string(
+                    &mut node.opening.attrs,
+                    "data-codepress-source-kinds",
+                    kinds_enc.clone(),
+                );
+                CodePressTransform::attach_attr_string(
+                    &mut node.opening.attrs,
+                    "data-codepress-symbol-refs",
+                    symrefs_enc.clone(),
+                );
+                CodePressTransform::attach_attr_string(
+                    &mut node.opening.attrs,
+                    "data-codepress-callsite",
+                    callsite_value,
+                );
+            } else {
+                // DOM wrapper (display: contents) carrying callsite; we also duplicate metadata on the invocation
+                // Extract component name + line number for use as React key to help reconciliation
+                // Line number ensures uniqueness when same component appears multiple times
+                let component_key = Self::get_element_name_str(&node.opening.name).map(|name| {
+                    let line = self.source_map.as_ref()
+                        .map(|sm| sm.lookup_char_pos(orig_open_span.lo()).line)
+                        .unwrap_or(0);
+                    format!("{}:{}", name, line)
+                });
+                let mut wrapper =
+                    self.make_display_contents_wrapper(&filename, orig_open_span, orig_full_span, component_key.as_deref());
 
-            let mut original = std::mem::replace(
-                node,
-                JSXElement {
-                    span: DUMMY_SP,
-                    opening: JSXOpeningElement {
-                        name: JSXElementName::Ident(cp_ident("div".into()).into()),
-                        attrs: vec![],
-                        self_closing: false,
-                        type_args: None,
+                let original = std::mem::replace(
+                    node,
+                    JSXElement {
                         span: DUMMY_SP,
+                        opening: JSXOpeningElement {
+                            name: JSXElementName::Ident(cp_ident("div".into()).into()),
+                            attrs: vec![],
+                            self_closing: false,
+                            type_args: None,
+                            span: DUMMY_SP,
+                        },
+                        children: vec![],
+                        closing: None,
                     },
-                    children: vec![],
-                    closing: None,
-                },
-            );
+                );
 
-            // Intentionally avoid duplicating metadata onto the custom component invocation
-            // to prevent interfering with component prop forwarding (e.g., Radix Slot).
+                // Intentionally avoid duplicating metadata onto the custom component invocation
+                // to prevent interfering with component prop forwarding (e.g., Radix Slot).
 
-            wrapper
-                .children
-                .push(JSXElementChild::JSXElement(Box::new(original)));
-            *node = wrapper;
+                wrapper
+                    .children
+                    .push(JSXElementChild::JSXElement(Box::new(original)));
+                *node = wrapper;
 
-            // Wrap with __CPProvider unless:
-            // - The component depends on its direct parent/child identity (e.g., Recharts)
-            // - We're in a framework that handles HMR differently (e.g., Next.js uses router.replace)
-            if !block_provider && !self.skip_provider_wrap {
-                let cs_enc = if let JSXAttrOrSpread::JSXAttr(a) =
-                    self.create_encoded_path_attr(&filename, orig_open_span, Some(orig_full_span))
-                {
-                    jsx_attr_value_to_string(&a.value).unwrap_or_default()
-                } else {
-                    "".into()
-                };
-                // find fp on this node (or recompute)
-                let mut fp_enc = String::new();
-                for a in &node.opening.attrs {
-                    if let JSXAttrOrSpread::JSXAttr(attr) = a {
-                        if let JSXAttrName::Ident(idn) = &attr.name {
-                            if idn.sym.as_ref() == "codepress-data-fp" {
-                                if let Some(val) = jsx_attr_value_to_string(&attr.value) {
-                                    fp_enc = val;
+                // Wrap with __CPProvider unless:
+                // - The component depends on its direct parent/child identity (e.g., Recharts)
+                // - We're in a framework that handles HMR differently (e.g., Next.js uses router.replace)
+                if !block_provider && !self.skip_provider_wrap {
+                    let cs_enc = if let JSXAttrOrSpread::JSXAttr(a) =
+                        self.create_encoded_path_attr(&filename, orig_open_span, Some(orig_full_span))
+                    {
+                        jsx_attr_value_to_string(&a.value).unwrap_or_default()
+                    } else {
+                        "".into()
+                    };
+                    // find fp on this node (or recompute)
+                    let mut fp_enc = String::new();
+                    for a in &node.opening.attrs {
+                        if let JSXAttrOrSpread::JSXAttr(attr) = a {
+                            if let JSXAttrName::Ident(idn) = &attr.name {
+                                if idn.sym.as_ref() == "codepress-data-fp" {
+                                    if let Some(val) = jsx_attr_value_to_string(&attr.value) {
+                                        fp_enc = val;
+                                    }
                                 }
                             }
                         }
                     }
+                    let meta = ProviderMeta {
+                        cs: cs_enc,
+                        c: cands_enc.clone(),
+                        k: kinds_enc.clone(),
+                        fp: fp_enc,
+                    };
+                    self.wrap_with_provider(node, meta);
                 }
-                let meta = ProviderMeta {
-                    cs: cs_enc,
-                    c: cands_enc.clone(),
-                    k: kinds_enc.clone(),
-                    fp: fp_enc,
-                };
-                self.wrap_with_provider(node, meta);
-            }
 
-            let attrs = &mut node.opening.attrs;
-            // Only annotate the injected wrappers (provider or host wrapper), not the invocation element
-            CodePressTransform::attach_attr_string(attrs, "data-codepress-edit-candidates", cands_enc.clone());
-            CodePressTransform::attach_attr_string(attrs, "data-codepress-source-kinds", kinds_enc.clone());
-            CodePressTransform::attach_attr_string(attrs, "data-codepress-symbol-refs", symrefs_enc.clone());
+                let attrs = &mut node.opening.attrs;
+                // Only annotate the injected wrappers (provider or host wrapper), not the invocation element
+                CodePressTransform::attach_attr_string(attrs, "data-codepress-edit-candidates", cands_enc.clone());
+                CodePressTransform::attach_attr_string(attrs, "data-codepress-source-kinds", kinds_enc.clone());
+                CodePressTransform::attach_attr_string(attrs, "data-codepress-symbol-refs", symrefs_enc.clone());
+            }
         } else {
             // Host element → tag directly
             CodePressTransform::attach_attr_string(
@@ -3411,17 +3606,11 @@ impl VisitMut for CodePressTransform {
                 symrefs_enc.clone(),
             );
             if !Self::has_attr_key(&node.opening.attrs, "data-codepress-callsite") {
-                if let JSXAttrOrSpread::JSXAttr(a) = self.create_encoded_path_attr(
-                    &filename,
-                    node.opening.span,
-                    Some(node.span),
-                ) {
-                    node.opening.attrs.push(JSXAttrOrSpread::JSXAttr(JSXAttr {
-                        span: DUMMY_SP,
-                        name: JSXAttrName::Ident(cp_ident_name("data-codepress-callsite".into())),
-                        value: a.value,
-                    }));
-                }
+                node.opening.attrs.push(JSXAttrOrSpread::JSXAttr(JSXAttr {
+                    span: DUMMY_SP,
+                    name: JSXAttrName::Ident(cp_ident_name("data-codepress-callsite".into())),
+                    value: Some(make_jsx_str_attr_value(callsite_value)),
+                }));
             }
         }
     }
