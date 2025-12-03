@@ -242,6 +242,10 @@ pub struct CodePressTransform {
     // Environment variables to inject as window.__CP_ENV_MAP__ (for HMR support)
     env_vars: HashMap<String, String>,
     inserted_env_map: bool,
+
+    // Skip __CPProvider wrapping (for frameworks like Next.js that handle HMR via router)
+    // When true, only <codepress-marker> is used for metadata, no React context wrapper
+    skip_provider_wrap: bool,
 }
 
 impl CodePressTransform {
@@ -369,6 +373,21 @@ impl CodePressTransform {
             })
             .unwrap_or_default();
 
+        // Skip __CPProvider wrapping for frameworks that handle HMR differently (e.g., Next.js)
+        // Can be explicitly set via config, or auto-detected from framework indicators
+        let skip_provider_wrap = config
+            .remove("skipProviderWrap")
+            .and_then(|v| v.as_bool())
+            .unwrap_or_else(|| {
+                // Auto-detect Next.js: check if next.config.js/ts/mjs exists in cwd
+                // When running under Next.js SWC, these files typically exist
+                let cwd = std::env::current_dir().unwrap_or_default();
+                let next_config_exists = cwd.join("next.config.js").exists()
+                    || cwd.join("next.config.ts").exists()
+                    || cwd.join("next.config.mjs").exists();
+                next_config_exists
+            });
+
         Self {
             repo_name,
             branch_name,
@@ -397,6 +416,7 @@ impl CodePressTransform {
             import_resolver,
             env_vars,
             inserted_env_map: false,
+            skip_provider_wrap,
         }
     }
 
@@ -2587,8 +2607,10 @@ impl VisitMut for CodePressTransform {
 
         // Inject env vars into entry points (for HMR support)
         self.ensure_env_map_inline(m);
-        // Inject inline provider once per module (from main branch)
-        self.ensure_provider_inline(m);
+        // Inject inline provider once per module (skip for frameworks that handle HMR differently)
+        if !self.skip_provider_wrap {
+            self.ensure_provider_inline(m);
+        }
         // Inject guarded stamping helper
         self.ensure_stamp_helper_inline(m);
 
@@ -3333,9 +3355,10 @@ impl VisitMut for CodePressTransform {
                 .push(JSXElementChild::JSXElement(Box::new(original)));
             *node = wrapper;
 
-            // Wrap with __CPProvider unless the component depends on its direct parent/child
-            // identity (e.g., Recharts clones its immediate child chart).
-            if !block_provider {
+            // Wrap with __CPProvider unless:
+            // - The component depends on its direct parent/child identity (e.g., Recharts)
+            // - We're in a framework that handles HMR differently (e.g., Next.js uses router.replace)
+            if !block_provider && !self.skip_provider_wrap {
                 let cs_enc = if let JSXAttrOrSpread::JSXAttr(a) =
                     self.create_encoded_path_attr(&filename, orig_open_span, Some(orig_full_span))
                 {
