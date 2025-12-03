@@ -424,11 +424,11 @@ impl CodePressTransform {
         // When true, heavy metadata (edit-candidates, source-kinds, etc.) is stored in
         // window.__CODEPRESS_MAP__ instead of DOM attributes. Only codepress-data-fp is on DOM.
         // This avoids React reconciliation issues and keeps DOM clean.
-        // Auto-enabled for Next.js
+        // Defaults to true - it's the better approach and works everywhere
         let use_js_metadata_map = config
             .remove("useJsMetadataMap")
             .and_then(|v| v.as_bool())
-            .unwrap_or(skip_provider_wrap); // Same auto-detection as skip_provider_wrap
+            .unwrap_or(true); // Default to true - cleaner DOM, no reconciliation issues
 
         Self {
             repo_name,
