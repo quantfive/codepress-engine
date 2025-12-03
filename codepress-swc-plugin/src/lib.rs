@@ -3292,9 +3292,16 @@ impl VisitMut for CodePressTransform {
         let symrefs_enc = xor_encode(&symrefs_json);
 
         // Always-on behavior for custom component callsites (excluding skip list):
+        // Skip wrapping for components with props that indicate slot/polymorphic patterns:
+        // - asChild: Radix UI, Ark UI slot composition
+        // - forwardedAs: styled-components polymorphic pattern
+        // These patterns rely on direct parent-child relationships that wrappers would break
+        let has_slot_prop = Self::has_attr_key(&node.opening.attrs, "asChild")
+            || Self::has_attr_key(&node.opening.attrs, "forwardedAs");
         let is_custom_call = !is_host
             && Self::is_custom_component_name(&node.opening.name)
-            && !self.is_skip_component(&node.opening.name);
+            && !self.is_skip_component(&node.opening.name)
+            && !has_slot_prop;
         let block_provider = self.should_block_provider_wrap(&node.opening.name);
 
         if is_custom_call {
