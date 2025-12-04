@@ -2161,28 +2161,30 @@ impl CodePressTransform {
             return;
         }
 
-        // Skip if file uses Next.js font loaders (same check as ensure_provider_inline)
-        for item in &m.body {
-            if let ModuleItem::ModuleDecl(ModuleDecl::Import(import_decl)) = item {
-                let src = atom_to_string(&import_decl.src.value);
-                if src.starts_with("next/font/") || src.starts_with("@next/font/") {
-                    return;
-                }
-            }
-        }
+        // NOTE: We intentionally do NOT skip files with Next.js fonts here.
+        // Unlike the legacy per-component __CPProvider wrapping which could
+        // interfere with font optimization, __CPRefreshProvider only uses
+        // useSyncExternalStore and simply returns children - no context wrapping.
+        // This allows HMR to work even in files that use next/font.
 
         // Check if file is TSX/JSX (has JSX content)
         if !file.ends_with(".tsx") && !file.ends_with(".jsx") {
             return;
         }
 
-        // import { useSyncExternalStore } from "react";
+        // import { useSyncExternalStore, createElement } from "react";
         let import_decl = ModuleItem::ModuleDecl(ModuleDecl::Import(ImportDecl {
             span: DUMMY_SP,
             specifiers: vec![
                 ImportSpecifier::Named(ImportNamedSpecifier {
                     span: DUMMY_SP,
                     local: cp_ident("useSyncExternalStore".into()),
+                    imported: None,
+                    is_type_only: false,
+                }),
+                ImportSpecifier::Named(ImportNamedSpecifier {
+                    span: DUMMY_SP,
+                    local: cp_ident("createElement".into()),
                     imported: None,
                     is_type_only: false,
                 }),
@@ -2403,14 +2405,14 @@ impl CodePressTransform {
                 ctxt: SyntaxContext::empty(),
             });
 
-            // const _ = useSyncExternalStore(subscribe, getSnapshot, getServerSnapshot);
+            // const __cpV = useSyncExternalStore(subscribe, getSnapshot, getServerSnapshot);
             let use_sync_stmt = Stmt::Decl(Decl::Var(Box::new(VarDecl {
                 span: DUMMY_SP,
                 kind: VarDeclKind::Const,
                 declare: false,
                 decls: vec![VarDeclarator {
                     span: DUMMY_SP,
-                    name: Pat::Ident(BindingIdent { id: cp_ident("_".into()), type_ann: None }),
+                    name: Pat::Ident(BindingIdent { id: cp_ident("__cpV".into()), type_ann: None }),
                     init: Some(Box::new(Expr::Call(CallExpr {
                         span: DUMMY_SP,
                         callee: Callee::Expr(Box::new(Expr::Ident(cp_ident("useSyncExternalStore".into())))),
@@ -2429,10 +2431,62 @@ impl CodePressTransform {
                 ctxt: SyntaxContext::empty(),
             })));
 
-            // return children;
+            // return createElement("div", { key: __cpV, style: { display: "contents" } }, children);
+            // Using a div with display:contents so it's layout-neutral but has a key to force remount
             let return_children = Stmt::Return(ReturnStmt {
                 span: DUMMY_SP,
-                arg: Some(Box::new(Expr::Ident(cp_ident("children".into())))),
+                arg: Some(Box::new(Expr::Call(CallExpr {
+                    span: DUMMY_SP,
+                    callee: Callee::Expr(Box::new(Expr::Ident(cp_ident("createElement".into())))),
+                    args: vec![
+                        // "div"
+                        ExprOrSpread {
+                            spread: None,
+                            expr: Box::new(Expr::Lit(Lit::Str(Str {
+                                span: DUMMY_SP,
+                                value: "div".into(),
+                                raw: None,
+                            }))),
+                        },
+                        // { key: __cpV, style: { display: "contents" } }
+                        ExprOrSpread {
+                            spread: None,
+                            expr: Box::new(Expr::Object(ObjectLit {
+                                span: DUMMY_SP,
+                                props: vec![
+                                    PropOrSpread::Prop(Box::new(Prop::KeyValue(KeyValueProp {
+                                        key: PropName::Ident(cp_ident_name("key".into())),
+                                        value: Box::new(Expr::Ident(cp_ident("__cpV".into()))),
+                                    }))),
+                                    PropOrSpread::Prop(Box::new(Prop::KeyValue(KeyValueProp {
+                                        key: PropName::Ident(cp_ident_name("style".into())),
+                                        value: Box::new(Expr::Object(ObjectLit {
+                                            span: DUMMY_SP,
+                                            props: vec![
+                                                PropOrSpread::Prop(Box::new(Prop::KeyValue(KeyValueProp {
+                                                    key: PropName::Ident(cp_ident_name("display".into())),
+                                                    value: Box::new(Expr::Lit(Lit::Str(Str {
+                                                        span: DUMMY_SP,
+                                                        value: "contents".into(),
+                                                        raw: None,
+                                                    }))),
+                                                }))),
+                                            ],
+                                        })),
+                                    }))),
+                                ],
+                            })),
+                        },
+                        // children
+                        ExprOrSpread {
+                            spread: None,
+                            expr: Box::new(Expr::Ident(cp_ident("children".into()))),
+                        },
+                    ],
+                    type_args: None,
+                    #[cfg(not(feature = "compat_0_87"))]
+                    ctxt: SyntaxContext::empty(),
+                }))),
             });
 
             // function __CPRefreshProvider({ children }) { ... }
