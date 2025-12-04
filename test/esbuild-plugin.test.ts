@@ -310,7 +310,7 @@ export default function Image() {
   });
 
   describe('Provider Wrapping', () => {
-    test('should wrap default export functions with __CPProvider', async () => {
+    test('should NOT include per-component provider wrapping (HMR handled by root provider)', async () => {
       const testFile = path.join(tmpDir, 'App.tsx');
       const source = `
 export default function App() {
@@ -337,10 +337,14 @@ export default function App() {
 
       const output = result.outputFiles[0].text;
 
-      // Should contain provider wrapper code
-      expect(output).toContain('__CPProvider');
-      expect(output).toContain('useSyncExternalStore');
-      expect(output).toContain('CP_PREVIEW_REFRESH');
+      // Should NOT contain provider wrapper code
+      // HMR is now handled by CPRefreshProvider at app root
+      expect(output).not.toContain('__CPProvider');
+      expect(output).not.toContain('useSyncExternalStore');
+      expect(output).not.toContain('CP_PREVIEW_REFRESH');
+
+      // Should still have JSX with codepress-data-fp attributes
+      expect(output).toContain('"codepress-data-fp":');
     });
   });
 
