@@ -13,7 +13,8 @@
     "skipLibCheck": true,
     "strict": true,
     "useUnknownInCatchVariables": false,
-    "lib": ["es2020", "dom"]
+    "lib": ["es2020", "dom"],
+    "jsx": "react-jsx"
   },
   "include": ["src/**/*"],
   "exclude": ["dist", "node_modules"]

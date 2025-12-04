@@ -45,7 +45,7 @@ interface CPRefreshProviderProps {
  */
 export function CPRefreshProvider({ children }: CPRefreshProviderProps) {
   const version = useSyncExternalStore(
-    (callback) => {
+    (callback: () => void) => {
       if (typeof window === 'undefined') {
         return () => {};
       }
