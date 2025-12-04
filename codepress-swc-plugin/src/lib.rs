@@ -3011,100 +3011,8 @@ fn detect_fetch_like(c: &CallExpr) -> Option<FetchLike> {
 }
 
 // -----------------------------------------------------------------------------
-// Pass 1: main transform (add attributes; DOM wrapper; non-DOM provider)
+// Pass 1: main transform
 // -----------------------------------------------------------------------------
-impl CodePressTransform {
-    // Build provider wrapper: <__CPProvider value={{cs,c,k,fp}}>{node}</__CPProvider>
-    fn wrap_with_provider(&self, node: &mut JSXElement, meta: ProviderMeta) {
-        let provider_name: JSXElementName =
-            JSXElementName::Ident(cp_ident(&self.provider_ident).into());
-
-        let mut opening = JSXOpeningElement {
-            name: provider_name.clone(),
-            attrs: vec![],
-            self_closing: false,
-            type_args: None,
-            span: DUMMY_SP,
-        };
-
-        let obj = Expr::Object(ObjectLit {
-            span: DUMMY_SP,
-            props: vec![
-                PropOrSpread::Prop(Box::new(Prop::KeyValue(KeyValueProp {
-                    key: PropName::Ident(cp_ident_name("cs".into())),
-                    value: Box::new(Expr::Lit(Lit::Str(Str {
-                        span: DUMMY_SP,
-                        value: meta.cs.into(),
-                        raw: None,
-                    }))),
-                }))),
-                PropOrSpread::Prop(Box::new(Prop::KeyValue(KeyValueProp {
-                    key: PropName::Ident(cp_ident_name("c".into())),
-                    value: Box::new(Expr::Lit(Lit::Str(Str {
-                        span: DUMMY_SP,
-                        value: meta.c.into(),
-                        raw: None,
-                    }))),
-                }))),
-                PropOrSpread::Prop(Box::new(Prop::KeyValue(KeyValueProp {
-                    key: PropName::Ident(cp_ident_name("k".into())),
-                    value: Box::new(Expr::Lit(Lit::Str(Str {
-                        span: DUMMY_SP,
-                        value: meta.k.into(),
-                        raw: None,
-                    }))),
-                }))),
-                PropOrSpread::Prop(Box::new(Prop::KeyValue(KeyValueProp {
-                    key: PropName::Ident(cp_ident_name("fp".into())),
-                    value: Box::new(Expr::Lit(Lit::Str(Str {
-                        span: DUMMY_SP,
-                        value: meta.fp.into(),
-                        raw: None,
-                    }))),
-                }))),
-            ],
-        });
-
-        opening.attrs.push(JSXAttrOrSpread::JSXAttr(JSXAttr {
-            span: DUMMY_SP,
-            name: JSXAttrName::Ident(cp_ident_name("value".into())),
-            value: Some(JSXAttrValue::JSXExprContainer(JSXExprContainer {
-                span: DUMMY_SP,
-                expr: JSXExpr::Expr(Box::new(obj)),
-            })),
-        }));
-
-        let mut provider = JSXElement {
-            span: DUMMY_SP,
-            opening,
-            children: vec![],
-            closing: Some(JSXClosingElement {
-                span: DUMMY_SP,
-                name: provider_name,
-            }),
-        };
-
-        let original = std::mem::replace(
-            node,
-            JSXElement {
-                span: DUMMY_SP,
-                opening: JSXOpeningElement {
-                    name: JSXElementName::Ident(cp_ident("div".into()).into()),
-                    attrs: vec![],
-                    self_closing: false,
-                    type_args: None,
-                    span: DUMMY_SP,
-                },
-                children: vec![],
-                closing: None,
-            },
-        );
-        provider
-            .children
-            .push(JSXElementChild::JSXElement(Box::new(original)));
-        *node = provider;
-    }
-}
 
 impl VisitMut for CodePressTransform {
   fn visit_mut_module(&mut self, m: &mut Module) {
@@ -3863,228 +3771,15 @@ impl VisitMut for CodePressTransform {
             self.source_map.as_ref().map(|sm| sm.lookup_char_pos(orig_full_span.hi()).line).unwrap_or(0)
         );
 
-        // JS-based metadata map mode: store metadata in window.__CODEPRESS_MAP__ instead of DOM
-        // Only codepress-data-fp attribute is on DOM (already added above at line 3273-3278)
-        // No per-component __CPProvider wrapping - rely on top-level provider for HMR
-        if self.use_js_metadata_map {
-            // Store metadata in the map keyed by fp
-            self.metadata_map.insert(fp_value.clone(), MetadataEntry {
-                callsite: callsite_value.clone(),
-                edit_candidates: cands_enc.clone(),
-                source_kinds: kinds_enc.clone(),
-                symbol_refs: symrefs_enc.clone(),
-            });
-            // No DOM attributes or per-component wrappers needed
-            // Extension reads from JS map, HMR handled by top-level provider
-            return;
-        }
-
-        // Legacy mode: DOM attributes and wrapper elements
-        if is_custom_call {
-            if self.skip_marker_wrap {
-                // Skip DOM wrapper - add attributes directly to component (like Babel plugin)
-                // This avoids React reconciliation issues with getLayout pattern in Pages Router
-                CodePressTransform::attach_attr_string(
-                    &mut node.opening.attrs,
-                    "data-codepress-edit-candidates",
-                    cands_enc.clone(),
-                );
-                CodePressTransform::attach_attr_string(
-                    &mut node.opening.attrs,
-                    "data-codepress-source-kinds",
-                    kinds_enc.clone(),
-                );
-                CodePressTransform::attach_attr_string(
-                    &mut node.opening.attrs,
-                    "data-codepress-symbol-refs",
-                    symrefs_enc.clone(),
-                );
-                CodePressTransform::attach_attr_string(
-                    &mut node.opening.attrs,
-                    "data-codepress-callsite",
-                    callsite_value,
-                );
-            } else {
-                // DOM wrapper (display: contents) carrying callsite; we also duplicate metadata on the invocation
-                // Extract component name + line number for use as React key to help reconciliation
-                // Line number ensures uniqueness when same component appears multiple times
-                let component_key = Self::get_element_name_str(&node.opening.name).map(|name| {
-                    let line = self.source_map.as_ref()
-                        .map(|sm| sm.lookup_char_pos(orig_open_span.lo()).line)
-                        .unwrap_or(0);
-                    format!("{}:{}", name, line)
-                });
-                let mut wrapper =
-                    self.make_display_contents_wrapper(&filename, orig_open_span, orig_full_span, component_key.as_deref());
-
-                let original = std::mem::replace(
-                    node,
-                    JSXElement {
-                        span: DUMMY_SP,
-                        opening: JSXOpeningElement {
-                            name: JSXElementName::Ident(cp_ident("div".into()).into()),
-                            attrs: vec![],
-                            self_closing: false,
-                            type_args: None,
-                            span: DUMMY_SP,
-                        },
-                        children: vec![],
-                        closing: None,
-                    },
-                );
-
-                // Intentionally avoid duplicating metadata onto the custom component invocation
-                // to prevent interfering with component prop forwarding (e.g., Radix Slot).
-
-                wrapper
-                    .children
-                    .push(JSXElementChild::JSXElement(Box::new(original)));
-                *node = wrapper;
-
-                // Wrap with __CPProvider unless:
-                // - The component depends on its direct parent/child identity (e.g., Recharts)
-                // - We're in a framework that handles HMR differently (e.g., Next.js uses router.replace)
-                if !block_provider && !self.skip_provider_wrap {
-                    let cs_enc = if let JSXAttrOrSpread::JSXAttr(a) =
-                        self.create_encoded_path_attr(&filename, orig_open_span, Some(orig_full_span))
-                    {
-                        jsx_attr_value_to_string(&a.value).unwrap_or_default()
-                    } else {
-                        "".into()
-                    };
-                    // find fp on this node (or recompute)
-                    let mut fp_enc = String::new();
-                    for a in &node.opening.attrs {
-                        if let JSXAttrOrSpread::JSXAttr(attr) = a {
-                            if let JSXAttrName::Ident(idn) = &attr.name {
-                                if idn.sym.as_ref() == "codepress-data-fp" {
-                                    if let Some(val) = jsx_attr_value_to_string(&attr.value) {
-                                        fp_enc = val;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    let meta = ProviderMeta {
-                        cs: cs_enc,
-                        c: cands_enc.clone(),
-                        k: kinds_enc.clone(),
-                        fp: fp_enc,
-                    };
-                    self.wrap_with_provider(node, meta);
-                }
-
-                let attrs = &mut node.opening.attrs;
-                // Only annotate the injected wrappers (provider or host wrapper), not the invocation element
-                CodePressTransform::attach_attr_string(attrs, "data-codepress-edit-candidates", cands_enc.clone());
-                CodePressTransform::attach_attr_string(attrs, "data-codepress-source-kinds", kinds_enc.clone());
-                CodePressTransform::attach_attr_string(attrs, "data-codepress-symbol-refs", symrefs_enc.clone());
-            }
-        } else {
-            // Host element → tag directly
-            CodePressTransform::attach_attr_string(
-                &mut node.opening.attrs,
-                "data-codepress-edit-candidates",
-                cands_enc.clone(),
-            );
-            CodePressTransform::attach_attr_string(
-                &mut node.opening.attrs,
-                "data-codepress-source-kinds",
-                kinds_enc.clone(),
-            );
-            CodePressTransform::attach_attr_string(
-                &mut node.opening.attrs,
-                "data-codepress-symbol-refs",
-                symrefs_enc.clone(),
-            );
-            if !Self::has_attr_key(&node.opening.attrs, "data-codepress-callsite") {
-                node.opening.attrs.push(JSXAttrOrSpread::JSXAttr(JSXAttr {
-                    span: DUMMY_SP,
-                    name: JSXAttrName::Ident(cp_ident_name("data-codepress-callsite".into())),
-                    value: Some(make_jsx_str_attr_value(callsite_value)),
-                }));
-            }
-        }
-    }
-}
-
-// -----------------------------------------------------------------------------
-// Pass 2: hoist wrapper attrs to child & remove wrapper
-// -----------------------------------------------------------------------------
-
-struct HoistAndElide {
-    wrapper_tag: String,
-    keys: Vec<String>,
-}
-
-impl HoistAndElide {
-    fn is_wrapper(&self, name: &JSXElementName) -> bool {
-        match name {
-            JSXElementName::Ident(id) => id.sym.as_ref() == self.wrapper_tag,
-            _ => false,
-        }
-    }
-    fn has_attr(attrs: &[JSXAttrOrSpread], key: &str) -> bool {
-        attrs.iter().any(|a| {
-            if let JSXAttrOrSpread::JSXAttr(attr) = a {
-                if let JSXAttrName::Ident(id) = &attr.name {
-                    return id.sym.as_ref() == key;
-                }
-            }
-            false
-        })
-    }
-    fn get_attr_string(attrs: &[JSXAttrOrSpread], key: &str) -> Option<String> {
-        for a in attrs {
-            if let JSXAttrOrSpread::JSXAttr(attr) = a {
-                if let JSXAttrName::Ident(id) = &attr.name {
-                    if id.sym.as_ref() == key {
-                        return jsx_attr_value_to_string(&attr.value);
-                    }
-                }
-            }
-        }
-        None
-    }
-    fn push_attr(attrs: &mut Vec<JSXAttrOrSpread>, key: &str, val: String) {
-        attrs.push(JSXAttrOrSpread::JSXAttr(JSXAttr {
-            span: DUMMY_SP,
-            name: JSXAttrName::Ident(cp_ident_name(key.into())),
-            value: Some(make_jsx_str_attr_value(val)),
-        }));
-    }
-}
-
-impl VisitMut for HoistAndElide {
-    fn visit_mut_jsx_element(&mut self, node: &mut JSXElement) {
-        // Recurse first
-        node.visit_mut_children_with(self);
-
-        // Only wrappers with exactly one JSXElement child
-        if !self.is_wrapper(&node.opening.name) || node.children.len() != 1 {
-            return;
-        }
-
-        let child_el = match node.children.remove(0) {
-            JSXElementChild::JSXElement(boxed) => *boxed,
-            other => {
-                node.children.push(other);
-                return;
-            }
-        };
-        let mut child = child_el;
-
-        // Hoist keys if missing on child
-        for key in &self.keys {
-            if !Self::has_attr(&child.opening.attrs, key) {
-                if let Some(val) = Self::get_attr_string(&node.opening.attrs, key) {
-                    Self::push_attr(&mut child.opening.attrs, key, val);
-                }
-            }
-        }
-
-        // Replace wrapper with child
-        *node = child;
+        // Store metadata in window.__CODEPRESS_MAP__ instead of DOM attributes
+        // Only codepress-data-fp attribute is on DOM (already added above)
+        // Extension reads from JS map, HMR handled by top-level CPRefreshProvider
+        self.metadata_map.insert(fp_value.clone(), MetadataEntry {
+            callsite: callsite_value.clone(),
+            edit_candidates: cands_enc.clone(),
+            source_kinds: kinds_enc.clone(),
+            symbol_refs: symrefs_enc.clone(),
+        });
     }
 }
 
@@ -4114,21 +3809,9 @@ pub fn process_transform(
     // Pass 1: main transform
     program.visit_mut_with(&mut transform);
 
-    // Pass 2: always hoist & elide (remove wrappers, keep data on child callsite)
-    let mut elider = HoistAndElide {
-        wrapper_tag: transform.wrapper_tag.clone(),
-        keys: vec![
-            "data-codepress-edit-candidates".to_string(),
-            "data-codepress-source-kinds".to_string(),
-            "data-codepress-callsite".to_string(),
-            "data-codepress-symbol-refs".to_string(),
-        ],
-    };
-    program.visit_mut_with(&mut elider);
-
-    // Pass 3: Wrap JSX returns in default exports at entry points with __CPRefreshProvider
-    // This provides automatic HMR support when use_js_metadata_map is enabled
-    if transform.use_js_metadata_map && transform.inserted_refresh_provider {
+    // Pass 2: Wrap JSX returns in default exports at entry points with __CPRefreshProvider
+    // This provides automatic HMR support
+    if transform.inserted_refresh_provider {
         let mut wrapper = RefreshProviderWrapper;
         program.visit_mut_with(&mut wrapper);
     }
@@ -4290,15 +3973,6 @@ impl RefreshProviderWrapper {
 
 // -----------------------------------------------------------------------------
 // (Optional) tests could go here
-// -----------------------------------------------------------------------------
-
-// Payload carried by the non-DOM provider
-struct ProviderMeta {
-    cs: String,
-    c: String,
-    k: String,
-    fp: String,
-}
 // -----------------------------------------------------------------------------
 // Extra types/helpers for symbol-refs & literal index
 // -----------------------------------------------------------------------------

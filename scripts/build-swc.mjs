@@ -40,8 +40,8 @@ const BANDS = [
     id: "v42",
     swc_core: "=42.0.3",
     extra: {
-      serde: "^1.0.225",
-      serde_json: "^1.0.140",
+      serde: "=1.0.225",
+      serde_json: "=1.0.140",
     },
   },
 
@@ -50,8 +50,8 @@ const BANDS = [
     id: "v48",
     swc_core: "=48.0.2",
     extra: {
-      serde: "^1.0.225",
-      serde_json: "^1.0.140",
+      serde: "=1.0.225",
+      serde_json: "=1.0.140",
       compat_feature: "compat_v48",
       swc_atoms: "=9.0.0",
     },
