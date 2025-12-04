@@ -3474,16 +3474,29 @@ impl VisitMut for CodePressTransform {
 
         // JS-based metadata map mode: store metadata in window.__CODEPRESS_MAP__ instead of DOM
         // Only codepress-data-fp attribute is on DOM (already added above at line 3273-3278)
-        // No wrapper elements, no additional DOM attributes - cleanest possible approach
         if self.use_js_metadata_map {
             // Store metadata in the map keyed by fp
             self.metadata_map.insert(fp_value.clone(), MetadataEntry {
-                callsite: callsite_value,
+                callsite: callsite_value.clone(),
                 edit_candidates: cands_enc.clone(),
                 source_kinds: kinds_enc.clone(),
                 symbol_refs: symrefs_enc.clone(),
             });
-            // No DOM attributes or wrappers needed - extension reads from JS map
+
+            // For custom components, still wrap with __CPProvider for HMR support
+            // The provider uses useSyncExternalStore to trigger re-renders on preview updates
+            // Without this, HMR preview updates don't trigger proper re-renders
+            if is_custom_call && !block_provider && !self.skip_provider_wrap {
+                let meta = ProviderMeta {
+                    cs: callsite_value,
+                    c: cands_enc,
+                    k: kinds_enc,
+                    fp: fp_value,
+                };
+                self.wrap_with_provider(node, meta);
+            }
+
+            // No DOM attributes needed - extension reads from JS map
             return;
         }
 
