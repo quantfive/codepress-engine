@@ -242,6 +242,39 @@ pub struct CodePressTransform {
     // Environment variables to inject as window.__CP_ENV_MAP__ (for HMR support)
     env_vars: HashMap<String, String>,
     inserted_env_map: bool,
+
+    // Skip __CPProvider wrapping (for frameworks like Next.js that handle HMR via router)
+    // When true, only <codepress-marker> is used for metadata, no React context wrapper
+    skip_provider_wrap: bool,
+
+    // Auto-inject refresh provider at entry points (when use_js_metadata_map is true)
+    auto_inject_refresh_provider: bool,
+    inserted_refresh_provider: bool,
+
+    // Skip <codepress-marker> DOM wrapper for custom components
+    // When true, attributes are added directly to components (like Babel plugin behavior)
+    // This avoids React reconciliation issues with getLayout pattern in Pages Router
+    skip_marker_wrap: bool,
+
+    // JavaScript-based metadata map (instead of DOM attributes)
+    // When enabled, heavy metadata is stored in window.__CODEPRESS_MAP__ instead of DOM
+    // Only codepress-data-fp attribute is added to elements for identification
+    use_js_metadata_map: bool,
+    metadata_map: HashMap<String, MetadataEntry>,
+    inserted_metadata_map: bool,
+}
+
+/// Metadata entry for the JS-based map (window.__CODEPRESS_MAP__)
+#[derive(serde::Serialize, Clone)]
+struct MetadataEntry {
+    #[serde(rename = "cs")]
+    callsite: String,
+    #[serde(rename = "c")]
+    edit_candidates: String,
+    #[serde(rename = "k")]
+    source_kinds: String,
+    #[serde(rename = "s")]
+    symbol_refs: String,
 }
 
 impl CodePressTransform {
@@ -369,6 +402,46 @@ impl CodePressTransform {
             })
             .unwrap_or_default();
 
+        // Skip __CPProvider wrapping for frameworks that handle HMR differently (e.g., Next.js)
+        // Can be explicitly set via config, or auto-detected from framework indicators
+        let skip_provider_wrap = config
+            .remove("skipProviderWrap")
+            .and_then(|v| v.as_bool())
+            .unwrap_or_else(|| {
+                // Auto-detect Next.js: check if next.config.js/ts/mjs exists in cwd
+                let cwd = std::env::current_dir().unwrap_or_default();
+                cwd.join("next.config.js").exists()
+                    || cwd.join("next.config.ts").exists()
+                    || cwd.join("next.config.mjs").exists()
+            });
+
+        // Skip <codepress-marker> wrapper for custom components
+        // When true, attributes are added directly to components (like Babel plugin)
+        // This avoids React reconciliation issues with getLayout pattern in Pages Router
+        // Auto-enabled for Next.js to match Babel plugin behavior
+        let skip_marker_wrap = config
+            .remove("skipMarkerWrap")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(skip_provider_wrap); // If skipping provider, also skip marker
+
+        // Use JS-based metadata map instead of DOM attributes
+        // When true, heavy metadata (edit-candidates, source-kinds, etc.) is stored in
+        // window.__CODEPRESS_MAP__ instead of DOM attributes. Only codepress-data-fp is on DOM.
+        // This avoids React reconciliation issues and keeps DOM clean.
+        // Defaults to true - it's the better approach and works everywhere
+        let use_js_metadata_map = config
+            .remove("useJsMetadataMap")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true); // Default to true - cleaner DOM, no reconciliation issues
+
+        // Auto-inject refresh provider at detected app entry points
+        // Set to false for monorepos or custom entry points where you want manual control
+        // Defaults to true when use_js_metadata_map is true
+        let auto_inject_refresh_provider = config
+            .remove("autoInjectRefreshProvider")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(use_js_metadata_map); // Default to true when using JS metadata map
+
         Self {
             repo_name,
             branch_name,
@@ -397,6 +470,13 @@ impl CodePressTransform {
             import_resolver,
             env_vars,
             inserted_env_map: false,
+            auto_inject_refresh_provider,
+            inserted_refresh_provider: false,
+            skip_provider_wrap,
+            skip_marker_wrap,
+            use_js_metadata_map,
+            metadata_map: HashMap::new(),
+            inserted_metadata_map: false,
         }
     }
 
@@ -530,6 +610,32 @@ impl CodePressTransform {
         false
     }
 
+    /// Detect if this file is an app entry point where we should inject the refresh provider.
+    /// This enables automatic HMR support without users needing to manually add CPRefreshProvider.
+    fn is_app_entry_point(p: &str) -> bool {
+        let s = p.replace('\\', "/");
+
+        // Next.js Pages Router: _app.tsx/_app.js (the main app wrapper)
+        if s.contains("/_app.") && (s.ends_with(".tsx") || s.ends_with(".jsx") || s.ends_with(".ts") || s.ends_with(".js")) {
+            return true;
+        }
+
+        // Next.js App Router: root layout.tsx (app/layout.tsx or src/app/layout.tsx)
+        // Only match the ROOT layout, not nested layouts
+        if (s.ends_with("/app/layout.tsx") || s.ends_with("/app/layout.jsx") ||
+            s.ends_with("/app/layout.ts") || s.ends_with("/app/layout.js")) {
+            return true;
+        }
+
+        // Vite / Create React App: main.tsx, index.tsx in src folder
+        if s.contains("/src/") && (s.ends_with("/main.tsx") || s.ends_with("/main.jsx") ||
+            s.ends_with("/index.tsx") || s.ends_with("/index.jsx")) {
+            return true;
+        }
+
+        false
+    }
+
     fn is_custom_component_name(name: &JSXElementName) -> bool {
         match name {
             JSXElementName::Ident(ident) => ident
@@ -540,6 +646,27 @@ impl CodePressTransform {
                 .unwrap_or(false),
             JSXElementName::JSXMemberExpr(_) | JSXElementName::JSXNamespacedName(_) => true,
             // _ => false,
+        }
+    }
+
+    /// Extract element name as a string for use as React key
+    fn get_element_name_str(name: &JSXElementName) -> Option<String> {
+        match name {
+            JSXElementName::Ident(ident) => Some(ident.sym.to_string()),
+            JSXElementName::JSXMemberExpr(m) => {
+                // For member expressions like Foo.Bar, build "Foo.Bar"
+                fn build_member_name(m: &swc_core::ecma::ast::JSXMemberExpr) -> String {
+                    let obj_str = match &m.obj {
+                        swc_core::ecma::ast::JSXObject::Ident(id) => id.sym.to_string(),
+                        swc_core::ecma::ast::JSXObject::JSXMemberExpr(inner) => build_member_name(inner),
+                    };
+                    format!("{}.{}", obj_str, m.prop.sym)
+                }
+                Some(build_member_name(m))
+            }
+            JSXElementName::JSXNamespacedName(ns) => {
+                Some(format!("{}:{}", ns.ns.sym, ns.name.sym))
+            }
         }
     }
 
@@ -1205,12 +1332,14 @@ impl CodePressTransform {
         kinds.into_iter().collect()
     }
 
-    // Build a <codepress-marker style={{display:'contents'}} ...> wrapper with callsite
+    // Build a <codepress-marker style={{display:'contents'}} key={component_name} ...> wrapper with callsite
+    // The key helps React reconcile markers across page navigations (getLayout pattern)
     fn make_display_contents_wrapper(
         &self,
         filename: &str,
         callsite_open_span: swc_core::common::Span,
         elem_span: swc_core::common::Span,
+        component_key: Option<&str>,
     ) -> JSXElement {
         let mut opening = JSXOpeningElement {
             name: JSXElementName::Ident(cp_ident(&self.wrapper_tag).into()),
@@ -1219,6 +1348,14 @@ impl CodePressTransform {
             type_args: None,
             span: DUMMY_SP,
         };
+        // key={component_name} - helps React reconcile markers across navigations
+        if let Some(key) = component_key {
+            opening.attrs.push(JSXAttrOrSpread::JSXAttr(JSXAttr {
+                span: DUMMY_SP,
+                name: JSXAttrName::Ident(cp_ident_name("key".into())),
+                value: Some(make_jsx_str_attr_value(key.to_string())),
+            }));
+        }
         // style={{display:'contents'}}
         opening.attrs.push(JSXAttrOrSpread::JSXAttr(JSXAttr {
             span: DUMMY_SP,
@@ -1950,6 +2087,453 @@ impl CodePressTransform {
         m.body.insert(insert_at, stmt);
         self.inserted_env_map = true;
     }
+
+    /// Injects window.__CODEPRESS_MAP__ entries at the end of module processing.
+    /// This stores metadata in JS instead of DOM attributes for cleaner React reconciliation.
+    /// Uses Object.assign to merge with existing map (multiple modules may load).
+    fn inject_metadata_map(&mut self, m: &mut Module) {
+        if self.inserted_metadata_map || self.metadata_map.is_empty() || !self.use_js_metadata_map {
+            return;
+        }
+
+        // Build JSON for the metadata entries collected in this module
+        let json = serde_json::to_string(&self.metadata_map).unwrap_or_else(|_| "{}".to_string());
+
+        // Inject: try{if(typeof window!=='undefined'){window.__CODEPRESS_MAP__=Object.assign(window.__CODEPRESS_MAP__||{},{...});}}catch(_){}
+        // Using Object.assign to merge with existing map from other modules
+        let js = format!(
+            "try{{if(typeof window!=='undefined'){{window.__CODEPRESS_MAP__=Object.assign(window.__CODEPRESS_MAP__||{{}},{});}}}}catch(_){{}}",
+            json
+        );
+
+        let stmt = ModuleItem::Stmt(Stmt::Expr(ExprStmt {
+            span: DUMMY_SP,
+            expr: Box::new(Expr::Call(CallExpr {
+                span: DUMMY_SP,
+                callee: Callee::Expr(Box::new(Expr::New(NewExpr {
+                    span: DUMMY_SP,
+                    callee: Box::new(Expr::Ident(cp_ident("Function".into()))),
+                    args: Some(vec![ExprOrSpread {
+                        spread: None,
+                        expr: Box::new(Expr::Lit(Lit::Str(Str {
+                            span: DUMMY_SP,
+                            value: js.into(),
+                            raw: None,
+                        }))),
+                    }]),
+                    type_args: None,
+                    #[cfg(not(feature = "compat_0_87"))]
+                    ctxt: SyntaxContext::empty(),
+                }))),
+                args: vec![],
+                type_args: None,
+                #[cfg(not(feature = "compat_0_87"))]
+                ctxt: SyntaxContext::empty(),
+            })),
+        }));
+
+        // Place AFTER directive prologue (e.g., "use client"; "use strict")
+        let insert_at = self.directive_insert_index(m);
+        m.body.insert(insert_at, stmt);
+        self.inserted_metadata_map = true;
+    }
+
+    /// Injects the CPRefreshProvider at app entry points (when use_js_metadata_map is true).
+    /// This enables automatic HMR without users needing to manually add the provider.
+    ///
+    /// At entry points (_app.tsx, layout.tsx, main.tsx), injects:
+    /// 1. A module-level version counter
+    /// 2. The __CP_triggerRefresh function
+    /// 3. The __CPRefreshProvider component using useSyncExternalStore
+    ///
+    /// The default export is then wrapped with __CPRefreshProvider.
+    fn ensure_refresh_provider_at_entry(&mut self, m: &mut Module) {
+        if self.inserted_refresh_provider || !self.use_js_metadata_map {
+            return;
+        }
+
+        // Get current file path
+        let _ = self.file_from_span(m.span);
+        let file = self.current_file();
+
+        // Only inject at entry points
+        if !Self::is_app_entry_point(&file) {
+            return;
+        }
+
+        // NOTE: We intentionally do NOT skip files with Next.js fonts here.
+        // Unlike the legacy per-component __CPProvider wrapping which could
+        // interfere with font optimization, __CPRefreshProvider only uses
+        // useSyncExternalStore and simply returns children - no context wrapping.
+        // This allows HMR to work even in files that use next/font.
+
+        // Check if file is TSX/JSX (has JSX content)
+        if !file.ends_with(".tsx") && !file.ends_with(".jsx") {
+            return;
+        }
+
+        // import { useSyncExternalStore, createElement } from "react";
+        let import_decl = ModuleItem::ModuleDecl(ModuleDecl::Import(ImportDecl {
+            span: DUMMY_SP,
+            specifiers: vec![
+                ImportSpecifier::Named(ImportNamedSpecifier {
+                    span: DUMMY_SP,
+                    local: cp_ident("useSyncExternalStore".into()),
+                    imported: None,
+                    is_type_only: false,
+                }),
+                ImportSpecifier::Named(ImportNamedSpecifier {
+                    span: DUMMY_SP,
+                    local: cp_ident("createElement".into()),
+                    imported: None,
+                    is_type_only: false,
+                }),
+            ],
+            src: Box::new(Str {
+                span: DUMMY_SP,
+                value: "react".into(),
+                raw: None,
+            }),
+            type_only: false,
+            with: None,
+            #[cfg(not(feature = "compat_0_87"))]
+            phase: ImportPhase::Evaluation,
+        }));
+
+        // Inject runtime setup via new Function() for global trigger setup
+        // This sets up window.__CP_triggerRefresh and the version counter
+        let runtime_js = r#"try{if(typeof window!=='undefined'){window.__cpRefreshVersion=window.__cpRefreshVersion||0;if(!window.__CP_triggerRefresh){window.__CP_triggerRefresh=function(){window.__cpRefreshVersion++;window.dispatchEvent(new CustomEvent('CP_PREVIEW_REFRESH'));};window.__CP_triggerRefresh.__cp_dispatches_preview=true;}}}catch(_){}"#;
+
+        let runtime_stmt = ModuleItem::Stmt(Stmt::Expr(ExprStmt {
+            span: DUMMY_SP,
+            expr: Box::new(Expr::Call(CallExpr {
+                span: DUMMY_SP,
+                callee: Callee::Expr(Box::new(Expr::New(NewExpr {
+                    span: DUMMY_SP,
+                    callee: Box::new(Expr::Ident(cp_ident("Function".into()))),
+                    args: Some(vec![ExprOrSpread {
+                        spread: None,
+                        expr: Box::new(Expr::Lit(Lit::Str(Str {
+                            span: DUMMY_SP,
+                            value: runtime_js.into(),
+                            raw: None,
+                        }))),
+                    }]),
+                    type_args: None,
+                    #[cfg(not(feature = "compat_0_87"))]
+                    ctxt: SyntaxContext::empty(),
+                }))),
+                args: vec![],
+                type_args: None,
+                #[cfg(not(feature = "compat_0_87"))]
+                ctxt: SyntaxContext::empty(),
+            })),
+        }));
+
+        // let __cpRefreshVersion = 0; (module-level version for useSyncExternalStore)
+        let version_decl = ModuleItem::Stmt(Stmt::Decl(Decl::Var(Box::new(VarDecl {
+            span: DUMMY_SP,
+            kind: VarDeclKind::Let,
+            declare: false,
+            decls: vec![VarDeclarator {
+                span: DUMMY_SP,
+                name: Pat::Ident(BindingIdent {
+                    id: cp_ident("__cpRefreshVersion".into()),
+                    type_ann: None,
+                }),
+                init: Some(Box::new(Expr::Lit(Lit::Num(Number {
+                    span: DUMMY_SP,
+                    value: 0.0,
+                    raw: None,
+                })))),
+                definite: false,
+            }],
+            #[cfg(not(feature = "compat_0_87"))]
+            ctxt: SyntaxContext::empty(),
+        }))));
+
+        // function __CPRefreshProvider({ children }) {
+        //   const v = useSyncExternalStore(subscribe, getSnapshot, getServerSnapshot);
+        //   return children;
+        // }
+        // The version change triggers React to re-render all children
+        let provider_fn = {
+            // Build subscribe function: (cb) => { const h = () => { __cpRefreshVersion++; cb(); }; window.addEventListener("CP_PREVIEW_REFRESH", h); return () => window.removeEventListener("CP_PREVIEW_REFRESH", h); }
+            let subscribe_arrow = Expr::Arrow(ArrowExpr {
+                span: DUMMY_SP,
+                params: vec![Pat::Ident(BindingIdent { id: cp_ident("cb".into()), type_ann: None })],
+                body: Box::new(BlockStmtOrExpr::BlockStmt(BlockStmt {
+                    span: DUMMY_SP,
+                    stmts: vec![
+                        // const h = () => { __cpRefreshVersion++; cb(); }
+                        Stmt::Decl(Decl::Var(Box::new(VarDecl {
+                            span: DUMMY_SP,
+                            kind: VarDeclKind::Const,
+                            declare: false,
+                            decls: vec![VarDeclarator {
+                                span: DUMMY_SP,
+                                name: Pat::Ident(BindingIdent { id: cp_ident("h".into()), type_ann: None }),
+                                init: Some(Box::new(Expr::Arrow(ArrowExpr {
+                                    span: DUMMY_SP,
+                                    params: vec![],
+                                    body: Box::new(BlockStmtOrExpr::BlockStmt(BlockStmt {
+                                        span: DUMMY_SP,
+                                        stmts: vec![
+                                            Stmt::Expr(ExprStmt {
+                                                span: DUMMY_SP,
+                                                expr: Box::new(Expr::Update(UpdateExpr {
+                                                    span: DUMMY_SP,
+                                                    op: UpdateOp::PlusPlus,
+                                                    prefix: false,
+                                                    arg: Box::new(Expr::Ident(cp_ident("__cpRefreshVersion".into()))),
+                                                })),
+                                            }),
+                                            Stmt::Expr(ExprStmt {
+                                                span: DUMMY_SP,
+                                                expr: Box::new(Expr::Call(CallExpr {
+                                                    span: DUMMY_SP,
+                                                    callee: Callee::Expr(Box::new(Expr::Ident(cp_ident("cb".into())))),
+                                                    args: vec![],
+                                                    type_args: None,
+                                                    #[cfg(not(feature = "compat_0_87"))]
+                                                    ctxt: SyntaxContext::empty(),
+                                                })),
+                                            }),
+                                        ],
+                                        #[cfg(not(feature = "compat_0_87"))]
+                                        ctxt: SyntaxContext::empty(),
+                                    })),
+                                    is_async: false,
+                                    is_generator: false,
+                                    type_params: None,
+                                    return_type: None,
+                                    #[cfg(not(feature = "compat_0_87"))]
+                                    ctxt: SyntaxContext::empty(),
+                                }))),
+                                definite: false,
+                            }],
+                            #[cfg(not(feature = "compat_0_87"))]
+                            ctxt: SyntaxContext::empty(),
+                        }))),
+                        // window.addEventListener("CP_PREVIEW_REFRESH", h);
+                        Stmt::Expr(ExprStmt {
+                            span: DUMMY_SP,
+                            expr: Box::new(Expr::Call(CallExpr {
+                                span: DUMMY_SP,
+                                callee: Callee::Expr(Box::new(Expr::Member(MemberExpr {
+                                    span: DUMMY_SP,
+                                    obj: Box::new(Expr::Ident(cp_ident("window".into()))),
+                                    prop: MemberProp::Ident(cp_ident_name("addEventListener".into())),
+                                }))),
+                                args: vec![
+                                    ExprOrSpread { spread: None, expr: Box::new(Expr::Lit(Lit::Str(Str { span: DUMMY_SP, value: "CP_PREVIEW_REFRESH".into(), raw: None }))) },
+                                    ExprOrSpread { spread: None, expr: Box::new(Expr::Ident(cp_ident("h".into()))) },
+                                ],
+                                type_args: None,
+                                #[cfg(not(feature = "compat_0_87"))]
+                                ctxt: SyntaxContext::empty(),
+                            })),
+                        }),
+                        // return () => window.removeEventListener("CP_PREVIEW_REFRESH", h);
+                        Stmt::Return(ReturnStmt {
+                            span: DUMMY_SP,
+                            arg: Some(Box::new(Expr::Arrow(ArrowExpr {
+                                span: DUMMY_SP,
+                                params: vec![],
+                                body: Box::new(BlockStmtOrExpr::Expr(Box::new(Expr::Call(CallExpr {
+                                    span: DUMMY_SP,
+                                    callee: Callee::Expr(Box::new(Expr::Member(MemberExpr {
+                                        span: DUMMY_SP,
+                                        obj: Box::new(Expr::Ident(cp_ident("window".into()))),
+                                        prop: MemberProp::Ident(cp_ident_name("removeEventListener".into())),
+                                    }))),
+                                    args: vec![
+                                        ExprOrSpread { spread: None, expr: Box::new(Expr::Lit(Lit::Str(Str { span: DUMMY_SP, value: "CP_PREVIEW_REFRESH".into(), raw: None }))) },
+                                        ExprOrSpread { spread: None, expr: Box::new(Expr::Ident(cp_ident("h".into()))) },
+                                    ],
+                                    type_args: None,
+                                    #[cfg(not(feature = "compat_0_87"))]
+                                    ctxt: SyntaxContext::empty(),
+                                })))),
+                                is_async: false,
+                                is_generator: false,
+                                type_params: None,
+                                return_type: None,
+                                #[cfg(not(feature = "compat_0_87"))]
+                                ctxt: SyntaxContext::empty(),
+                            }))),
+                        }),
+                    ],
+                    #[cfg(not(feature = "compat_0_87"))]
+                    ctxt: SyntaxContext::empty(),
+                })),
+                is_async: false,
+                is_generator: false,
+                type_params: None,
+                return_type: None,
+                #[cfg(not(feature = "compat_0_87"))]
+                ctxt: SyntaxContext::empty(),
+            });
+
+            // () => __cpRefreshVersion
+            let get_snapshot = Expr::Arrow(ArrowExpr {
+                span: DUMMY_SP,
+                params: vec![],
+                body: Box::new(BlockStmtOrExpr::Expr(Box::new(Expr::Ident(cp_ident("__cpRefreshVersion".into()))))),
+                is_async: false,
+                is_generator: false,
+                type_params: None,
+                return_type: None,
+                #[cfg(not(feature = "compat_0_87"))]
+                ctxt: SyntaxContext::empty(),
+            });
+
+            // () => 0 (server snapshot)
+            let get_server_snapshot = Expr::Arrow(ArrowExpr {
+                span: DUMMY_SP,
+                params: vec![],
+                body: Box::new(BlockStmtOrExpr::Expr(Box::new(Expr::Lit(Lit::Num(Number {
+                    span: DUMMY_SP,
+                    value: 0.0,
+                    raw: None,
+                }))))),
+                is_async: false,
+                is_generator: false,
+                type_params: None,
+                return_type: None,
+                #[cfg(not(feature = "compat_0_87"))]
+                ctxt: SyntaxContext::empty(),
+            });
+
+            // const __cpV = useSyncExternalStore(subscribe, getSnapshot, getServerSnapshot);
+            let use_sync_stmt = Stmt::Decl(Decl::Var(Box::new(VarDecl {
+                span: DUMMY_SP,
+                kind: VarDeclKind::Const,
+                declare: false,
+                decls: vec![VarDeclarator {
+                    span: DUMMY_SP,
+                    name: Pat::Ident(BindingIdent { id: cp_ident("__cpV".into()), type_ann: None }),
+                    init: Some(Box::new(Expr::Call(CallExpr {
+                        span: DUMMY_SP,
+                        callee: Callee::Expr(Box::new(Expr::Ident(cp_ident("useSyncExternalStore".into())))),
+                        args: vec![
+                            ExprOrSpread { spread: None, expr: Box::new(subscribe_arrow) },
+                            ExprOrSpread { spread: None, expr: Box::new(get_snapshot) },
+                            ExprOrSpread { spread: None, expr: Box::new(get_server_snapshot) },
+                        ],
+                        type_args: None,
+                        #[cfg(not(feature = "compat_0_87"))]
+                        ctxt: SyntaxContext::empty(),
+                    }))),
+                    definite: false,
+                }],
+                #[cfg(not(feature = "compat_0_87"))]
+                ctxt: SyntaxContext::empty(),
+            })));
+
+            // return createElement("div", { key: __cpV, style: { display: "contents" } }, children);
+            // Using a div with display:contents so it's layout-neutral but has a key to force remount
+            let return_children = Stmt::Return(ReturnStmt {
+                span: DUMMY_SP,
+                arg: Some(Box::new(Expr::Call(CallExpr {
+                    span: DUMMY_SP,
+                    callee: Callee::Expr(Box::new(Expr::Ident(cp_ident("createElement".into())))),
+                    args: vec![
+                        // "div"
+                        ExprOrSpread {
+                            spread: None,
+                            expr: Box::new(Expr::Lit(Lit::Str(Str {
+                                span: DUMMY_SP,
+                                value: "div".into(),
+                                raw: None,
+                            }))),
+                        },
+                        // { key: __cpV, style: { display: "contents" } }
+                        ExprOrSpread {
+                            spread: None,
+                            expr: Box::new(Expr::Object(ObjectLit {
+                                span: DUMMY_SP,
+                                props: vec![
+                                    PropOrSpread::Prop(Box::new(Prop::KeyValue(KeyValueProp {
+                                        key: PropName::Ident(cp_ident_name("key".into())),
+                                        value: Box::new(Expr::Ident(cp_ident("__cpV".into()))),
+                                    }))),
+                                    PropOrSpread::Prop(Box::new(Prop::KeyValue(KeyValueProp {
+                                        key: PropName::Ident(cp_ident_name("style".into())),
+                                        value: Box::new(Expr::Object(ObjectLit {
+                                            span: DUMMY_SP,
+                                            props: vec![
+                                                PropOrSpread::Prop(Box::new(Prop::KeyValue(KeyValueProp {
+                                                    key: PropName::Ident(cp_ident_name("display".into())),
+                                                    value: Box::new(Expr::Lit(Lit::Str(Str {
+                                                        span: DUMMY_SP,
+                                                        value: "contents".into(),
+                                                        raw: None,
+                                                    }))),
+                                                }))),
+                                            ],
+                                        })),
+                                    }))),
+                                ],
+                            })),
+                        },
+                        // children
+                        ExprOrSpread {
+                            spread: None,
+                            expr: Box::new(Expr::Ident(cp_ident("children".into()))),
+                        },
+                    ],
+                    type_args: None,
+                    #[cfg(not(feature = "compat_0_87"))]
+                    ctxt: SyntaxContext::empty(),
+                }))),
+            });
+
+            // function __CPRefreshProvider({ children }) { ... }
+            ModuleItem::Stmt(Stmt::Decl(Decl::Fn(FnDecl {
+                ident: cp_ident("__CPRefreshProvider".into()),
+                declare: false,
+                function: Box::new(Function {
+                    params: vec![Param {
+                        span: DUMMY_SP,
+                        decorators: vec![],
+                        pat: Pat::Object(ObjectPat {
+                            span: DUMMY_SP,
+                            optional: false,
+                            type_ann: None,
+                            props: vec![ObjectPatProp::Assign(AssignPatProp {
+                                span: DUMMY_SP,
+                                key: cp_ident("children".into()).into(),
+                                value: None,
+                            })],
+                        }),
+                    }],
+                    decorators: vec![],
+                    span: DUMMY_SP,
+                    body: Some(BlockStmt {
+                        span: DUMMY_SP,
+                        stmts: vec![use_sync_stmt, return_children],
+                        #[cfg(not(feature = "compat_0_87"))]
+                        ctxt: SyntaxContext::empty(),
+                    }),
+                    is_generator: false,
+                    is_async: false,
+                    type_params: None,
+                    return_type: None,
+                    #[cfg(not(feature = "compat_0_87"))]
+                    ctxt: SyntaxContext::empty(),
+                }),
+            })))
+        };
+
+        // Insert declarations at the top of the module (after directives)
+        let insert_at = self.directive_insert_index(m);
+        m.body.insert(insert_at, provider_fn);
+        m.body.insert(insert_at, version_decl);
+        m.body.insert(insert_at, runtime_stmt);
+        m.body.insert(insert_at, import_decl);
+        self.inserted_refresh_provider = true;
+    }
 }
 
 // -----------------------------------------------------------------------------
@@ -2481,100 +3065,8 @@ fn detect_fetch_like(c: &CallExpr) -> Option<FetchLike> {
 }
 
 // -----------------------------------------------------------------------------
-// Pass 1: main transform (add attributes; DOM wrapper; non-DOM provider)
+// Pass 1: main transform
 // -----------------------------------------------------------------------------
-impl CodePressTransform {
-    // Build provider wrapper: <__CPProvider value={{cs,c,k,fp}}>{node}</__CPProvider>
-    fn wrap_with_provider(&self, node: &mut JSXElement, meta: ProviderMeta) {
-        let provider_name: JSXElementName =
-            JSXElementName::Ident(cp_ident(&self.provider_ident).into());
-
-        let mut opening = JSXOpeningElement {
-            name: provider_name.clone(),
-            attrs: vec![],
-            self_closing: false,
-            type_args: None,
-            span: DUMMY_SP,
-        };
-
-        let obj = Expr::Object(ObjectLit {
-            span: DUMMY_SP,
-            props: vec![
-                PropOrSpread::Prop(Box::new(Prop::KeyValue(KeyValueProp {
-                    key: PropName::Ident(cp_ident_name("cs".into())),
-                    value: Box::new(Expr::Lit(Lit::Str(Str {
-                        span: DUMMY_SP,
-                        value: meta.cs.into(),
-                        raw: None,
-                    }))),
-                }))),
-                PropOrSpread::Prop(Box::new(Prop::KeyValue(KeyValueProp {
-                    key: PropName::Ident(cp_ident_name("c".into())),
-                    value: Box::new(Expr::Lit(Lit::Str(Str {
-                        span: DUMMY_SP,
-                        value: meta.c.into(),
-                        raw: None,
-                    }))),
-                }))),
-                PropOrSpread::Prop(Box::new(Prop::KeyValue(KeyValueProp {
-                    key: PropName::Ident(cp_ident_name("k".into())),
-                    value: Box::new(Expr::Lit(Lit::Str(Str {
-                        span: DUMMY_SP,
-                        value: meta.k.into(),
-                        raw: None,
-                    }))),
-                }))),
-                PropOrSpread::Prop(Box::new(Prop::KeyValue(KeyValueProp {
-                    key: PropName::Ident(cp_ident_name("fp".into())),
-                    value: Box::new(Expr::Lit(Lit::Str(Str {
-                        span: DUMMY_SP,
-                        value: meta.fp.into(),
-                        raw: None,
-                    }))),
-                }))),
-            ],
-        });
-
-        opening.attrs.push(JSXAttrOrSpread::JSXAttr(JSXAttr {
-            span: DUMMY_SP,
-            name: JSXAttrName::Ident(cp_ident_name("value".into())),
-            value: Some(JSXAttrValue::JSXExprContainer(JSXExprContainer {
-                span: DUMMY_SP,
-                expr: JSXExpr::Expr(Box::new(obj)),
-            })),
-        }));
-
-        let mut provider = JSXElement {
-            span: DUMMY_SP,
-            opening,
-            children: vec![],
-            closing: Some(JSXClosingElement {
-                span: DUMMY_SP,
-                name: provider_name,
-            }),
-        };
-
-        let original = std::mem::replace(
-            node,
-            JSXElement {
-                span: DUMMY_SP,
-                opening: JSXOpeningElement {
-                    name: JSXElementName::Ident(cp_ident("div".into()).into()),
-                    attrs: vec![],
-                    self_closing: false,
-                    type_args: None,
-                    span: DUMMY_SP,
-                },
-                children: vec![],
-                closing: None,
-            },
-        );
-        provider
-            .children
-            .push(JSXElementChild::JSXElement(Box::new(original)));
-        *node = provider;
-    }
-}
 
 impl VisitMut for CodePressTransform {
   fn visit_mut_module(&mut self, m: &mut Module) {
@@ -2587,8 +3079,18 @@ impl VisitMut for CodePressTransform {
 
         // Inject env vars into entry points (for HMR support)
         self.ensure_env_map_inline(m);
-        // Inject inline provider once per module (from main branch)
-        self.ensure_provider_inline(m);
+        // Inject inline provider once per module (skip for frameworks that handle HMR differently)
+        // When using JS metadata map, we skip per-component provider wrapping entirely.
+        // HMR is handled by a single root-level provider injected at app entry points.
+        if !self.skip_provider_wrap && !self.use_js_metadata_map {
+            self.ensure_provider_inline(m);
+        }
+        // When using JS metadata map and auto-inject is enabled, inject refresh provider at app entry points
+        // This provides HMR support without wrapping every component
+        // Set autoInjectRefreshProvider: false to disable and manually add CPRefreshProvider
+        if self.use_js_metadata_map && self.auto_inject_refresh_provider {
+            self.ensure_refresh_provider_at_entry(m);
+        }
         // Inject guarded stamping helper
         self.ensure_stamp_helper_inline(m);
 
@@ -2736,6 +3238,8 @@ impl VisitMut for CodePressTransform {
         // Continue other transforms and inject graph (from main branch)
         m.visit_mut_children_with(self);
         self.inject_graph_stmt(m);
+        // Inject metadata map (if using JS-based metadata instead of DOM attributes)
+        self.inject_metadata_map(m);
     }
     fn visit_mut_import_decl(&mut self, n: &mut ImportDecl) {
         let _ = self.file_from_span(n.span);
@@ -3292,188 +3796,44 @@ impl VisitMut for CodePressTransform {
         let symrefs_enc = xor_encode(&symrefs_json);
 
         // Always-on behavior for custom component callsites (excluding skip list):
+        // Skip wrapping for components with props that indicate slot/polymorphic patterns:
+        // - asChild: Radix UI, Ark UI slot composition
+        // - forwardedAs: styled-components polymorphic pattern
+        // These patterns rely on direct parent-child relationships that wrappers would break
+        let has_slot_prop = Self::has_attr_key(&node.opening.attrs, "asChild")
+            || Self::has_attr_key(&node.opening.attrs, "forwardedAs");
         let is_custom_call = !is_host
             && Self::is_custom_component_name(&node.opening.name)
-            && !self.is_skip_component(&node.opening.name);
+            && !self.is_skip_component(&node.opening.name)
+            && !has_slot_prop;
         let block_provider = self.should_block_provider_wrap(&node.opening.name);
 
-        if is_custom_call {
-            // DOM wrapper (display: contents) carrying callsite; we also duplicate metadata on the invocation
-            let mut wrapper =
-                self.make_display_contents_wrapper(&filename, orig_open_span, orig_full_span);
-
-            let mut original = std::mem::replace(
-                node,
-                JSXElement {
-                    span: DUMMY_SP,
-                    opening: JSXOpeningElement {
-                        name: JSXElementName::Ident(cp_ident("div".into()).into()),
-                        attrs: vec![],
-                        self_closing: false,
-                        type_args: None,
-                        span: DUMMY_SP,
-                    },
-                    children: vec![],
-                    closing: None,
-                },
-            );
-
-            // Intentionally avoid duplicating metadata onto the custom component invocation
-            // to prevent interfering with component prop forwarding (e.g., Radix Slot).
-
-            wrapper
-                .children
-                .push(JSXElementChild::JSXElement(Box::new(original)));
-            *node = wrapper;
-
-            // Wrap with __CPProvider unless the component depends on its direct parent/child
-            // identity (e.g., Recharts clones its immediate child chart).
-            if !block_provider {
-                let cs_enc = if let JSXAttrOrSpread::JSXAttr(a) =
-                    self.create_encoded_path_attr(&filename, orig_open_span, Some(orig_full_span))
-                {
-                    jsx_attr_value_to_string(&a.value).unwrap_or_default()
-                } else {
-                    "".into()
-                };
-                // find fp on this node (or recompute)
-                let mut fp_enc = String::new();
-                for a in &node.opening.attrs {
-                    if let JSXAttrOrSpread::JSXAttr(attr) = a {
-                        if let JSXAttrName::Ident(idn) = &attr.name {
-                            if idn.sym.as_ref() == "codepress-data-fp" {
-                                if let Some(val) = jsx_attr_value_to_string(&attr.value) {
-                                    fp_enc = val;
-                                }
-                            }
-                        }
-                    }
-                }
-                let meta = ProviderMeta {
-                    cs: cs_enc,
-                    c: cands_enc.clone(),
-                    k: kinds_enc.clone(),
-                    fp: fp_enc,
-                };
-                self.wrap_with_provider(node, meta);
-            }
-
-            let attrs = &mut node.opening.attrs;
-            // Only annotate the injected wrappers (provider or host wrapper), not the invocation element
-            CodePressTransform::attach_attr_string(attrs, "data-codepress-edit-candidates", cands_enc.clone());
-            CodePressTransform::attach_attr_string(attrs, "data-codepress-source-kinds", kinds_enc.clone());
-            CodePressTransform::attach_attr_string(attrs, "data-codepress-symbol-refs", symrefs_enc.clone());
+        // Generate the fp value (same format as codepress-data-fp attribute)
+        let normalized = self.normalize_repo_relative(&filename);
+        let encoded_path = xor_encode(&normalized);
+        let fp_value = if let Some(line_info) = self.get_line_info(node.opening.span, Some(node.span)) {
+            format!("{}:{}", encoded_path, line_info)
         } else {
-            // Host element → tag directly
-            CodePressTransform::attach_attr_string(
-                &mut node.opening.attrs,
-                "data-codepress-edit-candidates",
-                cands_enc.clone(),
-            );
-            CodePressTransform::attach_attr_string(
-                &mut node.opening.attrs,
-                "data-codepress-source-kinds",
-                kinds_enc.clone(),
-            );
-            CodePressTransform::attach_attr_string(
-                &mut node.opening.attrs,
-                "data-codepress-symbol-refs",
-                symrefs_enc.clone(),
-            );
-            if !Self::has_attr_key(&node.opening.attrs, "data-codepress-callsite") {
-                if let JSXAttrOrSpread::JSXAttr(a) = self.create_encoded_path_attr(
-                    &filename,
-                    node.opening.span,
-                    Some(node.span),
-                ) {
-                    node.opening.attrs.push(JSXAttrOrSpread::JSXAttr(JSXAttr {
-                        span: DUMMY_SP,
-                        name: JSXAttrName::Ident(cp_ident_name("data-codepress-callsite".into())),
-                        value: a.value,
-                    }));
-                }
-            }
-        }
-    }
-}
-
-// -----------------------------------------------------------------------------
-// Pass 2: hoist wrapper attrs to child & remove wrapper
-// -----------------------------------------------------------------------------
-
-struct HoistAndElide {
-    wrapper_tag: String,
-    keys: Vec<String>,
-}
-
-impl HoistAndElide {
-    fn is_wrapper(&self, name: &JSXElementName) -> bool {
-        match name {
-            JSXElementName::Ident(id) => id.sym.as_ref() == self.wrapper_tag,
-            _ => false,
-        }
-    }
-    fn has_attr(attrs: &[JSXAttrOrSpread], key: &str) -> bool {
-        attrs.iter().any(|a| {
-            if let JSXAttrOrSpread::JSXAttr(attr) = a {
-                if let JSXAttrName::Ident(id) = &attr.name {
-                    return id.sym.as_ref() == key;
-                }
-            }
-            false
-        })
-    }
-    fn get_attr_string(attrs: &[JSXAttrOrSpread], key: &str) -> Option<String> {
-        for a in attrs {
-            if let JSXAttrOrSpread::JSXAttr(attr) = a {
-                if let JSXAttrName::Ident(id) = &attr.name {
-                    if id.sym.as_ref() == key {
-                        return jsx_attr_value_to_string(&attr.value);
-                    }
-                }
-            }
-        }
-        None
-    }
-    fn push_attr(attrs: &mut Vec<JSXAttrOrSpread>, key: &str, val: String) {
-        attrs.push(JSXAttrOrSpread::JSXAttr(JSXAttr {
-            span: DUMMY_SP,
-            name: JSXAttrName::Ident(cp_ident_name(key.into())),
-            value: Some(make_jsx_str_attr_value(val)),
-        }));
-    }
-}
-
-impl VisitMut for HoistAndElide {
-    fn visit_mut_jsx_element(&mut self, node: &mut JSXElement) {
-        // Recurse first
-        node.visit_mut_children_with(self);
-
-        // Only wrappers with exactly one JSXElement child
-        if !self.is_wrapper(&node.opening.name) || node.children.len() != 1 {
-            return;
-        }
-
-        let child_el = match node.children.remove(0) {
-            JSXElementChild::JSXElement(boxed) => *boxed,
-            other => {
-                node.children.push(other);
-                return;
-            }
+            encoded_path.clone()
         };
-        let mut child = child_el;
 
-        // Hoist keys if missing on child
-        for key in &self.keys {
-            if !Self::has_attr(&child.opening.attrs, key) {
-                if let Some(val) = Self::get_attr_string(&node.opening.attrs, key) {
-                    Self::push_attr(&mut child.opening.attrs, key, val);
-                }
-            }
-        }
+        // Generate callsite value
+        let callsite_value = format!(
+            "{}:{}-{}",
+            xor_encode(&normalized),
+            self.source_map.as_ref().map(|sm| sm.lookup_char_pos(orig_open_span.lo()).line).unwrap_or(0),
+            self.source_map.as_ref().map(|sm| sm.lookup_char_pos(orig_full_span.hi()).line).unwrap_or(0)
+        );
 
-        // Replace wrapper with child
-        *node = child;
+        // Store metadata in window.__CODEPRESS_MAP__ instead of DOM attributes
+        // Only codepress-data-fp attribute is on DOM (already added above)
+        // Extension reads from JS map, HMR handled by top-level CPRefreshProvider
+        self.metadata_map.insert(fp_value.clone(), MetadataEntry {
+            callsite: callsite_value.clone(),
+            edit_candidates: cands_enc.clone(),
+            source_kinds: kinds_enc.clone(),
+            symbol_refs: symrefs_enc.clone(),
+        });
     }
 }
 
@@ -3503,32 +3863,170 @@ pub fn process_transform(
     // Pass 1: main transform
     program.visit_mut_with(&mut transform);
 
-    // Pass 2: always hoist & elide (remove wrappers, keep data on child callsite)
-    let mut elider = HoistAndElide {
-        wrapper_tag: transform.wrapper_tag.clone(),
-        keys: vec![
-            "data-codepress-edit-candidates".to_string(),
-            "data-codepress-source-kinds".to_string(),
-            "data-codepress-callsite".to_string(),
-            "data-codepress-symbol-refs".to_string(),
-        ],
-    };
-    program.visit_mut_with(&mut elider);
+    // Pass 2: Wrap JSX returns in default exports at entry points with __CPRefreshProvider
+    // This provides automatic HMR support
+    if transform.inserted_refresh_provider {
+        let mut wrapper = RefreshProviderWrapper;
+        program.visit_mut_with(&mut wrapper);
+    }
 
     program
 }
 
 // -----------------------------------------------------------------------------
-// (Optional) tests could go here
+// Pass 3: Wrap default export JSX with __CPRefreshProvider at entry points
 // -----------------------------------------------------------------------------
 
-// Payload carried by the non-DOM provider
-struct ProviderMeta {
-    cs: String,
-    c: String,
-    k: String,
-    fp: String,
+struct RefreshProviderWrapper;
+
+impl RefreshProviderWrapper {
+    /// Wrap a JSX element with <__CPRefreshProvider>...</__CPRefreshProvider>
+    fn wrap_with_refresh_provider(jsx: JSXElement) -> JSXElement {
+        let provider_name = JSXElementName::Ident(cp_ident("__CPRefreshProvider".into()).into());
+        JSXElement {
+            span: DUMMY_SP,
+            opening: JSXOpeningElement {
+                name: provider_name.clone(),
+                attrs: vec![],
+                self_closing: false,
+                type_args: None,
+                span: DUMMY_SP,
+            },
+            children: vec![JSXElementChild::JSXElement(Box::new(jsx))],
+            closing: Some(JSXClosingElement {
+                span: DUMMY_SP,
+                name: provider_name,
+            }),
+        }
+    }
+
+    /// Check if this JSX element is already wrapped with __CPRefreshProvider
+    fn is_already_wrapped(jsx: &JSXElement) -> bool {
+        match &jsx.opening.name {
+            JSXElementName::Ident(id) => id.sym.as_ref() == "__CPRefreshProvider",
+            _ => false,
+        }
+    }
 }
+
+impl VisitMut for RefreshProviderWrapper {
+    fn visit_mut_module(&mut self, m: &mut Module) {
+        // Find the default export and wrap its JSX return
+        for item in &mut m.body {
+            match item {
+                // export default function X() { ... }
+                ModuleItem::ModuleDecl(ModuleDecl::ExportDefaultDecl(ExportDefaultDecl {
+                    decl: DefaultDecl::Fn(fn_expr),
+                    ..
+                })) => {
+                    if let Some(body) = &mut fn_expr.function.body {
+                        self.wrap_jsx_returns(body);
+                    }
+                }
+                // export default () => ...
+                ModuleItem::ModuleDecl(ModuleDecl::ExportDefaultExpr(ExportDefaultExpr {
+                    expr,
+                    ..
+                })) => {
+                    match &mut **expr {
+                        Expr::Arrow(arrow) => {
+                            match &mut *arrow.body {
+                                BlockStmtOrExpr::BlockStmt(body) => {
+                                    self.wrap_jsx_returns(body);
+                                }
+                                BlockStmtOrExpr::Expr(expr) => {
+                                    // Arrow with implicit return: () => <JSX/>
+                                    if let Expr::JSXElement(jsx) = &**expr {
+                                        if !Self::is_already_wrapped(jsx) {
+                                            let wrapped = Self::wrap_with_refresh_provider(*jsx.clone());
+                                            **expr = Expr::JSXElement(Box::new(wrapped));
+                                        }
+                                    }
+                                    if let Expr::Paren(paren) = &**expr {
+                                        if let Expr::JSXElement(jsx) = &*paren.expr {
+                                            if !Self::is_already_wrapped(jsx) {
+                                                let wrapped = Self::wrap_with_refresh_provider(*jsx.clone());
+                                                **expr = Expr::Paren(ParenExpr {
+                                                    span: paren.span,
+                                                    expr: Box::new(Expr::JSXElement(Box::new(wrapped))),
+                                                });
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        Expr::Fn(fn_expr) => {
+                            if let Some(body) = &mut fn_expr.function.body {
+                                self.wrap_jsx_returns(body);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
+impl RefreshProviderWrapper {
+    /// Find return statements with JSX and wrap them
+    fn wrap_jsx_returns(&mut self, body: &mut BlockStmt) {
+        for stmt in &mut body.stmts {
+            self.visit_mut_stmt(stmt);
+        }
+    }
+
+    fn visit_mut_stmt(&mut self, stmt: &mut Stmt) {
+        match stmt {
+            Stmt::Return(ret) => {
+                if let Some(arg) = &mut ret.arg {
+                    self.wrap_jsx_expr(arg);
+                }
+            }
+            Stmt::If(if_stmt) => {
+                self.visit_mut_stmt(&mut if_stmt.cons);
+                if let Some(alt) = &mut if_stmt.alt {
+                    self.visit_mut_stmt(alt);
+                }
+            }
+            Stmt::Block(block) => {
+                for s in &mut block.stmts {
+                    self.visit_mut_stmt(s);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn wrap_jsx_expr(&mut self, expr: &mut Box<Expr>) {
+        match &mut **expr {
+            Expr::JSXElement(jsx) => {
+                if !Self::is_already_wrapped(jsx) {
+                    let wrapped = Self::wrap_with_refresh_provider(*jsx.clone());
+                    **expr = Expr::JSXElement(Box::new(wrapped));
+                }
+            }
+            Expr::Paren(paren) => {
+                if let Expr::JSXElement(jsx) = &*paren.expr {
+                    if !Self::is_already_wrapped(jsx) {
+                        let wrapped = Self::wrap_with_refresh_provider(*jsx.clone());
+                        paren.expr = Box::new(Expr::JSXElement(Box::new(wrapped)));
+                    }
+                }
+            }
+            Expr::Cond(cond) => {
+                self.wrap_jsx_expr(&mut cond.cons);
+                self.wrap_jsx_expr(&mut cond.alt);
+            }
+            _ => {}
+        }
+    }
+}
+
+// -----------------------------------------------------------------------------
+// (Optional) tests could go here
 // -----------------------------------------------------------------------------
 // Extra types/helpers for symbol-refs & literal index
 // -----------------------------------------------------------------------------

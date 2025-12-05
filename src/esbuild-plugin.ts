@@ -1,6 +1,9 @@
 /**
- * CodePress esbuild plugin - Injects tracking attributes and provider wrappers into JSX
- * Replaces the Rust SWC plugin with a pure JavaScript implementation
+ * CodePress esbuild plugin - Injects tracking attributes into JSX
+ *
+ * This plugin adds codepress-data-fp attributes to JSX elements for element identification.
+ * HMR is handled separately by a single root-level provider (CPRefreshProvider) that users
+ * add to their app entry point, rather than wrapping every component.
  */
 
 import * as fs from 'fs';
@@ -81,65 +84,6 @@ function injectJSXAttributes(source: string, encoded: string, repoName?: string,
   return output.join('\n');
 }
 
-/**
- * Wrap exported components with __CPProvider
- */
-function wrapWithProvider(source: string): string {
-  // Find default export component
-  const defaultExportMatch = source.match(/export\s+default\s+function\s+(\w+)/);
-  if (!defaultExportMatch) {
-    // Try: export default ComponentName;
-    const namedMatch = source.match(/export\s+default\s+(\w+);/);
-    if (!namedMatch) return source;
-  }
-
-  const componentName = defaultExportMatch?.[1] || source.match(/export\s+default\s+(\w+);/)?.[1];
-  if (!componentName) return source;
-
-  // Inject provider wrapper code at the top
-  const providerCode = `
-import { useSyncExternalStore } from 'react';
-
-// Module-level version counter for HMR
-let __cpvVersion = 0;
-
-// Provider component that wraps the default export
-function __CPProvider({ value, children }: { value?: any; children: React.ReactNode }) {
-  const __cpv = useSyncExternalStore(
-    (cb) => {
-      const h = () => {
-        __cpvVersion = __cpvVersion + 1;
-        cb();
-      };
-      if (typeof window !== 'undefined') {
-        window.addEventListener("CP_PREVIEW_REFRESH", h);
-        return () => { window.removeEventListener("CP_PREVIEW_REFRESH", h); };
-      }
-      return () => {};
-    },
-    () => __cpvVersion,
-    () => 0
-  );
-
-  return <CPX.Provider value={value} key={__cpv}>{children}</CPX.Provider>;
-}
-
-// Context for passing data through provider
-const CPX = { Provider: ({ value, children }: any) => children };
-`;
-
-  // Wrap the default export
-  const wrappedSource = source.replace(
-    new RegExp(`export\\s+default\\s+${componentName}`),
-    `const __Original${componentName} = ${componentName};
-export default function ${componentName}(props: any) {
-  return <__CPProvider><__Original${componentName} {...props} /></__CPProvider>;
-}`
-  );
-
-  return providerCode + '\n' + wrappedSource;
-}
-
 export function createCodePressPlugin(options: CodePressPluginOptions = {}): Plugin {
   const {
     repo_name = '',
@@ -166,13 +110,9 @@ export function createCodePressPlugin(options: CodePressPluginOptions = {}): Plu
             return { contents: source, loader: 'tsx' };
           }
 
-          // Step 1: Inject JSX attributes
-          let transformed = injectJSXAttributes(source, encoded, repo_name, branch_name);
-
-          // Step 2: Wrap with provider (for default exports)
-          if (transformed.includes('export default')) {
-            transformed = wrapWithProvider(transformed);
-          }
+          // Inject JSX attributes (codepress-data-fp)
+          // HMR is handled by a root-level CPRefreshProvider, not per-component wrapping
+          const transformed = injectJSXAttributes(source, encoded, repo_name, branch_name);
 
           return {
             contents: transformed,

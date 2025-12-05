@@ -129,7 +129,7 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-          key: ${{ runner.os }}-cargo-${{ matrix.band }}-${{ hashFiles('codepress-swc-plugin/src/**') }}
+          key: ${{ runner.os }}-cargo-${{ matrix.band }}-${{ hashFiles('codepress-swc-plugin/src/**', 'scripts/build-swc.mjs') }}
           restore-keys: |
             ${{ runner.os }}-cargo-${{ matrix.band }}-
             ${{ runner.os }}-cargo-
@@ -141,6 +141,15 @@ jobs:
         run: node scripts/build-swc.mjs
         env:
           BAND: ${{ matrix.band }}
+
+      - name: Verify WASM build
+        run: |
+          echo "Built WASM files:"
+          ls -la swc/*.wasm
+          for f in swc/*.wasm; do
+            echo "MD5 of $f:"
+            md5sum "$f" || md5 "$f"
+          done
 
       - name: Upload WASM artifact
         uses: actions/upload-artifact@v4
