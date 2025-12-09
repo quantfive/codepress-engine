@@ -35,8 +35,9 @@ function xorEncodePath(input: string): string {
 
 /**
  * Inject codepress-data-fp attributes into JSX opening tags
+ * Note: repo/branch config is now injected via window.__CODEPRESS_CONFIG__ at module level
  */
-function injectJSXAttributes(source: string, encoded: string, repoName?: string, branchName?: string): string {
+function injectJSXAttributes(source: string, encoded: string): string {
   const lines = source.split('\n');
   const output: string[] = [];
   let lineNum = 0;
@@ -60,19 +61,9 @@ function injectJSXAttributes(source: string, encoded: string, repoName?: string,
     const modifiedLine = line.replace(
       /(^|\s+|[\s{(>]|return\s+|=\s*|:\s*|\?\s*)<([A-Z][\w.]*|[a-z]+)([\s\/>])/g,
       (match, before, tagName, after) => {
-        // Build attributes
+        // Build attributes - only codepress-data-fp, repo/branch are injected via window.__CODEPRESS_CONFIG__
         const attrs: string[] = [];
         attrs.push(`codepress-data-fp="${encoded}:${lineNum}-${lineNum}"`);
-
-        // Add repo/branch info to container elements (divs, sections, etc.)
-        if (/^[a-z]/.test(tagName)) {
-          if (repoName) {
-            attrs.push(`codepress-github-repo-name="${repoName}"`);
-          }
-          if (branchName) {
-            attrs.push(`codepress-github-branch="${branchName}"`);
-          }
-        }
 
         return `${before}<${tagName} ${attrs.join(' ')}${after}`;
       }
@@ -112,10 +103,19 @@ export function createCodePressPlugin(options: CodePressPluginOptions = {}): Plu
 
           // Inject JSX attributes (codepress-data-fp)
           // HMR is handled by a root-level CPRefreshProvider, not per-component wrapping
-          const transformed = injectJSXAttributes(source, encoded, repo_name, branch_name);
+          const transformed = injectJSXAttributes(source, encoded);
+
+          // Inject config (repo/branch) into window.__CODEPRESS_CONFIG__ at module level
+          // This keeps the DOM clean instead of polluting HTML with attributes
+          let configPrefix = '';
+          if (repo_name) {
+            const escapedRepo = repo_name.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+            const escapedBranch = (branch_name || 'main').replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+            configPrefix = `try{if(typeof window!=='undefined'){window.__CODEPRESS_CONFIG__=Object.assign(window.__CODEPRESS_CONFIG__||{},{repo:"${escapedRepo}",branch:"${escapedBranch}"});}}catch(_){}\n`;
+          }
 
           return {
-            contents: transformed,
+            contents: configPrefix + transformed,
             loader: 'tsx',
           };
         } catch (err) {

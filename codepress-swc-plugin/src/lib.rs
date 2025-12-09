@@ -262,6 +262,8 @@ pub struct CodePressTransform {
     use_js_metadata_map: bool,
     metadata_map: HashMap<String, MetadataEntry>,
     inserted_metadata_map: bool,
+    // Track if config (repo/branch) has been injected to window.__CODEPRESS_CONFIG__
+    inserted_config: bool,
 }
 
 /// Metadata entry for the JS-based map (window.__CODEPRESS_MAP__)
@@ -477,6 +479,7 @@ impl CodePressTransform {
             use_js_metadata_map,
             metadata_map: HashMap::new(),
             inserted_metadata_map: false,
+            inserted_config: false,
         }
     }
 
@@ -937,47 +940,9 @@ impl CodePressTransform {
         })
     }
 
-    fn create_repo_attr(&self) -> Option<JSXAttrOrSpread> {
-        self.repo_name.as_ref().map(|repo| {
-            JSXAttrOrSpread::JSXAttr(JSXAttr {
-                span: DUMMY_SP,
-                name: JSXAttrName::Ident(cp_ident_name("codepress-github-repo-name".into())),
-                value: Some(make_jsx_str_attr_value(repo.clone())),
-            })
-        })
-    }
-
-    fn create_branch_attr(&self) -> Option<JSXAttrOrSpread> {
-        self.branch_name.as_ref().map(|branch| {
-            JSXAttrOrSpread::JSXAttr(JSXAttr {
-                span: DUMMY_SP,
-                name: JSXAttrName::Ident(cp_ident_name("codepress-github-branch".into())),
-                value: Some(make_jsx_str_attr_value(branch.clone())),
-            })
-        })
-    }
-
-    fn has_repo_attribute(&self, attrs: &[JSXAttrOrSpread]) -> bool {
-        attrs.iter().any(|attr| {
-            if let JSXAttrOrSpread::JSXAttr(jsx_attr) = attr {
-                if let JSXAttrName::Ident(ident) = &jsx_attr.name {
-                    return ident.sym.as_ref() == "codepress-github-repo-name";
-                }
-            }
-            false
-        })
-    }
-
-    fn has_branch_attribute(&self, attrs: &[JSXAttrOrSpread]) -> bool {
-        attrs.iter().any(|attr| {
-            if let JSXAttrOrSpread::JSXAttr(jsx_attr) = attr {
-                if let JSXAttrName::Ident(ident) = &jsx_attr.name {
-                    return ident.sym.as_ref() == "codepress-github-branch";
-                }
-            }
-            false
-        })
-    }
+    // NOTE: create_repo_attr, create_branch_attr, has_repo_attribute, has_branch_attribute
+    // were removed - repo/branch info is now injected via window.__CODEPRESS_CONFIG__
+    // in inject_config() instead of as HTML attributes.
 
     // ---------- binding collection & tracing ----------
 
@@ -2138,6 +2103,64 @@ impl CodePressTransform {
         self.inserted_metadata_map = true;
     }
 
+    /// Injects window.__CODEPRESS_CONFIG__ with repo and branch info.
+    /// This stores config in JS instead of as HTML attributes (which pollutes the DOM).
+    /// Only injected once per build (uses static flag to prevent duplicates across modules).
+    fn inject_config(&mut self, m: &mut Module) {
+        // Skip if already injected (either in this module or globally)
+        if self.inserted_config || GLOBAL_ATTRIBUTES_ADDED.load(Ordering::Relaxed) {
+            return;
+        }
+
+        // Only inject if we have repo info
+        let repo = match &self.repo_name {
+            Some(r) => r.clone(),
+            None => return,
+        };
+
+        let branch = self.branch_name.clone().unwrap_or_else(|| "main".to_string());
+
+        // Build the config object: window.__CODEPRESS_CONFIG__ = { repo: "...", branch: "..." }
+        // Uses Object.assign to avoid overwriting if somehow multiple modules try to set it
+        let js = format!(
+            "try{{if(typeof window!=='undefined'){{window.__CODEPRESS_CONFIG__=Object.assign(window.__CODEPRESS_CONFIG__||{{}},{{repo:\"{}\",branch:\"{}\"}});}}}}catch(_){{}}",
+            repo.replace('\\', "\\\\").replace('"', "\\\""),
+            branch.replace('\\', "\\\\").replace('"', "\\\"")
+        );
+
+        let stmt = ModuleItem::Stmt(Stmt::Expr(ExprStmt {
+            span: DUMMY_SP,
+            expr: Box::new(Expr::Call(CallExpr {
+                span: DUMMY_SP,
+                callee: Callee::Expr(Box::new(Expr::New(NewExpr {
+                    span: DUMMY_SP,
+                    callee: Box::new(Expr::Ident(cp_ident("Function".into()))),
+                    args: Some(vec![ExprOrSpread {
+                        spread: None,
+                        expr: Box::new(Expr::Lit(Lit::Str(Str {
+                            span: DUMMY_SP,
+                            value: js.into(),
+                            raw: None,
+                        }))),
+                    }]),
+                    type_args: None,
+                    #[cfg(not(feature = "compat_0_87"))]
+                    ctxt: SyntaxContext::empty(),
+                }))),
+                args: vec![],
+                type_args: None,
+                #[cfg(not(feature = "compat_0_87"))]
+                ctxt: SyntaxContext::empty(),
+            })),
+        }));
+
+        // Place AFTER directive prologue (e.g., "use client"; "use strict")
+        let insert_at = self.directive_insert_index(m);
+        m.body.insert(insert_at, stmt);
+        self.inserted_config = true;
+        GLOBAL_ATTRIBUTES_ADDED.store(true, Ordering::Relaxed);
+    }
+
     /// Injects the CPRefreshProvider at app entry points (when use_js_metadata_map is true).
     /// This enables automatic HMR without users needing to manually add the provider.
     ///
@@ -3240,6 +3263,8 @@ impl VisitMut for CodePressTransform {
         self.inject_graph_stmt(m);
         // Inject metadata map (if using JS-based metadata instead of DOM attributes)
         self.inject_metadata_map(m);
+        // Inject config (repo/branch) into window.__CODEPRESS_CONFIG__ (cleaner than DOM attributes)
+        self.inject_config(m);
     }
     fn visit_mut_import_decl(&mut self, n: &mut ImportDecl) {
         let _ = self.file_from_span(n.span);
@@ -3686,26 +3711,8 @@ impl VisitMut for CodePressTransform {
             }
         }
 
-        // Root repo/branch once
-        if self.repo_name.is_some() && !GLOBAL_ATTRIBUTES_ADDED.load(Ordering::Relaxed) {
-            let element_name = match &node.opening.name {
-                JSXElementName::Ident(ident) => ident.sym.as_ref(),
-                _ => "",
-            };
-            if matches!(element_name, "html" | "body" | "div") {
-                if !self.has_repo_attribute(&node.opening.attrs) {
-                    if let Some(repo_attr) = self.create_repo_attr() {
-                        node.opening.attrs.push(repo_attr);
-                    }
-                }
-                if !self.has_branch_attribute(&node.opening.attrs) {
-                    if let Some(branch_attr) = self.create_branch_attr() {
-                        node.opening.attrs.push(branch_attr);
-                    }
-                }
-                GLOBAL_ATTRIBUTES_ADDED.store(true, Ordering::Relaxed);
-            }
-        }
+        // NOTE: repo/branch info is now injected via window.__CODEPRESS_CONFIG__ in inject_config()
+        // instead of as HTML attributes, to avoid polluting the DOM.
 
         // Host vs custom
         let is_host = matches!(
