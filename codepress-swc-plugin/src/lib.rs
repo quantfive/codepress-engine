@@ -3962,8 +3962,7 @@ impl VisitMut for RefreshProviderWrapper {
                                     init: Some(Box::new(Expr::Arrow(arrow))),
                                     definite: false,
                                 }],
-                                #[cfg(feature = "compat_0_87")]
-                                ctxt: swc_core::common::SyntaxContext::empty(),
+                                // ctxt field only exists in newer SWC versions (not compat_0_87)
                                 #[cfg(not(feature = "compat_0_87"))]
                                 ctxt: SyntaxContext::empty(),
                             }))));
@@ -4009,8 +4008,7 @@ impl VisitMut for RefreshProviderWrapper {
                                     init: Some(Box::new(Expr::Ident(ident))),
                                     definite: false,
                                 }],
-                                #[cfg(feature = "compat_0_87")]
-                                ctxt: swc_core::common::SyntaxContext::empty(),
+                                // ctxt field only exists in newer SWC versions (not compat_0_87)
                                 #[cfg(not(feature = "compat_0_87"))]
                                 ctxt: SyntaxContext::empty(),
                             }))));
@@ -4115,8 +4113,7 @@ impl RefreshProviderWrapper {
                 body: Some(BlockStmt {
                     span: DUMMY_SP,
                     stmts: vec![return_stmt],
-                    #[cfg(feature = "compat_0_87")]
-                    ctxt: swc_core::common::SyntaxContext::empty(),
+                    // ctxt field only exists in newer SWC versions (not compat_0_87)
                     #[cfg(not(feature = "compat_0_87"))]
                     ctxt: SyntaxContext::empty(),
                 }),
@@ -4124,8 +4121,7 @@ impl RefreshProviderWrapper {
                 is_async: false,
                 type_params: None,
                 return_type: None,
-                #[cfg(feature = "compat_0_87")]
-                ctxt: swc_core::common::SyntaxContext::empty(),
+                // ctxt field only exists in newer SWC versions (not compat_0_87)
                 #[cfg(not(feature = "compat_0_87"))]
                 ctxt: SyntaxContext::empty(),
             }),
