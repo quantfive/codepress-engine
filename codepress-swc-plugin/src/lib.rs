@@ -3881,16 +3881,202 @@ pub fn process_transform(
 }
 
 // -----------------------------------------------------------------------------
-// Pass 3: Wrap default export JSX with __CPRefreshProvider at entry points
+// Pass 3: Wrap default export component with __CPRefreshProvider at entry points
 // -----------------------------------------------------------------------------
+//
+// Instead of trying to find and wrap return statements (which has many edge cases),
+// we wrap the entire default export component from the outside:
+//
+// Before:
+//   export default function App({ Component, pageProps }) {
+//     const getLayout = Component.getLayout ?? ((page) => page);
+//     return getLayout(<Component {...pageProps} />);
+//   }
+//
+// After:
+//   function __CP_OriginalApp({ Component, pageProps }) {
+//     const getLayout = Component.getLayout ?? ((page) => page);
+//     return getLayout(<Component {...pageProps} />);
+//   }
+//   export default function App(__CP_props) {
+//     return <__CPRefreshProvider><__CP_OriginalApp {...__CP_props} /></__CPRefreshProvider>;
+//   }
+//
+// This approach:
+// - Doesn't need to understand component internals
+// - Works with getLayout, fragments, conditionals, etc.
+// - Has no edge cases around return statement patterns
 
 struct RefreshProviderWrapper;
 
+impl VisitMut for RefreshProviderWrapper {
+    fn visit_mut_module(&mut self, m: &mut Module) {
+        let mut new_items: Vec<ModuleItem> = Vec::new();
+        let mut found_default_export = false;
+
+        for item in m.body.drain(..) {
+            match item {
+                // export default function App(...) { ... }
+                ModuleItem::ModuleDecl(ModuleDecl::ExportDefaultDecl(ExportDefaultDecl {
+                    span,
+                    decl: DefaultDecl::Fn(fn_expr),
+                })) => {
+                    found_default_export = true;
+
+                    // Extract the original function as __CP_OriginalApp
+                    let original_fn = ModuleItem::Stmt(Stmt::Decl(Decl::Fn(FnDecl {
+                        ident: cp_ident("__CP_OriginalApp".into()),
+                        declare: false,
+                        function: fn_expr.function,
+                    })));
+                    new_items.push(original_fn);
+
+                    // Create wrapper: export default function App(__CP_props) {
+                    //   return <__CPRefreshProvider><__CP_OriginalApp {...__CP_props} /></__CPRefreshProvider>;
+                    // }
+                    let wrapper = Self::create_wrapper_default_export(span);
+                    new_items.push(wrapper);
+                }
+
+                // export default () => { ... } or export default function(...) { ... }
+                ModuleItem::ModuleDecl(ModuleDecl::ExportDefaultExpr(ExportDefaultExpr {
+                    span,
+                    expr,
+                })) => {
+                    match *expr {
+                        // Arrow function: export default () => { ... }
+                        Expr::Arrow(arrow) => {
+                            found_default_export = true;
+
+                            // Create: const __CP_OriginalApp = () => { ... }
+                            let original_decl = ModuleItem::Stmt(Stmt::Decl(Decl::Var(Box::new(VarDecl {
+                                span: DUMMY_SP,
+                                kind: VarDeclKind::Const,
+                                declare: false,
+                                decls: vec![VarDeclarator {
+                                    span: DUMMY_SP,
+                                    name: Pat::Ident(BindingIdent {
+                                        id: cp_ident("__CP_OriginalApp".into()),
+                                        type_ann: None,
+                                    }),
+                                    init: Some(Box::new(Expr::Arrow(arrow))),
+                                    definite: false,
+                                }],
+                                #[cfg(feature = "compat_0_87")]
+                                ctxt: swc_core::common::SyntaxContext::empty(),
+                                #[cfg(not(feature = "compat_0_87"))]
+                                ctxt: SyntaxContext::empty(),
+                            }))));
+                            new_items.push(original_decl);
+
+                            // Create wrapper export
+                            let wrapper = Self::create_wrapper_default_export(span);
+                            new_items.push(wrapper);
+                        }
+
+                        // Anonymous function: export default function(...) { ... }
+                        Expr::Fn(fn_expr) => {
+                            found_default_export = true;
+
+                            // Create: function __CP_OriginalApp(...) { ... }
+                            let original_fn = ModuleItem::Stmt(Stmt::Decl(Decl::Fn(FnDecl {
+                                ident: cp_ident("__CP_OriginalApp".into()),
+                                declare: false,
+                                function: fn_expr.function,
+                            })));
+                            new_items.push(original_fn);
+
+                            // Create wrapper export
+                            let wrapper = Self::create_wrapper_default_export(span);
+                            new_items.push(wrapper);
+                        }
+
+                        // Identifier: export default App (where App is defined elsewhere)
+                        Expr::Ident(ident) => {
+                            found_default_export = true;
+
+                            // Create: const __CP_OriginalApp = App;
+                            let original_decl = ModuleItem::Stmt(Stmt::Decl(Decl::Var(Box::new(VarDecl {
+                                span: DUMMY_SP,
+                                kind: VarDeclKind::Const,
+                                declare: false,
+                                decls: vec![VarDeclarator {
+                                    span: DUMMY_SP,
+                                    name: Pat::Ident(BindingIdent {
+                                        id: cp_ident("__CP_OriginalApp".into()),
+                                        type_ann: None,
+                                    }),
+                                    init: Some(Box::new(Expr::Ident(ident))),
+                                    definite: false,
+                                }],
+                                #[cfg(feature = "compat_0_87")]
+                                ctxt: swc_core::common::SyntaxContext::empty(),
+                                #[cfg(not(feature = "compat_0_87"))]
+                                ctxt: SyntaxContext::empty(),
+                            }))));
+                            new_items.push(original_decl);
+
+                            // Create wrapper export
+                            let wrapper = Self::create_wrapper_default_export(span);
+                            new_items.push(wrapper);
+                        }
+
+                        // Other expressions - keep as-is (shouldn't happen for _app)
+                        other => {
+                            new_items.push(ModuleItem::ModuleDecl(ModuleDecl::ExportDefaultExpr(
+                                ExportDefaultExpr {
+                                    span,
+                                    expr: Box::new(other),
+                                },
+                            )));
+                        }
+                    }
+                }
+
+                // Keep all other items as-is
+                other => {
+                    new_items.push(other);
+                }
+            }
+        }
+
+        // Only proceed if we found and wrapped a default export
+        if !found_default_export {
+            // Restore items if nothing was wrapped
+            m.body = new_items;
+            return;
+        }
+
+        m.body = new_items;
+    }
+}
+
 impl RefreshProviderWrapper {
-    /// Wrap a JSX element with <__CPRefreshProvider>...</__CPRefreshProvider>
-    fn wrap_with_refresh_provider(jsx: JSXElement) -> JSXElement {
+    /// Create the wrapper default export:
+    /// export default function App(__CP_props) {
+    ///   return <__CPRefreshProvider><__CP_OriginalApp {...__CP_props} /></__CPRefreshProvider>;
+    /// }
+    fn create_wrapper_default_export(span: swc_core::common::Span) -> ModuleItem {
+        // Build: <__CP_OriginalApp {...__CP_props} />
+        let original_component = JSXElement {
+            span: DUMMY_SP,
+            opening: JSXOpeningElement {
+                name: JSXElementName::Ident(cp_ident("__CP_OriginalApp".into()).into()),
+                attrs: vec![JSXAttrOrSpread::SpreadElement(SpreadElement {
+                    dot3_token: DUMMY_SP,
+                    expr: Box::new(Expr::Ident(cp_ident("__CP_props".into()))),
+                })],
+                self_closing: true,
+                type_args: None,
+                span: DUMMY_SP,
+            },
+            children: vec![],
+            closing: None,
+        };
+
+        // Build: <__CPRefreshProvider><__CP_OriginalApp {...__CP_props} /></__CPRefreshProvider>
         let provider_name = JSXElementName::Ident(cp_ident("__CPRefreshProvider".into()).into());
-        JSXElement {
+        let wrapped_jsx = JSXElement {
             span: DUMMY_SP,
             opening: JSXOpeningElement {
                 name: provider_name.clone(),
@@ -3899,136 +4085,57 @@ impl RefreshProviderWrapper {
                 type_args: None,
                 span: DUMMY_SP,
             },
-            children: vec![JSXElementChild::JSXElement(Box::new(jsx))],
+            children: vec![JSXElementChild::JSXElement(Box::new(original_component))],
             closing: Some(JSXClosingElement {
                 span: DUMMY_SP,
                 name: provider_name,
             }),
-        }
-    }
+        };
 
-    /// Check if this JSX element is already wrapped with __CPRefreshProvider
-    fn is_already_wrapped(jsx: &JSXElement) -> bool {
-        match &jsx.opening.name {
-            JSXElementName::Ident(id) => id.sym.as_ref() == "__CPRefreshProvider",
-            _ => false,
-        }
-    }
-}
+        // Build: return <__CPRefreshProvider>...</__CPRefreshProvider>;
+        let return_stmt = Stmt::Return(ReturnStmt {
+            span: DUMMY_SP,
+            arg: Some(Box::new(Expr::JSXElement(Box::new(wrapped_jsx)))),
+        });
 
-impl VisitMut for RefreshProviderWrapper {
-    fn visit_mut_module(&mut self, m: &mut Module) {
-        // Find the default export and wrap its JSX return
-        for item in &mut m.body {
-            match item {
-                // export default function X() { ... }
-                ModuleItem::ModuleDecl(ModuleDecl::ExportDefaultDecl(ExportDefaultDecl {
-                    decl: DefaultDecl::Fn(fn_expr),
-                    ..
-                })) => {
-                    if let Some(body) = &mut fn_expr.function.body {
-                        self.wrap_jsx_returns(body);
-                    }
-                }
-                // export default () => ...
-                ModuleItem::ModuleDecl(ModuleDecl::ExportDefaultExpr(ExportDefaultExpr {
-                    expr,
-                    ..
-                })) => {
-                    match &mut **expr {
-                        Expr::Arrow(arrow) => {
-                            match &mut *arrow.body {
-                                BlockStmtOrExpr::BlockStmt(body) => {
-                                    self.wrap_jsx_returns(body);
-                                }
-                                BlockStmtOrExpr::Expr(expr) => {
-                                    // Arrow with implicit return: () => <JSX/>
-                                    if let Expr::JSXElement(jsx) = &**expr {
-                                        if !Self::is_already_wrapped(jsx) {
-                                            let wrapped = Self::wrap_with_refresh_provider(*jsx.clone());
-                                            **expr = Expr::JSXElement(Box::new(wrapped));
-                                        }
-                                    }
-                                    if let Expr::Paren(paren) = &**expr {
-                                        if let Expr::JSXElement(jsx) = &*paren.expr {
-                                            if !Self::is_already_wrapped(jsx) {
-                                                let wrapped = Self::wrap_with_refresh_provider(*jsx.clone());
-                                                **expr = Expr::Paren(ParenExpr {
-                                                    span: paren.span,
-                                                    expr: Box::new(Expr::JSXElement(Box::new(wrapped))),
-                                                });
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        Expr::Fn(fn_expr) => {
-                            if let Some(body) = &mut fn_expr.function.body {
-                                self.wrap_jsx_returns(body);
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-                _ => {}
-            }
-        }
-    }
-}
+        // Build: function App(__CP_props) { return ...; }
+        let wrapper_fn = FnExpr {
+            ident: Some(cp_ident("App".into())),
+            function: Box::new(Function {
+                params: vec![Param {
+                    span: DUMMY_SP,
+                    decorators: vec![],
+                    pat: Pat::Ident(BindingIdent {
+                        id: cp_ident("__CP_props".into()),
+                        type_ann: None,
+                    }),
+                }],
+                decorators: vec![],
+                span: DUMMY_SP,
+                body: Some(BlockStmt {
+                    span: DUMMY_SP,
+                    stmts: vec![return_stmt],
+                    #[cfg(feature = "compat_0_87")]
+                    ctxt: swc_core::common::SyntaxContext::empty(),
+                    #[cfg(not(feature = "compat_0_87"))]
+                    ctxt: SyntaxContext::empty(),
+                }),
+                is_generator: false,
+                is_async: false,
+                type_params: None,
+                return_type: None,
+                #[cfg(feature = "compat_0_87")]
+                ctxt: swc_core::common::SyntaxContext::empty(),
+                #[cfg(not(feature = "compat_0_87"))]
+                ctxt: SyntaxContext::empty(),
+            }),
+        };
 
-impl RefreshProviderWrapper {
-    /// Find return statements with JSX and wrap them
-    fn wrap_jsx_returns(&mut self, body: &mut BlockStmt) {
-        for stmt in &mut body.stmts {
-            self.visit_mut_stmt(stmt);
-        }
-    }
-
-    fn visit_mut_stmt(&mut self, stmt: &mut Stmt) {
-        match stmt {
-            Stmt::Return(ret) => {
-                if let Some(arg) = &mut ret.arg {
-                    self.wrap_jsx_expr(arg);
-                }
-            }
-            Stmt::If(if_stmt) => {
-                self.visit_mut_stmt(&mut if_stmt.cons);
-                if let Some(alt) = &mut if_stmt.alt {
-                    self.visit_mut_stmt(alt);
-                }
-            }
-            Stmt::Block(block) => {
-                for s in &mut block.stmts {
-                    self.visit_mut_stmt(s);
-                }
-            }
-            _ => {}
-        }
-    }
-
-    fn wrap_jsx_expr(&mut self, expr: &mut Box<Expr>) {
-        match &mut **expr {
-            Expr::JSXElement(jsx) => {
-                if !Self::is_already_wrapped(jsx) {
-                    let wrapped = Self::wrap_with_refresh_provider(*jsx.clone());
-                    **expr = Expr::JSXElement(Box::new(wrapped));
-                }
-            }
-            Expr::Paren(paren) => {
-                if let Expr::JSXElement(jsx) = &*paren.expr {
-                    if !Self::is_already_wrapped(jsx) {
-                        let wrapped = Self::wrap_with_refresh_provider(*jsx.clone());
-                        paren.expr = Box::new(Expr::JSXElement(Box::new(wrapped)));
-                    }
-                }
-            }
-            Expr::Cond(cond) => {
-                self.wrap_jsx_expr(&mut cond.cons);
-                self.wrap_jsx_expr(&mut cond.alt);
-            }
-            _ => {}
-        }
+        // Build: export default function App(__CP_props) { ... }
+        ModuleItem::ModuleDecl(ModuleDecl::ExportDefaultDecl(ExportDefaultDecl {
+            span,
+            decl: DefaultDecl::Fn(wrapper_fn),
+        }))
     }
 }
 
