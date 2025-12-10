@@ -3923,6 +3923,9 @@ impl VisitMut for RefreshProviderWrapper {
                 })) => {
                     found_default_export = true;
 
+                    // Capture the original function's identifier (if named) to preserve SyntaxContext
+                    let original_ident = fn_expr.ident.clone();
+
                     // Extract the original function as __CP_OriginalApp
                     let original_fn = ModuleItem::Stmt(Stmt::Decl(Decl::Fn(FnDecl {
                         ident: cp_ident("__CP_OriginalApp".into()),
@@ -3934,7 +3937,8 @@ impl VisitMut for RefreshProviderWrapper {
                     // Create wrapper: export default function App(__CP_props) {
                     //   return <__CPRefreshProvider><__CP_OriginalApp {...__CP_props} /></__CPRefreshProvider>;
                     // }
-                    let wrapper = Self::create_wrapper_default_export(span);
+                    // Pass original_ident to preserve SyntaxContext for __CP_stamp references
+                    let wrapper = Self::create_wrapper_default_export(span, original_ident);
                     new_items.push(wrapper);
                 }
 
@@ -3968,14 +3972,17 @@ impl VisitMut for RefreshProviderWrapper {
                             }))));
                             new_items.push(original_decl);
 
-                            // Create wrapper export
-                            let wrapper = Self::create_wrapper_default_export(span);
+                            // Create wrapper export (no original ident for arrow functions)
+                            let wrapper = Self::create_wrapper_default_export(span, None);
                             new_items.push(wrapper);
                         }
 
                         // Anonymous function: export default function(...) { ... }
                         Expr::Fn(fn_expr) => {
                             found_default_export = true;
+
+                            // Capture the original function's identifier (if named) to preserve SyntaxContext
+                            let original_ident = fn_expr.ident.clone();
 
                             // Create: function __CP_OriginalApp(...) { ... }
                             let original_fn = ModuleItem::Stmt(Stmt::Decl(Decl::Fn(FnDecl {
@@ -3985,14 +3992,17 @@ impl VisitMut for RefreshProviderWrapper {
                             })));
                             new_items.push(original_fn);
 
-                            // Create wrapper export
-                            let wrapper = Self::create_wrapper_default_export(span);
+                            // Create wrapper export (pass original_ident to preserve SyntaxContext)
+                            let wrapper = Self::create_wrapper_default_export(span, original_ident);
                             new_items.push(wrapper);
                         }
 
                         // Identifier: export default App (where App is defined elsewhere)
                         Expr::Ident(ident) => {
                             found_default_export = true;
+
+                            // Clone the ident to preserve its SyntaxContext for the wrapper
+                            let original_ident = ident.clone();
 
                             // Create: const __CP_OriginalApp = App;
                             let original_decl = ModuleItem::Stmt(Stmt::Decl(Decl::Var(Box::new(VarDecl {
@@ -4014,8 +4024,8 @@ impl VisitMut for RefreshProviderWrapper {
                             }))));
                             new_items.push(original_decl);
 
-                            // Create wrapper export
-                            let wrapper = Self::create_wrapper_default_export(span);
+                            // Create wrapper export (pass original_ident to preserve SyntaxContext)
+                            let wrapper = Self::create_wrapper_default_export(span, Some(original_ident));
                             new_items.push(wrapper);
                         }
 
@@ -4054,7 +4064,10 @@ impl RefreshProviderWrapper {
     /// export default function App(__CP_props) {
     ///   return <__CPRefreshProvider><__CP_OriginalApp {...__CP_props} /></__CPRefreshProvider>;
     /// }
-    fn create_wrapper_default_export(span: swc_core::common::Span) -> ModuleItem {
+    ///
+    /// If `original_ident` is provided, we reuse its SyntaxContext to ensure that
+    /// references like `__CP_stamp(App, ...)` (added by CodePressTransform) resolve correctly.
+    fn create_wrapper_default_export(span: swc_core::common::Span, original_ident: Option<Ident>) -> ModuleItem {
         // Build: <__CP_OriginalApp {...__CP_props} />
         let original_component = JSXElement {
             span: DUMMY_SP,
@@ -4096,9 +4109,22 @@ impl RefreshProviderWrapper {
             arg: Some(Box::new(Expr::JSXElement(Box::new(wrapped_jsx)))),
         });
 
+        // Use the original identifier's SyntaxContext if available, otherwise create a new one.
+        // This is critical because CodePressTransform adds __CP_stamp(App, ...) referencing
+        // the original App's SyntaxContext. If we create a new context, SWC's hygiene will
+        // rename our wrapper (e.g., to App1), leaving __CP_stamp referencing a non-existent binding.
+        let wrapper_ident = match original_ident {
+            Some(mut ident) => {
+                // Keep the same sym and ctxt, just update the span
+                ident.span = DUMMY_SP;
+                ident
+            }
+            None => cp_ident("App".into()),
+        };
+
         // Build: function App(__CP_props) { return ...; }
         let wrapper_fn = FnExpr {
-            ident: Some(cp_ident("App".into())),
+            ident: Some(wrapper_ident),
             function: Box::new(Function {
                 params: vec![Param {
                     span: DUMMY_SP,
