@@ -4001,9 +4001,6 @@ impl VisitMut for RefreshProviderWrapper {
                         Expr::Ident(ident) => {
                             found_default_export = true;
 
-                            // Clone the ident to preserve its SyntaxContext for the wrapper
-                            let original_ident = ident.clone();
-
                             // Create: const __CP_OriginalApp = App;
                             let original_decl = ModuleItem::Stmt(Stmt::Decl(Decl::Var(Box::new(VarDecl {
                                 span: DUMMY_SP,
@@ -4024,8 +4021,13 @@ impl VisitMut for RefreshProviderWrapper {
                             }))));
                             new_items.push(original_decl);
 
-                            // Create wrapper export (pass original_ident to preserve SyntaxContext)
-                            let wrapper = Self::create_wrapper_default_export(span, Some(original_ident));
+                            // Create wrapper export.
+                            // IMPORTANT: Do NOT pass the original ident here because the original
+                            // `function App` declaration still exists in the module. Passing the
+                            // original ident would create a duplicate binding. The __CP_stamp
+                            // reference to the original App is still valid since the original
+                            // function declaration remains.
+                            let wrapper = Self::create_wrapper_default_export(span, None);
                             new_items.push(wrapper);
                         }
 
