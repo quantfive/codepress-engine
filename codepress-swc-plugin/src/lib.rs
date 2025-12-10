@@ -2122,10 +2122,13 @@ impl CodePressTransform {
 
         // Build the config object: window.__CODEPRESS_CONFIG__ = { repo: "...", branch: "..." }
         // Uses Object.assign to avoid overwriting if somehow multiple modules try to set it
+        // Also injects <meta name="codepress-repo"> and <meta name="codepress-branch"> tags
+        // for content script detection (content scripts run in isolated JS context)
+        let escaped_repo = repo.replace('\\', "\\\\").replace('"', "\\\"");
+        let escaped_branch = branch.replace('\\', "\\\\").replace('"', "\\\"");
         let js = format!(
-            "try{{if(typeof window!=='undefined'){{window.__CODEPRESS_CONFIG__=Object.assign(window.__CODEPRESS_CONFIG__||{{}},{{repo:\"{}\",branch:\"{}\"}});}}}}catch(_){{}}",
-            repo.replace('\\', "\\\\").replace('"', "\\\""),
-            branch.replace('\\', "\\\\").replace('"', "\\\"")
+            "try{{if(typeof window!=='undefined'){{window.__CODEPRESS_CONFIG__=Object.assign(window.__CODEPRESS_CONFIG__||{{}},{{repo:\"{}\",branch:\"{}\"}});}}if(typeof document!=='undefined'&&document.head&&!document.querySelector('meta[name=\"codepress-repo\"]')){{var m=document.createElement('meta');m.name='codepress-repo';m.content='{}';document.head.appendChild(m);var b=document.createElement('meta');b.name='codepress-branch';b.content='{}';document.head.appendChild(b);}}}}catch(_){{}}",
+            escaped_repo, escaped_branch, escaped_repo, escaped_branch
         );
 
         let stmt = ModuleItem::Stmt(Stmt::Expr(ExprStmt {
