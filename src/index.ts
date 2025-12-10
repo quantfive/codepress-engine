@@ -284,15 +284,19 @@ try {
             }
           }
 
-          // Inject repo/branch script (existing code)
+          // Inject repo/branch config into window.__CODEPRESS_CONFIG__ (cleaner than DOM attributes)
           if (!globalAttributesAdded && repoName && state.file.encodedPath) {
+            const escapedRepo = repoName.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+            const escapedBranch = (branch || 'main').replace(/\\/g, '\\\\').replace(/"/g, '\\"');
             const scriptCode = `
-(function() {
-  if (typeof document !== 'undefined' && document.body && !document.body.hasAttribute('${REPO_ATTRIBUTE_NAME}')) {
-    document.body.setAttribute('${REPO_ATTRIBUTE_NAME}', '${repoName}');
-    ${branch ? `document.body.setAttribute('${BRANCH_ATTRIBUTE_NAME}', '${branch}');` : ''}
+try {
+  if (typeof window !== 'undefined') {
+    window.__CODEPRESS_CONFIG__ = Object.assign(window.__CODEPRESS_CONFIG__ || {}, {
+      repo: "${escapedRepo}",
+      branch: "${escapedBranch}"
+    });
   }
-})();
+} catch (_) {}
 `;
 
             const scriptAst = babel.template.ast(scriptCode);
@@ -304,7 +308,7 @@ try {
 
             globalAttributesAdded = true;
             console.log(
-              `\x1b[32m✓ Injected repo/branch + graph in ${path.basename(
+              `\x1b[32m✓ Injected config + graph in ${path.basename(
                 state.file.opts.filename ?? "unknown"
               )}\x1b[0m`
             );

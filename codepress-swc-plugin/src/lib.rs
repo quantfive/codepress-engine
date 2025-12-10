@@ -262,6 +262,8 @@ pub struct CodePressTransform {
     use_js_metadata_map: bool,
     metadata_map: HashMap<String, MetadataEntry>,
     inserted_metadata_map: bool,
+    // Track if config (repo/branch) has been injected to window.__CODEPRESS_CONFIG__
+    inserted_config: bool,
 }
 
 /// Metadata entry for the JS-based map (window.__CODEPRESS_MAP__)
@@ -477,6 +479,7 @@ impl CodePressTransform {
             use_js_metadata_map,
             metadata_map: HashMap::new(),
             inserted_metadata_map: false,
+            inserted_config: false,
         }
     }
 
@@ -937,47 +940,9 @@ impl CodePressTransform {
         })
     }
 
-    fn create_repo_attr(&self) -> Option<JSXAttrOrSpread> {
-        self.repo_name.as_ref().map(|repo| {
-            JSXAttrOrSpread::JSXAttr(JSXAttr {
-                span: DUMMY_SP,
-                name: JSXAttrName::Ident(cp_ident_name("codepress-github-repo-name".into())),
-                value: Some(make_jsx_str_attr_value(repo.clone())),
-            })
-        })
-    }
-
-    fn create_branch_attr(&self) -> Option<JSXAttrOrSpread> {
-        self.branch_name.as_ref().map(|branch| {
-            JSXAttrOrSpread::JSXAttr(JSXAttr {
-                span: DUMMY_SP,
-                name: JSXAttrName::Ident(cp_ident_name("codepress-github-branch".into())),
-                value: Some(make_jsx_str_attr_value(branch.clone())),
-            })
-        })
-    }
-
-    fn has_repo_attribute(&self, attrs: &[JSXAttrOrSpread]) -> bool {
-        attrs.iter().any(|attr| {
-            if let JSXAttrOrSpread::JSXAttr(jsx_attr) = attr {
-                if let JSXAttrName::Ident(ident) = &jsx_attr.name {
-                    return ident.sym.as_ref() == "codepress-github-repo-name";
-                }
-            }
-            false
-        })
-    }
-
-    fn has_branch_attribute(&self, attrs: &[JSXAttrOrSpread]) -> bool {
-        attrs.iter().any(|attr| {
-            if let JSXAttrOrSpread::JSXAttr(jsx_attr) = attr {
-                if let JSXAttrName::Ident(ident) = &jsx_attr.name {
-                    return ident.sym.as_ref() == "codepress-github-branch";
-                }
-            }
-            false
-        })
-    }
+    // NOTE: create_repo_attr, create_branch_attr, has_repo_attribute, has_branch_attribute
+    // were removed - repo/branch info is now injected via window.__CODEPRESS_CONFIG__
+    // in inject_config() instead of as HTML attributes.
 
     // ---------- binding collection & tracing ----------
 
@@ -2138,6 +2103,67 @@ impl CodePressTransform {
         self.inserted_metadata_map = true;
     }
 
+    /// Injects window.__CODEPRESS_CONFIG__ with repo and branch info.
+    /// This stores config in JS instead of as HTML attributes (which pollutes the DOM).
+    /// Only injected once per build (uses static flag to prevent duplicates across modules).
+    fn inject_config(&mut self, m: &mut Module) {
+        // Skip if already injected (either in this module or globally)
+        if self.inserted_config || GLOBAL_ATTRIBUTES_ADDED.load(Ordering::Relaxed) {
+            return;
+        }
+
+        // Only inject if we have repo info
+        let repo = match &self.repo_name {
+            Some(r) => r.clone(),
+            None => return,
+        };
+
+        let branch = self.branch_name.clone().unwrap_or_else(|| "main".to_string());
+
+        // Build the config object: window.__CODEPRESS_CONFIG__ = { repo: "...", branch: "..." }
+        // Uses Object.assign to avoid overwriting if somehow multiple modules try to set it
+        // Also injects <meta name="codepress-repo"> and <meta name="codepress-branch"> tags
+        // for content script detection (content scripts run in isolated JS context)
+        let escaped_repo = repo.replace('\\', "\\\\").replace('"', "\\\"");
+        let escaped_branch = branch.replace('\\', "\\\\").replace('"', "\\\"");
+        let js = format!(
+            "try{{if(typeof window!=='undefined'){{window.__CODEPRESS_CONFIG__=Object.assign(window.__CODEPRESS_CONFIG__||{{}},{{repo:\"{}\",branch:\"{}\"}});}}if(typeof document!=='undefined'&&document.head&&!document.querySelector('meta[name=\"codepress-repo\"]')){{var m=document.createElement('meta');m.name='codepress-repo';m.content='{}';document.head.appendChild(m);var b=document.createElement('meta');b.name='codepress-branch';b.content='{}';document.head.appendChild(b);}}}}catch(_){{}}",
+            escaped_repo, escaped_branch, escaped_repo, escaped_branch
+        );
+
+        let stmt = ModuleItem::Stmt(Stmt::Expr(ExprStmt {
+            span: DUMMY_SP,
+            expr: Box::new(Expr::Call(CallExpr {
+                span: DUMMY_SP,
+                callee: Callee::Expr(Box::new(Expr::New(NewExpr {
+                    span: DUMMY_SP,
+                    callee: Box::new(Expr::Ident(cp_ident("Function".into()))),
+                    args: Some(vec![ExprOrSpread {
+                        spread: None,
+                        expr: Box::new(Expr::Lit(Lit::Str(Str {
+                            span: DUMMY_SP,
+                            value: js.into(),
+                            raw: None,
+                        }))),
+                    }]),
+                    type_args: None,
+                    #[cfg(not(feature = "compat_0_87"))]
+                    ctxt: SyntaxContext::empty(),
+                }))),
+                args: vec![],
+                type_args: None,
+                #[cfg(not(feature = "compat_0_87"))]
+                ctxt: SyntaxContext::empty(),
+            })),
+        }));
+
+        // Place AFTER directive prologue (e.g., "use client"; "use strict")
+        let insert_at = self.directive_insert_index(m);
+        m.body.insert(insert_at, stmt);
+        self.inserted_config = true;
+        GLOBAL_ATTRIBUTES_ADDED.store(true, Ordering::Relaxed);
+    }
+
     /// Injects the CPRefreshProvider at app entry points (when use_js_metadata_map is true).
     /// This enables automatic HMR without users needing to manually add the provider.
     ///
@@ -3240,6 +3266,8 @@ impl VisitMut for CodePressTransform {
         self.inject_graph_stmt(m);
         // Inject metadata map (if using JS-based metadata instead of DOM attributes)
         self.inject_metadata_map(m);
+        // Inject config (repo/branch) into window.__CODEPRESS_CONFIG__ (cleaner than DOM attributes)
+        self.inject_config(m);
     }
     fn visit_mut_import_decl(&mut self, n: &mut ImportDecl) {
         let _ = self.file_from_span(n.span);
@@ -3686,26 +3714,8 @@ impl VisitMut for CodePressTransform {
             }
         }
 
-        // Root repo/branch once
-        if self.repo_name.is_some() && !GLOBAL_ATTRIBUTES_ADDED.load(Ordering::Relaxed) {
-            let element_name = match &node.opening.name {
-                JSXElementName::Ident(ident) => ident.sym.as_ref(),
-                _ => "",
-            };
-            if matches!(element_name, "html" | "body" | "div") {
-                if !self.has_repo_attribute(&node.opening.attrs) {
-                    if let Some(repo_attr) = self.create_repo_attr() {
-                        node.opening.attrs.push(repo_attr);
-                    }
-                }
-                if !self.has_branch_attribute(&node.opening.attrs) {
-                    if let Some(branch_attr) = self.create_branch_attr() {
-                        node.opening.attrs.push(branch_attr);
-                    }
-                }
-                GLOBAL_ATTRIBUTES_ADDED.store(true, Ordering::Relaxed);
-            }
-        }
+        // NOTE: repo/branch info is now injected via window.__CODEPRESS_CONFIG__ in inject_config()
+        // instead of as HTML attributes, to avoid polluting the DOM.
 
         // Host vs custom
         let is_host = matches!(
@@ -3874,16 +3884,215 @@ pub fn process_transform(
 }
 
 // -----------------------------------------------------------------------------
-// Pass 3: Wrap default export JSX with __CPRefreshProvider at entry points
+// Pass 3: Wrap default export component with __CPRefreshProvider at entry points
 // -----------------------------------------------------------------------------
+//
+// Instead of trying to find and wrap return statements (which has many edge cases),
+// we wrap the entire default export component from the outside:
+//
+// Before:
+//   export default function App({ Component, pageProps }) {
+//     const getLayout = Component.getLayout ?? ((page) => page);
+//     return getLayout(<Component {...pageProps} />);
+//   }
+//
+// After:
+//   function __CP_OriginalApp({ Component, pageProps }) {
+//     const getLayout = Component.getLayout ?? ((page) => page);
+//     return getLayout(<Component {...pageProps} />);
+//   }
+//   export default function App(__CP_props) {
+//     return <__CPRefreshProvider><__CP_OriginalApp {...__CP_props} /></__CPRefreshProvider>;
+//   }
+//
+// This approach:
+// - Doesn't need to understand component internals
+// - Works with getLayout, fragments, conditionals, etc.
+// - Has no edge cases around return statement patterns
 
 struct RefreshProviderWrapper;
 
+impl VisitMut for RefreshProviderWrapper {
+    fn visit_mut_module(&mut self, m: &mut Module) {
+        let mut new_items: Vec<ModuleItem> = Vec::new();
+        let mut found_default_export = false;
+
+        for item in m.body.drain(..) {
+            match item {
+                // export default function App(...) { ... }
+                ModuleItem::ModuleDecl(ModuleDecl::ExportDefaultDecl(ExportDefaultDecl {
+                    span,
+                    decl: DefaultDecl::Fn(fn_expr),
+                })) => {
+                    found_default_export = true;
+
+                    // Capture the original function's identifier (if named) to preserve SyntaxContext
+                    let original_ident = fn_expr.ident.clone();
+
+                    // Extract the original function as __CP_OriginalApp
+                    let original_fn = ModuleItem::Stmt(Stmt::Decl(Decl::Fn(FnDecl {
+                        ident: cp_ident("__CP_OriginalApp".into()),
+                        declare: false,
+                        function: fn_expr.function,
+                    })));
+                    new_items.push(original_fn);
+
+                    // Create wrapper: export default function App(__CP_props) {
+                    //   return <__CPRefreshProvider><__CP_OriginalApp {...__CP_props} /></__CPRefreshProvider>;
+                    // }
+                    // Pass original_ident to preserve SyntaxContext for __CP_stamp references
+                    let wrapper = Self::create_wrapper_default_export(span, original_ident);
+                    new_items.push(wrapper);
+                }
+
+                // export default () => { ... } or export default function(...) { ... }
+                ModuleItem::ModuleDecl(ModuleDecl::ExportDefaultExpr(ExportDefaultExpr {
+                    span,
+                    expr,
+                })) => {
+                    match *expr {
+                        // Arrow function: export default () => { ... }
+                        Expr::Arrow(arrow) => {
+                            found_default_export = true;
+
+                            // Create: const __CP_OriginalApp = () => { ... }
+                            let original_decl = ModuleItem::Stmt(Stmt::Decl(Decl::Var(Box::new(VarDecl {
+                                span: DUMMY_SP,
+                                kind: VarDeclKind::Const,
+                                declare: false,
+                                decls: vec![VarDeclarator {
+                                    span: DUMMY_SP,
+                                    name: Pat::Ident(BindingIdent {
+                                        id: cp_ident("__CP_OriginalApp".into()),
+                                        type_ann: None,
+                                    }),
+                                    init: Some(Box::new(Expr::Arrow(arrow))),
+                                    definite: false,
+                                }],
+                                // ctxt field only exists in newer SWC versions (not compat_0_87)
+                                #[cfg(not(feature = "compat_0_87"))]
+                                ctxt: SyntaxContext::empty(),
+                            }))));
+                            new_items.push(original_decl);
+
+                            // Create wrapper export (no original ident for arrow functions)
+                            let wrapper = Self::create_wrapper_default_export(span, None);
+                            new_items.push(wrapper);
+                        }
+
+                        // Anonymous function: export default function(...) { ... }
+                        Expr::Fn(fn_expr) => {
+                            found_default_export = true;
+
+                            // Capture the original function's identifier (if named) to preserve SyntaxContext
+                            let original_ident = fn_expr.ident.clone();
+
+                            // Create: function __CP_OriginalApp(...) { ... }
+                            let original_fn = ModuleItem::Stmt(Stmt::Decl(Decl::Fn(FnDecl {
+                                ident: cp_ident("__CP_OriginalApp".into()),
+                                declare: false,
+                                function: fn_expr.function,
+                            })));
+                            new_items.push(original_fn);
+
+                            // Create wrapper export (pass original_ident to preserve SyntaxContext)
+                            let wrapper = Self::create_wrapper_default_export(span, original_ident);
+                            new_items.push(wrapper);
+                        }
+
+                        // Identifier: export default App (where App is defined elsewhere)
+                        Expr::Ident(ident) => {
+                            found_default_export = true;
+
+                            // Create: const __CP_OriginalApp = App;
+                            let original_decl = ModuleItem::Stmt(Stmt::Decl(Decl::Var(Box::new(VarDecl {
+                                span: DUMMY_SP,
+                                kind: VarDeclKind::Const,
+                                declare: false,
+                                decls: vec![VarDeclarator {
+                                    span: DUMMY_SP,
+                                    name: Pat::Ident(BindingIdent {
+                                        id: cp_ident("__CP_OriginalApp".into()),
+                                        type_ann: None,
+                                    }),
+                                    init: Some(Box::new(Expr::Ident(ident))),
+                                    definite: false,
+                                }],
+                                // ctxt field only exists in newer SWC versions (not compat_0_87)
+                                #[cfg(not(feature = "compat_0_87"))]
+                                ctxt: SyntaxContext::empty(),
+                            }))));
+                            new_items.push(original_decl);
+
+                            // Create wrapper export.
+                            // IMPORTANT: Do NOT pass the original ident here because the original
+                            // `function App` declaration still exists in the module. Passing the
+                            // original ident would create a duplicate binding. The __CP_stamp
+                            // reference to the original App is still valid since the original
+                            // function declaration remains.
+                            let wrapper = Self::create_wrapper_default_export(span, None);
+                            new_items.push(wrapper);
+                        }
+
+                        // Other expressions - keep as-is (shouldn't happen for _app)
+                        other => {
+                            new_items.push(ModuleItem::ModuleDecl(ModuleDecl::ExportDefaultExpr(
+                                ExportDefaultExpr {
+                                    span,
+                                    expr: Box::new(other),
+                                },
+                            )));
+                        }
+                    }
+                }
+
+                // Keep all other items as-is
+                other => {
+                    new_items.push(other);
+                }
+            }
+        }
+
+        // Only proceed if we found and wrapped a default export
+        if !found_default_export {
+            // Restore items if nothing was wrapped
+            m.body = new_items;
+            return;
+        }
+
+        m.body = new_items;
+    }
+}
+
 impl RefreshProviderWrapper {
-    /// Wrap a JSX element with <__CPRefreshProvider>...</__CPRefreshProvider>
-    fn wrap_with_refresh_provider(jsx: JSXElement) -> JSXElement {
+    /// Create the wrapper default export:
+    /// export default function App(__CP_props) {
+    ///   return <__CPRefreshProvider><__CP_OriginalApp {...__CP_props} /></__CPRefreshProvider>;
+    /// }
+    ///
+    /// If `original_ident` is provided, we reuse its SyntaxContext to ensure that
+    /// references like `__CP_stamp(App, ...)` (added by CodePressTransform) resolve correctly.
+    fn create_wrapper_default_export(span: swc_core::common::Span, original_ident: Option<Ident>) -> ModuleItem {
+        // Build: <__CP_OriginalApp {...__CP_props} />
+        let original_component = JSXElement {
+            span: DUMMY_SP,
+            opening: JSXOpeningElement {
+                name: JSXElementName::Ident(cp_ident("__CP_OriginalApp".into()).into()),
+                attrs: vec![JSXAttrOrSpread::SpreadElement(SpreadElement {
+                    dot3_token: DUMMY_SP,
+                    expr: Box::new(Expr::Ident(cp_ident("__CP_props".into()))),
+                })],
+                self_closing: true,
+                type_args: None,
+                span: DUMMY_SP,
+            },
+            children: vec![],
+            closing: None,
+        };
+
+        // Build: <__CPRefreshProvider><__CP_OriginalApp {...__CP_props} /></__CPRefreshProvider>
         let provider_name = JSXElementName::Ident(cp_ident("__CPRefreshProvider".into()).into());
-        JSXElement {
+        let wrapped_jsx = JSXElement {
             span: DUMMY_SP,
             opening: JSXOpeningElement {
                 name: provider_name.clone(),
@@ -3892,136 +4101,68 @@ impl RefreshProviderWrapper {
                 type_args: None,
                 span: DUMMY_SP,
             },
-            children: vec![JSXElementChild::JSXElement(Box::new(jsx))],
+            children: vec![JSXElementChild::JSXElement(Box::new(original_component))],
             closing: Some(JSXClosingElement {
                 span: DUMMY_SP,
                 name: provider_name,
             }),
-        }
-    }
+        };
 
-    /// Check if this JSX element is already wrapped with __CPRefreshProvider
-    fn is_already_wrapped(jsx: &JSXElement) -> bool {
-        match &jsx.opening.name {
-            JSXElementName::Ident(id) => id.sym.as_ref() == "__CPRefreshProvider",
-            _ => false,
-        }
-    }
-}
+        // Build: return <__CPRefreshProvider>...</__CPRefreshProvider>;
+        let return_stmt = Stmt::Return(ReturnStmt {
+            span: DUMMY_SP,
+            arg: Some(Box::new(Expr::JSXElement(Box::new(wrapped_jsx)))),
+        });
 
-impl VisitMut for RefreshProviderWrapper {
-    fn visit_mut_module(&mut self, m: &mut Module) {
-        // Find the default export and wrap its JSX return
-        for item in &mut m.body {
-            match item {
-                // export default function X() { ... }
-                ModuleItem::ModuleDecl(ModuleDecl::ExportDefaultDecl(ExportDefaultDecl {
-                    decl: DefaultDecl::Fn(fn_expr),
-                    ..
-                })) => {
-                    if let Some(body) = &mut fn_expr.function.body {
-                        self.wrap_jsx_returns(body);
-                    }
-                }
-                // export default () => ...
-                ModuleItem::ModuleDecl(ModuleDecl::ExportDefaultExpr(ExportDefaultExpr {
-                    expr,
-                    ..
-                })) => {
-                    match &mut **expr {
-                        Expr::Arrow(arrow) => {
-                            match &mut *arrow.body {
-                                BlockStmtOrExpr::BlockStmt(body) => {
-                                    self.wrap_jsx_returns(body);
-                                }
-                                BlockStmtOrExpr::Expr(expr) => {
-                                    // Arrow with implicit return: () => <JSX/>
-                                    if let Expr::JSXElement(jsx) = &**expr {
-                                        if !Self::is_already_wrapped(jsx) {
-                                            let wrapped = Self::wrap_with_refresh_provider(*jsx.clone());
-                                            **expr = Expr::JSXElement(Box::new(wrapped));
-                                        }
-                                    }
-                                    if let Expr::Paren(paren) = &**expr {
-                                        if let Expr::JSXElement(jsx) = &*paren.expr {
-                                            if !Self::is_already_wrapped(jsx) {
-                                                let wrapped = Self::wrap_with_refresh_provider(*jsx.clone());
-                                                **expr = Expr::Paren(ParenExpr {
-                                                    span: paren.span,
-                                                    expr: Box::new(Expr::JSXElement(Box::new(wrapped))),
-                                                });
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        Expr::Fn(fn_expr) => {
-                            if let Some(body) = &mut fn_expr.function.body {
-                                self.wrap_jsx_returns(body);
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-                _ => {}
+        // Use the original identifier's SyntaxContext if available, otherwise create a new one.
+        // This is critical because CodePressTransform adds __CP_stamp(App, ...) referencing
+        // the original App's SyntaxContext. If we create a new context, SWC's hygiene will
+        // rename our wrapper (e.g., to App1), leaving __CP_stamp referencing a non-existent binding.
+        let wrapper_ident = match original_ident {
+            Some(mut ident) => {
+                // Keep the same sym and ctxt, just update the span
+                ident.span = DUMMY_SP;
+                ident
             }
-        }
-    }
-}
+            None => cp_ident("App".into()),
+        };
 
-impl RefreshProviderWrapper {
-    /// Find return statements with JSX and wrap them
-    fn wrap_jsx_returns(&mut self, body: &mut BlockStmt) {
-        for stmt in &mut body.stmts {
-            self.visit_mut_stmt(stmt);
-        }
-    }
+        // Build: function App(__CP_props) { return ...; }
+        let wrapper_fn = FnExpr {
+            ident: Some(wrapper_ident),
+            function: Box::new(Function {
+                params: vec![Param {
+                    span: DUMMY_SP,
+                    decorators: vec![],
+                    pat: Pat::Ident(BindingIdent {
+                        id: cp_ident("__CP_props".into()),
+                        type_ann: None,
+                    }),
+                }],
+                decorators: vec![],
+                span: DUMMY_SP,
+                body: Some(BlockStmt {
+                    span: DUMMY_SP,
+                    stmts: vec![return_stmt],
+                    // ctxt field only exists in newer SWC versions (not compat_0_87)
+                    #[cfg(not(feature = "compat_0_87"))]
+                    ctxt: SyntaxContext::empty(),
+                }),
+                is_generator: false,
+                is_async: false,
+                type_params: None,
+                return_type: None,
+                // ctxt field only exists in newer SWC versions (not compat_0_87)
+                #[cfg(not(feature = "compat_0_87"))]
+                ctxt: SyntaxContext::empty(),
+            }),
+        };
 
-    fn visit_mut_stmt(&mut self, stmt: &mut Stmt) {
-        match stmt {
-            Stmt::Return(ret) => {
-                if let Some(arg) = &mut ret.arg {
-                    self.wrap_jsx_expr(arg);
-                }
-            }
-            Stmt::If(if_stmt) => {
-                self.visit_mut_stmt(&mut if_stmt.cons);
-                if let Some(alt) = &mut if_stmt.alt {
-                    self.visit_mut_stmt(alt);
-                }
-            }
-            Stmt::Block(block) => {
-                for s in &mut block.stmts {
-                    self.visit_mut_stmt(s);
-                }
-            }
-            _ => {}
-        }
-    }
-
-    fn wrap_jsx_expr(&mut self, expr: &mut Box<Expr>) {
-        match &mut **expr {
-            Expr::JSXElement(jsx) => {
-                if !Self::is_already_wrapped(jsx) {
-                    let wrapped = Self::wrap_with_refresh_provider(*jsx.clone());
-                    **expr = Expr::JSXElement(Box::new(wrapped));
-                }
-            }
-            Expr::Paren(paren) => {
-                if let Expr::JSXElement(jsx) = &*paren.expr {
-                    if !Self::is_already_wrapped(jsx) {
-                        let wrapped = Self::wrap_with_refresh_provider(*jsx.clone());
-                        paren.expr = Box::new(Expr::JSXElement(Box::new(wrapped)));
-                    }
-                }
-            }
-            Expr::Cond(cond) => {
-                self.wrap_jsx_expr(&mut cond.cons);
-                self.wrap_jsx_expr(&mut cond.alt);
-            }
-            _ => {}
-        }
+        // Build: export default function App(__CP_props) { ... }
+        ModuleItem::ModuleDecl(ModuleDecl::ExportDefaultDecl(ExportDefaultDecl {
+            span,
+            decl: DefaultDecl::Fn(wrapper_fn),
+        }))
     }
 }
 
