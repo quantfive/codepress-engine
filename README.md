@@ -75,11 +75,10 @@ The SWC plugin auto-detects your repository and branch from `git` and common CI 
 
 Optional options for `createSWCPlugin` (all are optional; omit to use auto-detection):
 
-| Option            | Type   | Default                         | Purpose                                            |
-| ----------------- | ------ | ------------------------------- | -------------------------------------------------- |
-| `repo_name`       | string | auto-detected from `git remote` | Force repository id in `owner/repo` form           |
-| `branch_name`     | string | auto-detected from env/`git`    | Force branch name                                  |
-| `organization_id` | string | none                            | Your CodePress organization ID (from app settings) |
+| Option        | Type   | Default                         | Purpose                                  |
+| ------------- | ------ | ------------------------------- | ---------------------------------------- |
+| `repo_name`   | string | auto-detected from `git remote` | Force repository id in `owner/repo` form |
+| `branch_name` | string | auto-detected from env/`git`    | Force branch name                        |
 
 ---
 
@@ -96,11 +95,10 @@ Each JSX element receives a `codepress-data-fp` attribute whose value encodes th
 
 Optional options for the Babel plugin (all are optional; omit to use auto-detection):
 
-| Option            | Type   | Default                         | Purpose                                            |
-| ----------------- | ------ | ------------------------------- | -------------------------------------------------- |
-| `repo_name`       | string | auto-detected from `git remote` | Force repository id in `owner/repo` form           |
-| `branch_name`     | string | auto-detected from env/`git`    | Force branch name                                  |
-| `organization_id` | string | none                            | Your CodePress organization ID (from app settings) |
+| Option        | Type   | Default                         | Purpose                                  |
+| ------------- | ------ | ------------------------------- | ---------------------------------------- |
+| `repo_name`   | string | auto-detected from `git remote` | Force repository id in `owner/repo` form |
+| `branch_name` | string | auto-detected from env/`git`    | Force branch name                        |
 
 Entry points exposed by the package:
 

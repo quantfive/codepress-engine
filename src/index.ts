@@ -163,7 +163,6 @@ export default function codePressPlugin(
 
   const repoName = options.repo_name || currentRepoName;
   const branch = options.branch_name || currentBranch;
-  const organizationId = options.organization_id;
 
   // Skip component configuration (like SWC plugin)
   const skipComponents = new Set(
@@ -285,18 +284,16 @@ try {
             }
           }
 
-          // Inject repo/branch/org config into window.__CODEPRESS_CONFIG__ (cleaner than DOM attributes)
+          // Inject repo/branch config into window.__CODEPRESS_CONFIG__ (cleaner than DOM attributes)
           if (!globalAttributesAdded && repoName && state.file.encodedPath) {
             const escapedRepo = repoName.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
             const escapedBranch = (branch || 'main').replace(/\\/g, '\\\\').replace(/"/g, '\\"');
-            const escapedOrgId = organizationId ? organizationId.replace(/\\/g, '\\\\').replace(/"/g, '\\"') : '';
-            const orgIdLine = escapedOrgId ? `\n      organizationId: "${escapedOrgId}",` : '';
             const scriptCode = `
 try {
   if (typeof window !== 'undefined') {
     window.__CODEPRESS_CONFIG__ = Object.assign(window.__CODEPRESS_CONFIG__ || {}, {
       repo: "${escapedRepo}",
-      branch: "${escapedBranch}"${orgIdLine}
+      branch: "${escapedBranch}"
     });
   }
 } catch (_) {}

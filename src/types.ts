@@ -1,12 +1,6 @@
 export interface CodePressPluginOptions {
   repo_name?: string;
   branch_name?: string;
-  /**
-   * Your CodePress organization ID (UUID).
-   * Found in your organization settings at app.codepress.dev.
-   * Required for multi-org setups.
-   */
-  organization_id?: string;
   skip_components?: string[];
   skip_member_roots?: string[];
   /**
