@@ -2122,16 +2122,15 @@ impl CodePressTransform {
 
         // Build the config object: window.__CODEPRESS_CONFIG__ = { repo: "...", branch: "..." }
         // Uses Object.assign to avoid overwriting if somehow multiple modules try to set it
-        // Also injects <meta name="codepress-repo"> and <meta name="codepress-branch"> tags
-        // for content script detection (content scripts run in isolated JS context)
+        // Also injects a hidden div with data attributes for content script detection
+        // (content scripts run in isolated JS context and can't access window.__CODEPRESS_CONFIG__)
         let escaped_repo = repo.replace('\\', "\\\\").replace('"', "\\\"");
         let escaped_branch = branch.replace('\\', "\\\\").replace('"', "\\\"");
-        // Use setTimeout(0) to defer meta tag injection - this avoids conflicts with React's
-        // Portal components (like @react-oauth/google) which also manipulate document.head.
-        // Synchronous DOM manipulation during module init can cause "removeChild" errors when
-        // React tries to clean up Portals and finds nodes it didn't create.
+        // Inject into document.body (not head) to avoid conflicts with React Portal-based libraries
+        // (like @react-oauth/google) which manipulate head and cause "removeChild" errors.
+        // Using setTimeout(0) to defer DOM manipulation until after React's render cycle.
         let js = format!(
-            "try{{if(typeof window!=='undefined'){{window.__CODEPRESS_CONFIG__=Object.assign(window.__CODEPRESS_CONFIG__||{{}},{{repo:\"{}\",branch:\"{}\"}});}}setTimeout(function(){{try{{if(typeof document!=='undefined'&&document.head&&!document.querySelector('meta[name=\"codepress-repo\"]')){{var m=document.createElement('meta');m.name='codepress-repo';m.content='{}';document.head.appendChild(m);var b=document.createElement('meta');b.name='codepress-branch';b.content='{}';document.head.appendChild(b);}}}}catch(_){{}}}},0);}}catch(_){{}}",
+            "try{{if(typeof window!=='undefined'){{window.__CODEPRESS_CONFIG__=Object.assign(window.__CODEPRESS_CONFIG__||{{}},{{repo:\"{}\",branch:\"{}\"}});}}setTimeout(function(){{try{{if(typeof document!=='undefined'&&document.body&&!document.getElementById('__codepress_config')){{var d=document.createElement('div');d.id='__codepress_config';d.style.display='none';d.setAttribute('data-codepress-repo','{}');d.setAttribute('data-codepress-branch','{}');document.body.appendChild(d);}}}}catch(_){{}}}},0);}}catch(_){{}}",
             escaped_repo, escaped_branch, escaped_repo, escaped_branch
         );
 
