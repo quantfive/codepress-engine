@@ -197,6 +197,25 @@ export default function codePressPlugin(
     return t.isJSXMemberExpression(name) || t.isJSXNamespacedName(name);
   }
 
+  function isReactFragment(name: Babel.types.JSXIdentifier | Babel.types.JSXMemberExpression | Babel.types.JSXNamespacedName): boolean {
+    // Check for <Fragment>
+    if (t.isJSXIdentifier(name) && name.name === "Fragment") {
+      return true;
+    }
+    // Check for <React.Fragment>
+    if (t.isJSXMemberExpression(name)) {
+      if (
+        t.isJSXIdentifier(name.object) &&
+        name.object.name === "React" &&
+        t.isJSXIdentifier(name.property) &&
+        name.property.name === "Fragment"
+      ) {
+        return true;
+      }
+    }
+    return false;
+  }
+
   return {
     name: "babel-plugin-codepress-html",
     visitor: {
@@ -322,6 +341,11 @@ try {
         }
 
         const { node } = nodePath;
+
+        // Skip React.Fragment - it can only accept key and children props
+        if (isReactFragment(node.name)) {
+          return;
+        }
         const startLine = node.loc?.start.line ?? 0;
         const parentLoc = nodePath.parent.loc;
         const endLine = parentLoc?.end.line ?? startLine;
