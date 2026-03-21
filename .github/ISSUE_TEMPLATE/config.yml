@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: CodePress Website
+    url: https://codepress.dev
+    about: Visit the CodePress website for documentation and guides
+  - name: npm Package
+    url: https://www.npmjs.com/package/@codepress/codepress-engine
+    about: View the package on npm
